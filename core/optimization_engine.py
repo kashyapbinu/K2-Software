@@ -812,6 +812,33 @@ def _random_individual(design_vars: list, rng: np.random.Generator) -> dict:
     return ind
 
 
+def _valid_individual(design_vars: list, enabled_dvs: list,
+                      rng: np.random.Generator, tries: int = 10) -> dict:
+    """Random individual that passes physical validation, resampling up to
+    *tries* times. Returns the last attempt if none validate (bounds still
+    clamped, sim is robust to it)."""
+    ind = _random_individual(design_vars, rng)
+    for _ in range(tries):
+        valid, _ = validate_candidate(ind, enabled_dvs)
+        if valid:
+            break
+        ind = _random_individual(design_vars, rng)
+    return ind
+
+
+def _valid_vector(pop_vec: np.ndarray, idx: int, enabled_dvs: list,
+                  all_dvs: list, lo: np.ndarray, hi: np.ndarray,
+                  rng: np.random.Generator, tries: int = 10) -> None:
+    """Resample row *idx* of *pop_vec* in place until it validates (or tries
+    exhausted). Used by DE/PSO whose populations are numpy vectors."""
+    for _ in range(tries):
+        d = _vec_to_dict(pop_vec[idx], enabled_dvs, all_dvs)
+        valid, _ = validate_candidate(d, enabled_dvs)
+        if valid:
+            return
+        pop_vec[idx] = rng.uniform(lo, hi)
+
+
 def _sbx_crossover(p1: dict, p2: dict, design_vars: list,
                     eta: float, rng: np.random.Generator) -> tuple:
     """Simulated Binary Crossover for continuous variables."""
@@ -990,13 +1017,8 @@ def _run_genetic_algorithm(config: OptimizationConfig,
     executor = _make_executor(config)
     try:
         # Initialise population — build all candidates, evaluate as one batch
-        init_dicts = []
-        for _ in range(pop_size):
-            ind = _random_individual(config.design_variables, rng)
-            valid, _ = validate_candidate(ind, dvs)
-            if not valid:
-                ind = _random_individual(config.design_variables, rng)
-            init_dicts.append(ind)
+        init_dicts = [_valid_individual(config.design_variables, dvs, rng)
+                      for _ in range(pop_size)]
         init_seeds = [i * 13 for i in range(pop_size)]
 
         done = [0]
@@ -1137,7 +1159,7 @@ def _run_nsga2(config: OptimizationConfig,
     executor = _make_executor(config)
     try:
         # Initialise — batch-evaluate the random population
-        init_dicts = [_random_individual(config.design_variables, rng)
+        init_dicts = [_valid_individual(config.design_variables, dvs, rng)
                       for _ in range(pop_size)]
         init_seeds = [i * 17 for i in range(pop_size)]
         population = _parallel_eval(executor, base_config, init_dicts, config,
@@ -1228,7 +1250,14 @@ def _run_nsga2(config: OptimizationConfig,
         fronts = _fast_non_dominated_sort(population, config.objectives)
         pareto = [population[i] for i in fronts[0]] if fronts else []
 
-        best = max(population, key=lambda c: c.fitness) if population else CandidateDesign()
+        # "Best" single design must come from the non-dominated front — a high
+        # scalar fitness elsewhere can still be Pareto-dominated.
+        if pareto:
+            best = max(pareto, key=lambda c: c.fitness)
+        elif population:
+            best = max(population, key=lambda c: c.fitness)
+        else:
+            best = CandidateDesign()
 
         return OptimizationResult(
             best_design=best,
@@ -1266,6 +1295,8 @@ def _run_differential_evolution(config: OptimizationConfig,
     try:
         # Initialise — batch-evaluate random population
         pop_vec = rng.uniform(lo, hi, size=(pop_size, len(dvs)))
+        for i in range(pop_size):
+            _valid_vector(pop_vec, i, dvs, config.design_variables, lo, hi, rng)
         init_dicts = [_vec_to_dict(pop_vec[i], dvs, config.design_variables)
                       for i in range(pop_size)]
         init_seeds = [i * 19 for i in range(pop_size)]
@@ -1375,6 +1406,8 @@ def _run_particle_swarm(config: OptimizationConfig,
     try:
         # Initialise
         positions = rng.uniform(lo, hi, size=(pop_size, n))
+        for i in range(pop_size):
+            _valid_vector(positions, i, dvs, config.design_variables, lo, hi, rng)
         velocities = rng.uniform(-v_max, v_max, size=(pop_size, n))
         p_best_pos = positions.copy()
         p_best_fit = np.full(pop_size, -np.inf)

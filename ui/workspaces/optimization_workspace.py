@@ -326,6 +326,13 @@ class OptimizationWorkspace(QWidget):
 
         self.chk_surrogate = QCheckBox("Enable Surrogate Acceleration")
         self.chk_surrogate.setStyleSheet(_CHK)
+        # NOTE: surrogate acceleration is not yet wired into the optimization
+        # engine (config flag is read but no algorithm consumes it). Disabled
+        # to avoid implying a speedup that does not happen. Re-enable once
+        # _run_* algorithms use core.surrogate_model.
+        self.chk_surrogate.setEnabled(False)
+        self.chk_surrogate.setChecked(False)
+        self.chk_surrogate.setToolTip("Not yet implemented — full simulation is always used.")
         vl.addWidget(self.chk_surrogate)
 
         f = QFormLayout()
@@ -335,16 +342,19 @@ class OptimizationWorkspace(QWidget):
             "Random Forest", "Gradient Boosting", "Neural Network",
             "Kriging (GP)", "RBF Interpolation", "Polynomial",
         ])
+        self.combo_surrogate.setEnabled(False)
         f.addRow("Model:", self.combo_surrogate)
 
         self.spin_surrogate_samples = QSpinBox()
         self.spin_surrogate_samples.setRange(50, 2000)
         self.spin_surrogate_samples.setValue(200)
+        self.spin_surrogate_samples.setEnabled(False)
         f.addRow("Initial Samples:", self.spin_surrogate_samples)
 
         self.chk_active_learning = QCheckBox("Active Learning")
         self.chk_active_learning.setStyleSheet(_CHK)
         self.chk_active_learning.setChecked(True)
+        self.chk_active_learning.setEnabled(False)
         f.addRow("", self.chk_active_learning)
 
         vl.addLayout(f)
@@ -1077,6 +1087,12 @@ class OptimizationWorkspace(QWidget):
         mode_btn = self._mode_group.checkedButton()
         mode_val = mode_btn.property("mode_value") if mode_btn else "standard"
 
+        # Auto mission mode: a non-zero target apogee in Standard mode is
+        # otherwise silently ignored (Standard maximizes mean apogee). Treat
+        # it as a Mission Target so the optimizer actually hits the target.
+        if mode_val == "standard" and self.spin_target_apogee.value() > 0:
+            mode_val = "mission"
+
         # Surrogate
         surr_map = {
             0: "random_forest", 1: "gradient_boosting", 2: "neural_network",
@@ -1593,6 +1609,24 @@ class OptimizationWorkspace(QWidget):
     #  DOE & SENSITIVITY (run via thread)
     # ═════════════════════════════════════════════════════════════════════════
 
+    def _make_swept_config(self, base_config, enabled_vars, values):
+        """Apply swept variable values onto a base config using the SAME mapping
+        the optimizer uses (fin_span→fin_height, motor designation lookup, and
+        derived avg/max thrust from total impulse). Direct setattr would leave
+        motor_avg_thrust / fin_height stale, so propulsion and fin sweeps would
+        have no effect on the simulation."""
+        from core.optimization_engine import build_candidate_config, DesignVariable
+        dv_list = [
+            DesignVariable(
+                name=k, display_name=k, category="",
+                min_val=mn, max_val=mx, current_val=mn, enabled=True,
+                var_type="integer" if k == "fin_count" else "continuous",
+            )
+            for (k, mn, mx) in enabled_vars
+        ]
+        variables = {ev[0]: val for ev, val in zip(enabled_vars, values)}
+        return build_candidate_config(base_config, variables, dv_list)
+
     def _on_run_doe(self):
         """Run Design of Experiments analysis."""
         self.progress_label.setText("Running DOE analysis…")
@@ -1636,11 +1670,9 @@ class OptimizationWorkspace(QWidget):
             base_config = BatchSimConfig.from_rocket_state(self.engine.state)
             responses = []
             for i in range(len(dm)):
-                cfg = copy.deepcopy(base_config)
-                for j, (key, vmin, vmax) in enumerate(enabled_vars):
-                    val = vmin + dm[i, j] * (vmax - vmin)
-                    if hasattr(cfg, key):
-                        setattr(cfg, key, val)
+                values = [vmin + dm[i, j] * (vmax - vmin)
+                          for j, (key, vmin, vmax) in enumerate(enabled_vars)]
+                cfg = self._make_swept_config(base_config, enabled_vars, values)
                 try:
                     res = run_batch_simulation(cfg, seed=42 + i)
                     responses.append(res.apogee)
@@ -1774,12 +1806,11 @@ class OptimizationWorkspace(QWidget):
             X_data = np.zeros((n_samples, n_vars))
             y_data = np.zeros(n_samples)
             for i in range(n_samples):
-                cfg = copy.deepcopy(base_config)
-                for j, (key, vmin, vmax) in enumerate(enabled_vars):
-                    val = vmin + dm[i, j] * (vmax - vmin)
+                values = [vmin + dm[i, j] * (vmax - vmin)
+                          for j, (key, vmin, vmax) in enumerate(enabled_vars)]
+                for j, val in enumerate(values):
                     X_data[i, j] = val
-                    if hasattr(cfg, key):
-                        setattr(cfg, key, val)
+                cfg = self._make_swept_config(base_config, enabled_vars, values)
                 try:
                     res = run_batch_simulation(cfg, seed=42 + i)
                     y_data[i] = res.apogee
@@ -1882,17 +1913,14 @@ class OptimizationWorkspace(QWidget):
                     delta = 0.1
                     effects = []
                     for i in range(min(n_samples - 1, 50)):
-                        cfg1 = copy.deepcopy(base_config)
-                        cfg2 = copy.deepcopy(base_config)
                         key, vmin, vmax = enabled_vars[j]
                         v1 = X_data[i, j]
                         v2 = min(v1 + delta * (vmax - vmin), vmax)
-                        for k, (kk, _, _) in enumerate(enabled_vars):
-                            if hasattr(cfg1, kk):
-                                setattr(cfg1, kk, X_data[i, k])
-                                setattr(cfg2, kk, X_data[i, k])
-                        if hasattr(cfg2, key):
-                            setattr(cfg2, key, v2)
+                        base_vals = [X_data[i, k] for k in range(n_vars)]
+                        cfg1 = self._make_swept_config(base_config, enabled_vars, base_vals)
+                        pert_vals = list(base_vals)
+                        pert_vals[j] = v2
+                        cfg2 = self._make_swept_config(base_config, enabled_vars, pert_vals)
                         try:
                             r1 = run_batch_simulation(cfg1, seed=1000 + i).apogee
                             r2 = run_batch_simulation(cfg2, seed=1000 + i).apogee

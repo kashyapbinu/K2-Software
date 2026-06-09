@@ -354,7 +354,10 @@ def run_batch_simulation(
     prev_dt = config.sim_dt
     initial_prop_mass = config.propellant_mass
     rail_exit_detected = False
-    _last_force_accel = 0.0  # Force-based acceleration (F/m, excluding gravity)
+    # Peak force-based acceleration (F/m, excluding gravity). Tracked as a
+    # running max across ALL derivative evaluations — RK4 calls _derivatives
+    # 4× per step, so capturing only the last stage missed the true peak.
+    _peak_force_accel = 0.0
 
     result = BatchSimResult()
 
@@ -499,12 +502,15 @@ def run_batch_simulation(
         ay = max(-MAX_ACCEL, min(MAX_ACCEL, ay))
         az = max(-MAX_ACCEL, min(MAX_ACCEL, az))
 
-        # Store force-based acceleration for tracking (excludes gravity)
-        nonlocal _last_force_accel
+        # Track peak force-based acceleration (excludes gravity). Running max
+        # over every stage evaluation, not just the last RK4 stage.
+        nonlocal _peak_force_accel
         force_ax = (tx + drag_x + normal_x) / mass
         force_ay = (ty + drag_y + normal_y) / mass
         force_az = (tz + drag_z + normal_z) / mass
-        _last_force_accel = math.sqrt(force_ax**2 + force_ay**2 + force_az**2)
+        fa = math.sqrt(force_ax**2 + force_ay**2 + force_az**2)
+        if fa > _peak_force_accel:
+            _peak_force_accel = fa
 
         # Rotational dynamics
         if on_rail:
@@ -615,8 +621,8 @@ def run_batch_simulation(
 
             thrust_now = _get_thrust(t, thrust_curve)
 
-            # Force-based acceleration (F/m, excludes gravity weight)
-            cur_accel = _last_force_accel
+            # Force-based acceleration (F/m, excludes gravity weight) — peak so far
+            cur_accel = _peak_force_accel
 
             # ── Track maxima ──────────────────────────────────────
             if cur_z > result.apogee:
