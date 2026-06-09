@@ -45,3 +45,12 @@ python main.py
 - Large run artifacts (`cfd_run/`, `fem_run/`), bundled SU2 binaries (`bin/`),
   and the vendored upstream `scratch/openMotor_repo/` are excluded from version
   control — see `.gitignore`.
+
+## License
+
+Licensed under the **GNU General Public License v3.0** — see [`LICENSE`](LICENSE).
+
+The aerodynamics and drag-table modules (`physics/aerodynamics.py`,
+`physics/drag_tables.py`) are ported from [OpenRocket](https://openrocket.info)
+(GPL-3.0, © Sampo Niskanen and contributors); this project is therefore a
+derivative work and is distributed under the same GPL-3.0 terms.
