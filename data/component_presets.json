@@ -1,0 +1,55 @@
+{
+  "nose_cones": [
+    {"manufacturer": "LOC Precision", "part": "NC-2.6", "name": "LOC 2.6\" Ogive", "shape": "Ogive", "length": 0.152, "diameter": 0.066, "wall_thickness": 0.002, "material": "Fiberglass"},
+    {"manufacturer": "LOC Precision", "part": "NC-3.0", "name": "LOC 3.0\" Ogive", "shape": "Ogive", "length": 0.203, "diameter": 0.076, "wall_thickness": 0.002, "material": "Fiberglass"},
+    {"manufacturer": "LOC Precision", "part": "NC-3.9", "name": "LOC 3.9\" Ogive", "shape": "Ogive", "length": 0.254, "diameter": 0.098, "wall_thickness": 0.002, "material": "Fiberglass"},
+    {"manufacturer": "Estes", "part": "BNC-20B", "name": "Estes BT-20 Ogive", "shape": "Ogive", "length": 0.070, "diameter": 0.018, "wall_thickness": 0.001, "material": "ABS Plastic"},
+    {"manufacturer": "Estes", "part": "BNC-50K", "name": "Estes BT-50 Conical", "shape": "Conical", "length": 0.089, "diameter": 0.024, "wall_thickness": 0.001, "material": "ABS Plastic"},
+    {"manufacturer": "Estes", "part": "BNC-55AC", "name": "Estes BT-55 Ogive", "shape": "Ogive", "length": 0.127, "diameter": 0.033, "wall_thickness": 0.001, "material": "ABS Plastic"},
+    {"manufacturer": "Madcow", "part": "NC-2.6FG", "name": "Madcow 2.6\" Fiberglass", "shape": "Ogive", "length": 0.178, "diameter": 0.066, "wall_thickness": 0.002, "material": "Fiberglass"},
+    {"manufacturer": "Madcow", "part": "NC-4.0FG", "name": "Madcow 4.0\" Fiberglass", "shape": "Ogive", "length": 0.305, "diameter": 0.102, "wall_thickness": 0.003, "material": "Fiberglass"},
+    {"manufacturer": "Custom", "part": "CUSTOM", "name": "Custom Nose Cone", "shape": "Ogive", "length": 0.15, "diameter": 0.066, "wall_thickness": 0.002, "material": "Fiberglass"}
+  ],
+  "body_tubes": [
+    {"manufacturer": "LOC Precision", "part": "BT-2.6-18", "name": "LOC 2.6\" x 18\"", "outer_diameter": 0.066, "inner_diameter": 0.063, "length": 0.457, "material": "Kraft Phenolic"},
+    {"manufacturer": "LOC Precision", "part": "BT-2.6-34", "name": "LOC 2.6\" x 34\"", "outer_diameter": 0.066, "inner_diameter": 0.063, "length": 0.864, "material": "Kraft Phenolic"},
+    {"manufacturer": "LOC Precision", "part": "BT-3.0-18", "name": "LOC 3.0\" x 18\"", "outer_diameter": 0.076, "inner_diameter": 0.073, "length": 0.457, "material": "Kraft Phenolic"},
+    {"manufacturer": "Estes", "part": "BT-20", "name": "Estes BT-20 (18mm)", "outer_diameter": 0.0184, "inner_diameter": 0.018, "length": 0.457, "material": "Cardboard"},
+    {"manufacturer": "Estes", "part": "BT-50", "name": "Estes BT-50 (24mm)", "outer_diameter": 0.0246, "inner_diameter": 0.024, "length": 0.457, "material": "Cardboard"},
+    {"manufacturer": "Estes", "part": "BT-55", "name": "Estes BT-55 (33mm)", "outer_diameter": 0.0334, "inner_diameter": 0.033, "length": 0.457, "material": "Cardboard"},
+    {"manufacturer": "Estes", "part": "BT-60", "name": "Estes BT-60 (41mm)", "outer_diameter": 0.0414, "inner_diameter": 0.041, "length": 0.457, "material": "Cardboard"},
+    {"manufacturer": "Estes", "part": "BT-80", "name": "Estes BT-80 (66mm)", "outer_diameter": 0.066, "inner_diameter": 0.063, "length": 0.457, "material": "Cardboard"},
+    {"manufacturer": "Blue Tube", "part": "BT2.6-48", "name": "Blue Tube 2.6\" x 48\"", "outer_diameter": 0.066, "inner_diameter": 0.063, "length": 1.219, "material": "Kraft Phenolic"},
+    {"manufacturer": "Custom", "part": "CUSTOM", "name": "Custom Body Tube", "outer_diameter": 0.066, "inner_diameter": 0.063, "length": 0.30, "material": "Kraft Phenolic"}
+  ],
+  "transitions": [
+    {"manufacturer": "LOC Precision", "part": "TC-2.6-3.0", "name": "LOC 2.6\" to 3.0\"", "fore_diameter": 0.076, "aft_diameter": 0.066, "length": 0.06, "shape": "Conical", "material": "Fiberglass"},
+    {"manufacturer": "Custom", "part": "CUSTOM", "name": "Custom Transition", "fore_diameter": 0.066, "aft_diameter": 0.054, "length": 0.06, "shape": "Conical", "material": "Fiberglass"}
+  ],
+  "fin_sets": [
+    {"manufacturer": "Standard", "part": "FIN-3-SM", "name": "3-Fin Small", "fin_count": 3, "root_chord": 0.08, "tip_chord": 0.03, "height": 0.04, "sweep_angle": 30, "thickness": 0.003, "material": "Balsa Wood"},
+    {"manufacturer": "Standard", "part": "FIN-4-MD", "name": "4-Fin Medium", "fin_count": 4, "root_chord": 0.10, "tip_chord": 0.05, "height": 0.05, "sweep_angle": 30, "thickness": 0.003, "material": "Plywood (Birch)"},
+    {"manufacturer": "Standard", "part": "FIN-3-LG", "name": "3-Fin Large", "fin_count": 3, "root_chord": 0.15, "tip_chord": 0.07, "height": 0.08, "sweep_angle": 25, "thickness": 0.005, "material": "Fiberglass"},
+    {"manufacturer": "Custom", "part": "CUSTOM", "name": "Custom Fin Set", "fin_count": 4, "root_chord": 0.10, "tip_chord": 0.05, "height": 0.05, "sweep_angle": 30, "thickness": 0.003, "material": "Plywood (Birch)"}
+  ],
+  "inner_tubes": [
+    {"manufacturer": "LOC Precision", "part": "MMT-29", "name": "29mm Motor Mount", "outer_diameter": 0.032, "inner_diameter": 0.029, "length": 0.15, "is_motor_mount": true, "material": "Kraft Phenolic"},
+    {"manufacturer": "LOC Precision", "part": "MMT-38", "name": "38mm Motor Mount", "outer_diameter": 0.041, "inner_diameter": 0.038, "length": 0.20, "is_motor_mount": true, "material": "Kraft Phenolic"},
+    {"manufacturer": "LOC Precision", "part": "MMT-54", "name": "54mm Motor Mount", "outer_diameter": 0.057, "inner_diameter": 0.054, "length": 0.25, "is_motor_mount": true, "material": "Kraft Phenolic"},
+    {"manufacturer": "Estes", "part": "MMT-18", "name": "18mm Motor Mount", "outer_diameter": 0.0195, "inner_diameter": 0.018, "length": 0.07, "is_motor_mount": true, "material": "Cardboard"},
+    {"manufacturer": "Estes", "part": "MMT-24", "name": "24mm Motor Mount", "outer_diameter": 0.025, "inner_diameter": 0.024, "length": 0.07, "is_motor_mount": true, "material": "Cardboard"},
+    {"manufacturer": "Custom", "part": "CUSTOM", "name": "Custom Inner Tube", "outer_diameter": 0.029, "inner_diameter": 0.027, "length": 0.15, "is_motor_mount": true, "material": "Kraft Phenolic"}
+  ],
+  "centering_rings": [
+    {"manufacturer": "LOC Precision", "part": "CR-29-66", "name": "29mm to 66mm", "outer_diameter": 0.063, "inner_diameter": 0.032, "thickness": 0.003, "material": "Plywood (Birch)"},
+    {"manufacturer": "LOC Precision", "part": "CR-38-76", "name": "38mm to 76mm", "outer_diameter": 0.073, "inner_diameter": 0.041, "thickness": 0.003, "material": "Plywood (Birch)"},
+    {"manufacturer": "Custom", "part": "CUSTOM", "name": "Custom Centering Ring", "outer_diameter": 0.063, "inner_diameter": 0.029, "thickness": 0.003, "material": "Plywood (Birch)"}
+  ],
+  "parachutes": [
+    {"manufacturer": "Top Flight", "part": "PAR-18", "name": "18\" Parachute", "diameter": 0.457, "cd": 1.5, "line_count": 6, "line_length": 0.457, "packed_length": 0.04, "material": "Ripstop Nylon"},
+    {"manufacturer": "Top Flight", "part": "PAR-24", "name": "24\" Parachute", "diameter": 0.610, "cd": 1.5, "line_count": 6, "line_length": 0.610, "packed_length": 0.05, "material": "Ripstop Nylon"},
+    {"manufacturer": "Top Flight", "part": "PAR-36", "name": "36\" Parachute", "diameter": 0.914, "cd": 1.5, "line_count": 8, "line_length": 0.914, "packed_length": 0.07, "material": "Ripstop Nylon"},
+    {"manufacturer": "Top Flight", "part": "PAR-48", "name": "48\" Parachute", "diameter": 1.219, "cd": 1.5, "line_count": 8, "line_length": 1.219, "packed_length": 0.09, "material": "Ripstop Nylon"},
+    {"manufacturer": "Custom", "part": "CUSTOM", "name": "Custom Parachute", "diameter": 0.60, "cd": 1.5, "line_count": 6, "line_length": 0.45, "packed_length": 0.05, "material": "Ripstop Nylon"}
+  ]
+}

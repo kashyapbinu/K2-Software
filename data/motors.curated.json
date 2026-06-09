@@ -1,0 +1,122 @@
+[
+    {
+        "designation": "C6",
+        "manufacturer": "Estes",
+        "total_impulse": 8.8,
+        "avg_thrust": 4.7,
+        "max_thrust": 14.1,
+        "burn_time": 1.85,
+        "propellant_mass": 0.0124,
+        "total_mass": 0.024,
+        "diameter": 0.018,
+        "length": 0.070
+    },
+    {
+        "designation": "D12",
+        "manufacturer": "Estes",
+        "total_impulse": 16.8,
+        "avg_thrust": 11.8,
+        "max_thrust": 29.7,
+        "burn_time": 1.6,
+        "propellant_mass": 0.0211,
+        "total_mass": 0.044,
+        "diameter": 0.024,
+        "length": 0.070
+    },
+    {
+        "designation": "E12",
+        "manufacturer": "Estes",
+        "total_impulse": 30.0,
+        "avg_thrust": 12.0,
+        "max_thrust": 34.0,
+        "burn_time": 2.5,
+        "propellant_mass": 0.030,
+        "total_mass": 0.057,
+        "diameter": 0.024,
+        "length": 0.095
+    },
+    {
+        "designation": "F15",
+        "manufacturer": "Estes",
+        "total_impulse": 60.0,
+        "avg_thrust": 15.0,
+        "max_thrust": 42.0,
+        "burn_time": 4.0,
+        "propellant_mass": 0.045,
+        "total_mass": 0.093,
+        "diameter": 0.029,
+        "length": 0.095
+    },
+    {
+        "designation": "G80",
+        "manufacturer": "Aerotech",
+        "total_impulse": 120.0,
+        "avg_thrust": 80.0,
+        "max_thrust": 112.0,
+        "burn_time": 1.5,
+        "propellant_mass": 0.062,
+        "total_mass": 0.126,
+        "diameter": 0.029,
+        "length": 0.124
+    },
+    {
+        "designation": "H128",
+        "manufacturer": "Aerotech",
+        "total_impulse": 219.0,
+        "avg_thrust": 128.0,
+        "max_thrust": 195.0,
+        "burn_time": 1.71,
+        "propellant_mass": 0.094,
+        "total_mass": 0.194,
+        "diameter": 0.029,
+        "length": 0.228
+    },
+    {
+        "designation": "I200",
+        "manufacturer": "Aerotech",
+        "total_impulse": 365.0,
+        "avg_thrust": 200.0,
+        "max_thrust": 290.0,
+        "burn_time": 1.83,
+        "propellant_mass": 0.167,
+        "total_mass": 0.340,
+        "diameter": 0.038,
+        "length": 0.305
+    },
+    {
+        "designation": "J350",
+        "manufacturer": "Aerotech",
+        "total_impulse": 660.0,
+        "avg_thrust": 350.0,
+        "max_thrust": 460.0,
+        "burn_time": 1.89,
+        "propellant_mass": 0.312,
+        "total_mass": 0.580,
+        "diameter": 0.054,
+        "length": 0.326
+    },
+    {
+        "designation": "K550",
+        "manufacturer": "Aerotech",
+        "total_impulse": 1182.0,
+        "avg_thrust": 550.0,
+        "max_thrust": 750.0,
+        "burn_time": 2.15,
+        "propellant_mass": 0.530,
+        "total_mass": 0.960,
+        "diameter": 0.054,
+        "length": 0.475
+    },
+    {
+        "designation": "L1120",
+        "manufacturer": "Aerotech",
+        "total_impulse": 3045.0,
+        "avg_thrust": 1120.0,
+        "max_thrust": 1690.0,
+        "burn_time": 2.72,
+        "propellant_mass": 1.347,
+        "total_mass": 2.508,
+        "diameter": 0.075,
+        "length": 0.625
+    }
+]

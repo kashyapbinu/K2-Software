@@ -1,0 +1,39 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ── Logs ──
+*.log
+crash.log
+k2_crash.log*
+
+# ── Run artifacts / large outputs (255MB+, regenerated) ──
+cfd_run/
+fem_run/
+fem_test_run/
+*.msh
+*.vtu
+*.vtk
+*.cgns
+*.dat
+
+# ── Bundled third-party binaries (69MB SU2 build) ──
+bin/
+
+# ── Vendored upstream repo (keep out of history) ──
+scratch/openMotor_repo/
+
+# ── Editor / tooling ──
+.claude/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# ── Scratch experiments ──
+scratch/
