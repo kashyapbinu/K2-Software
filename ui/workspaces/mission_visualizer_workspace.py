@@ -52,6 +52,12 @@ try:
 except Exception:
     _OVERLAYS_OK = False
 
+try:
+    from visualization.mission.rocket_mesh import build_rocket_mesh
+    _ROCKET_MESH_OK = True
+except Exception:
+    _ROCKET_MESH_OK = False
+
 logger = logging.getLogger("K2.MissionViz")
 
 _PHASE_COLORS = {
@@ -814,7 +820,11 @@ class MissionVisualizerWorkspace(QWidget):
 
     def _ensure_rocket_actor(self):
         """Build the rocket mesh ONCE (real size at origin). Pose set per frame
-        via cheap VTK actor transforms — no geometry regen each frame."""
+        via cheap VTK actor transforms — no geometry regen each frame.
+
+        Uses the actual design geometry (nose shape / tubes / transitions /
+        fins / nozzle, vertex-colored) when an assembly exists on the engine;
+        falls back to the generic cylinder+cone otherwise."""
         if not self._plotter:
             return
         key = (round(self._rocket_length, 4), round(self._rocket_diameter, 4))
@@ -826,6 +836,30 @@ class MissionVisualizerWorkspace(QWidget):
             except Exception:
                 pass
             self._actor_rocket = None
+
+        self._rocket_is_assembly = False
+        asm = getattr(self.engine, "_assembly", None)
+        if _ROCKET_MESH_OK and asm is not None:
+            try:
+                built = build_rocket_mesh(asm)
+            except Exception as exc:
+                logger.debug(f"assembly rocket mesh failed: {exc}")
+                built = None
+            if built is not None:
+                mesh, total_len, _ = built
+                try:
+                    self._actor_rocket = self._plotter.add_mesh(
+                        mesh, scalars="rgb", rgb=True, name="rocket",
+                        smooth_shading=True, ambient=0.35, diffuse=0.65,
+                        show_scalar_bar=False,
+                    )
+                    self._rocket_dims_key = key
+                    self._rocket_is_assembly = True
+                    self._rocket_color = None
+                    return
+                except Exception as exc:
+                    logger.debug(f"assembly rocket actor error: {exc}")
+                    self._actor_rocket = None
 
         L = max(0.5, self._rocket_length)
         D = max(0.05, self._rocket_diameter)
@@ -863,10 +897,13 @@ class MissionVisualizerWorkspace(QWidget):
             a.SetScale(self._VIS_SCALE)
             a.SetOrientation(0.0, tilt_deg, yaw_deg)
             a.SetPosition(x, y, z)
-            color = (0.973, 0.318, 0.286) if self._failure_active else (0.345, 0.651, 1.0)
-            if color != getattr(self, "_rocket_color", None):
-                a.GetProperty().SetColor(*color)
-                self._rocket_color = color
+            # Vertex-colored assembly mesh ignores the actor property color
+            # (failure is still indicated by the red failure sphere).
+            if not getattr(self, "_rocket_is_assembly", False):
+                color = (0.973, 0.318, 0.286) if self._failure_active else (0.345, 0.651, 1.0)
+                if color != getattr(self, "_rocket_color", None):
+                    a.GetProperty().SetColor(*color)
+                    self._rocket_color = color
         except Exception as exc:
             logger.debug(f"Rocket transform error: {exc}")
 
