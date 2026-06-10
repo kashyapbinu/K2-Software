@@ -152,6 +152,9 @@ class CalculiXSolver(FEMSolver):
             f.write(f"*INITIAL CONDITIONS, TYPE=TEMPERATURE\nNALL, 293.15\n")
             f.write(f"*TEMPERATURE\nNALL, {293.15 + lc.delta_T:.2f}\n")
 
+        # Mapped CFD surface-pressure field (per-element *DLOAD P)
+        self._write_cfd_pressure(f, cfg)
+
         # Output requests
         f.write("*NODE FILE\nU\n")
         f.write("*EL FILE\nS, E\n")
@@ -222,6 +225,104 @@ class CalculiXSolver(FEMSolver):
         f.write(f"*TEMPERATURE\nNALL, {lc.wall_temp_K:.2f}\n")
         f.write("*NODE FILE\nNT\n")
         f.write("*END STEP\n")
+
+    # ── CFD surface-pressure mapping ──────────────────────────────────────────
+
+    def _build_fem_stations(self):
+        """Parse the structural mesh into per-element stations for pressure
+        mapping: ``(elem_id, axial, area_m2, outward_axial_normal)``.
+
+        The body axis is Z in the mesh, but ``pressure_mapping``'s IDW metric
+        treats the *second* tuple slot as the axis ('x'), so the axial (z)
+        coordinate is placed there. Returns ``[]`` if the mesh is unavailable.
+        """
+        import numpy as np
+        mesh = getattr(self, "_mesh_path", None)
+        if not mesh or not mesh.is_file():
+            return []
+        nodes, elements = {}, []
+        in_nodes = in_elems = False
+        for line in mesh.read_text(encoding="ascii", errors="replace").splitlines():
+            s = line.strip()
+            if s.startswith("*NODE"):
+                in_nodes, in_elems = True, False; continue
+            if s.startswith("*ELEMENT"):
+                in_elems, in_nodes = True, False; continue
+            if s.startswith("*"):
+                in_nodes = in_elems = False; continue
+            parts = [p for p in s.split(",") if p.strip() != ""]
+            if in_nodes and len(parts) >= 4:
+                nodes[int(parts[0])] = (float(parts[1]), float(parts[2]), float(parts[3]))
+            elif in_elems and len(parts) >= 5:
+                elements.append((int(parts[0]), [int(p) for p in parts[1:5]]))
+        if not nodes or not elements:
+            return []
+        stations = []
+        for eid, en in elements:
+            try:
+                p = [np.asarray(nodes[n], dtype=float) for n in en]
+            except KeyError:
+                continue
+            # Newell normal (magnitude = 2·area) + centroid
+            nrm = np.zeros(3)
+            for i in range(len(p)):
+                a, b = p[i], p[(i + 1) % len(p)]
+                nrm[0] += (a[1] - b[1]) * (a[2] + b[2])
+                nrm[1] += (a[2] - b[2]) * (a[0] + b[0])
+                nrm[2] += (a[0] - b[0]) * (a[1] + b[1])
+            mag = float(np.linalg.norm(nrm))
+            area = 0.5 * mag
+            centroid = sum(p) / len(p)
+            if mag > 1e-15:
+                unit = nrm / mag
+                # Outward = away from the Z body axis (radial in x,y)
+                if float(unit[0] * centroid[0] + unit[1] * centroid[1]) < 0.0:
+                    unit = -unit
+                n_axial = float(unit[2])
+            else:
+                n_axial = 0.0
+            stations.append((eid, float(centroid[2]), area, n_axial))
+        return stations
+
+    def _write_cfd_pressure(self, f, cfg: FEMConfig):
+        """Map a CFD surface-pressure field onto the mesh and emit per-element
+        ``*DLOAD ... P`` cards. No-op when no VTK is configured or parsing
+        yields nothing — the solve falls back to lumped/analytic loads.
+        """
+        vtk = getattr(cfg, "cfd_surface_vtk", None)
+        if not vtk:
+            return
+        from pathlib import Path
+        vtk = Path(vtk)
+        if not vtk.is_file():
+            logger.warning("CFD surface VTK not found: %s — skipping pressure map", vtk)
+            return
+        try:
+            from structures.pressure_mapping import (
+                _parse_vtu_points_and_pressure, map_pressures_idw,
+                generate_dload_cards)
+            cfd_pts, cfd_pres = _parse_vtu_points_and_pressure(vtk)
+            if not cfd_pts or not cfd_pres:
+                logger.warning("CFD VTK has no usable pressure data — skipping map")
+                return
+            # Remap body axis (z) into the x slot to match the IDW metric.
+            cfd_pts = [(z, x, y) for (x, y, z) in cfd_pts]
+            stations = self._build_fem_stations()
+            if not stations:
+                logger.warning("No FEM stations built — skipping CFD pressure map")
+                return
+            result = map_pressures_idw(cfd_pts, cfd_pres, stations)
+            if not result.element_pressures:
+                logger.warning("CFD pressure map produced no element loads")
+                return
+            f.write("**\n** Mapped CFD surface pressure (IDW)\n")
+            f.write(generate_dload_cards(result))
+            self._cfd_mapping = result
+            ps = [p for _, p in result.element_pressures]
+            logger.info("CFD pressure mapped onto %d elements (%.0f..%.0f Pa)",
+                        result.num_fem_elements, min(ps), max(ps))
+        except Exception as exc:
+            logger.error("CFD pressure mapping failed: %s", exc)
 
     # ── Run ──────────────────────────────────────────────────────────────────
 

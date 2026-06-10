@@ -266,9 +266,13 @@ def build_wind_tunnel_mesh(
     tun_len    = rocket["length"] * domain_length_scale
     tun_radius = body_r * max(domain_radius_scale, 20.0)
 
-    # Safety: clear any stale Gmsh session
+    # Safety: clear any stale Gmsh session. Guard with isInitialized() — calling
+    # finalize() on a fresh session makes Gmsh's C++ logger print
+    # "Error : Gmsh has not been initialized" before raising (the exception is
+    # swallowed, but the stderr line still leaks).
     try:
-        gmsh.finalize()
+        if gmsh.isInitialized():
+            gmsh.finalize()
     except Exception:
         pass
 
@@ -327,9 +331,14 @@ def _build_mesh(
     )
     rocket_parts.append((3, nose_tag))
 
-    # Body tube: from x=nose_L to x=total_L
-    body_tag = occ.addCylinder(nose_L, 0, 0, body_L, 0, 0, body_r)
-    rocket_parts.append((3, body_tag))
+    # Body tube: from x=nose_L to x=total_L. Skip a degenerate (≈0-length) body
+    # so a nose-only / pure-cone geometry meshes instead of crashing in
+    # addCylinder ("Cannot build cylinder of zero height").
+    if body_L > 1e-6:
+        body_tag = occ.addCylinder(nose_L, 0, 0, body_L, 0, 0, body_r)
+        rocket_parts.append((3, body_tag))
+    else:
+        logger.info("Body length ≈ 0 — building nose-only (cone) geometry.")
 
     # Fins at the aft end
     fin_parts = _add_fins(occ, rocket, total_L)
