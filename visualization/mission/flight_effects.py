@@ -390,19 +390,37 @@ class EventFlags:
         self._visible = True
         self._names = []   # actor name suffixes added this flight
 
+    _POLE_H = 130.0     # flag pole height (scene meters)
+    _POLE_R = 2.5       # pole radius
+
     def add(self, key, label, color, xyz):
-        """Drop a marker sphere + label at the event position."""
+        """Plant a flag marker (pole + pennant) + label at the event position."""
         if not _PV_OK or self._p is None or key in self._names:
             return
         x, y, z = xyz
+        h, r = self._POLE_H, self._POLE_R
         try:
-            marker = pv.Sphere(radius=22.0, center=(x, y, z),
-                               theta_resolution=12, phi_resolution=12)
+            # Pole rises from the trajectory point; pennant flies at the top
+            pole = pv.Cylinder(center=(x, y, z + h / 2), direction=(0, 0, 1),
+                               radius=r, height=h, resolution=10)
+            # Two perpendicular pennants so the flag reads from any view angle
+            pennant_x = pv.Triangle([
+                [x, y, z + h],                    # top of pole
+                [x + h * 0.45, y, z + h * 0.86],  # tip, flying outward
+                [x, y, z + h * 0.72],             # bottom attach
+            ])
+            pennant_y = pv.Triangle([
+                [x, y, z + h],
+                [x, y + h * 0.45, z + h * 0.86],
+                [x, y, z + h * 0.72],
+            ])
+            marker = pole.merge(pennant_x).merge(pennant_y)
             a = self._p.add_mesh(marker, color=color, name=f"flag_{key}",
-                                 opacity=0.85, smooth_shading=True)
+                                 opacity=0.95, smooth_shading=True,
+                                 culling=False)
             a.SetVisibility(self._visible)
             la = self._p.add_point_labels(
-                np.array([(x, y, z)], dtype=float), [f"  {label}"],
+                np.array([(x, y, z + h * 1.12)], dtype=float), [f"  {label}"],
                 name=f"flag_lbl_{key}", font_size=11, text_color=color,
                 shape=None, point_size=0, always_visible=True)
             try:
