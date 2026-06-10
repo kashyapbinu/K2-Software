@@ -143,7 +143,7 @@ class DynamicsWorkspace(QWidget):
         self.btn_aero = QPushButton("💨  Aeroelastic"); self.btn_aero.setStyleSheet(_BTN_S)
         self.btn_aero.clicked.connect(self._run_aeroelastic); lay.addWidget(self.btn_aero)
         self.btn_modal = QPushButton("〰  Mode Shapes"); self.btn_modal.setStyleSheet(_BTN_S)
-        self.btn_modal.clicked.connect(self._run_modal); lay.addWidget(self.btn_modal)
+        self.btn_modal.clicked.connect(lambda: self._run_modal()); lay.addWidget(self.btn_modal)
 
         self._progress = QProgressBar(); self._progress.setRange(0,0); self._progress.setVisible(False)
         self._progress.setFixedHeight(6)
@@ -238,6 +238,7 @@ class DynamicsWorkspace(QWidget):
         el.addWidget(self._env_plot)
         self._tabs.addTab(ew, "🛡 Flight Envelope")
 
+        self._tabs.currentChanged.connect(self._on_tab_changed)
         lay.addWidget(self._tabs, 1)
         self._status = QLabel("Import a rocket design, then run dynamic analysis.")
         self._status.setStyleSheet("color:#8b949e;padding:5px 12px;font-size:11px;"
@@ -422,7 +423,27 @@ class DynamicsWorkspace(QWidget):
         self._thread.errored.connect(self._on_error)
         self._thread.start()
 
-    def _run_modal(self):
+    def _shared_modal_result(self):
+        """Modal result already computed by the Structures workspace (same FEM
+        feature) — reuse it instead of re-running CalculiX."""
+        main = self.window()
+        sws = getattr(main, "structures_ws", None)
+        return getattr(sws, "_modal_result", None) if sws is not None else None
+
+    def _run_modal(self, reuse=True):
+        # Reuse the Structures-workspace modal result when available — no need
+        # to re-run the solver for the identical analysis.
+        if reuse and self._modal_result is None:
+            shared = self._shared_modal_result()
+            if shared is not None:
+                self._modal_result = shared
+                self._render_modal(shared)
+                self._tabs.setCurrentIndex(3)
+                self._update_assessment()
+                self._status.setText("Modal: reusing Structures-workspace result")
+                if getattr(self, "_pending", None):
+                    self._run_next_in_chain()
+                return
         assembly = self._get_assembly()
         if not assembly:
             self._status.setText("No rocket assembly available."); return
@@ -434,12 +455,22 @@ class DynamicsWorkspace(QWidget):
         self._thread.errored.connect(self._on_error)
         self._thread.start()
 
+    def _on_tab_changed(self, idx):
+        # Mode Shapes tab — auto-populate from a shared/own modal result so the
+        # tab is never blank when modal data already exists.
+        if idx == 3 and self._modal_result is None:
+            shared = self._shared_modal_result()
+            if shared is not None:
+                self._modal_result = shared
+                self._render_modal(shared)
+                self._update_assessment()
+
     def _run_all(self):
         """Chain flutter -> aeroelastic -> vibration for a full assessment."""
         assembly = self._get_assembly()
         if not assembly:
             self._status.setText("No rocket assembly available."); return
-        self._pending = ["flutter", "aeroelastic", "vibration"]
+        self._pending = ["flutter", "aeroelastic", "vibration", "modal"]
         self._run_next_in_chain()
 
     def _run_next_in_chain(self):
@@ -448,7 +479,7 @@ class DynamicsWorkspace(QWidget):
             return
         step = self._pending.pop(0)
         {"flutter": self._run_flutter, "aeroelastic": self._run_aeroelastic,
-         "vibration": self._run_vibration}[step]()
+         "vibration": self._run_vibration, "modal": self._run_modal}[step]()
 
     # ===============================================================
     # Result dispatch

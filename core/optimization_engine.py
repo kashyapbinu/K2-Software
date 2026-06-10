@@ -970,6 +970,22 @@ def _fast_non_dominated_sort(pop: list, objectives: list) -> list:
     return [f for f in fronts if f]
 
 
+def _pareto_from_population(population: list, objectives: list, best) -> list:
+    """Non-dominated set of a final population.
+
+    Lets the single-objective drivers (GA / DE / PSO) still produce a real
+    Pareto front whenever >=2 objectives are enabled — otherwise their front
+    is just ``[best]`` and the UI shows the empty-front placeholder. Falls
+    back to ``[best]`` for the genuine single-objective case.
+    """
+    enabled = [o for o in objectives if getattr(o, "enabled", True)]
+    if len(enabled) >= 2 and population:
+        fronts = _fast_non_dominated_sort(population, objectives)
+        if fronts and fronts[0]:
+            return [population[i] for i in fronts[0]]
+    return [best] if best is not None else []
+
+
 def _crowding_distance(pop: list, front: list, objectives: list):
     """Assign crowding distance to individuals in a front."""
     n = len(front)
@@ -1134,7 +1150,7 @@ def _run_genetic_algorithm(config: OptimizationConfig,
 
         return OptimizationResult(
             best_design=best,
-            pareto_front=[best],
+            pareto_front=_pareto_from_population(population, config.objectives, best),
             all_designs=population,
             generation_history=gen_history,
             total_evaluations=total_evals,
@@ -1372,7 +1388,7 @@ def _run_differential_evolution(config: OptimizationConfig,
         best = max(population, key=lambda c: c.fitness)
         return OptimizationResult(
             best_design=best,
-            pareto_front=[best],
+            pareto_front=_pareto_from_population(population, config.objectives, best),
             all_designs=population,
             generation_history=gen_history,
             total_evaluations=total_evals,
@@ -1499,7 +1515,7 @@ def _run_particle_swarm(config: OptimizationConfig,
         best = max(population, key=lambda c: c.fitness)
         return OptimizationResult(
             best_design=best,
-            pareto_front=[best],
+            pareto_front=_pareto_from_population(population, config.objectives, best),
             all_designs=population,
             generation_history=gen_history,
             total_evaluations=total_evals,

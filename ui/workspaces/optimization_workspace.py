@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QRadioButton, QButtonGroup, QSizePolicy,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QThread
 
 logger = logging.getLogger("K2.OptimizationWS")
 
@@ -126,6 +126,151 @@ def _dark_figure(rows=1, cols=1, figsize=(8, 5)):
     for a in (axes.flat if hasattr(axes, "flat") else [axes]):
         _style_ax(a)
     return fig, axes
+
+
+class _DOEWorker(QThread):
+    """Runs the DOE sample sweep off the UI thread.
+
+    Builds the design matrix and evaluates each point with a full batch
+    simulation, then hands ``(dm, responses)`` back for plotting on the main
+    thread. Running this inline froze the GUI for the whole sweep.
+    """
+    finished_ok = pyqtSignal(object, object)   # dm (ndarray), responses (ndarray)
+    failed = pyqtSignal(str)
+
+    def __init__(self, base_config, enabled_vars, method, n_samples, swept_fn):
+        super().__init__()
+        self._base = base_config
+        self._ev = enabled_vars
+        self._method = method
+        self._n = n_samples
+        self._swept = swept_fn
+
+    def run(self):
+        try:
+            from core.batch_simulation import run_batch_simulation
+            n_vars = len(self._ev)
+            if self._method == "Full Factorial":
+                levels = max(2, int(round(self._n ** (1.0 / n_vars))))
+                grids = [np.linspace(0, 1, levels) for _ in range(n_vars)]
+                dm = np.array(np.meshgrid(*grids)).T.reshape(-1, n_vars)[:self._n]
+            else:  # Latin Hypercube / Taguchi
+                from scipy.stats.qmc import LatinHypercube
+                n = min(self._n, 27) if self._method == "Taguchi" else self._n
+                dm = LatinHypercube(d=n_vars, seed=42).random(n=n)
+
+            responses = np.zeros(len(dm))
+            for i in range(len(dm)):
+                values = [vmin + dm[i, j] * (vmax - vmin)
+                          for j, (key, vmin, vmax) in enumerate(self._ev)]
+                cfg = self._swept(self._base, self._ev, values)
+                try:
+                    responses[i] = run_batch_simulation(cfg, seed=42 + i).apogee
+                except Exception:
+                    responses[i] = 0.0
+            self.finished_ok.emit(dm, responses)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class _SensitivityWorker(QThread):
+    """Runs sensitivity analysis (LHS sweep + method-specific sims) off the UI
+    thread. Returns a payload dict the workspace plots on the main thread.
+    Morris screening fires extra paired sims, so all simulation must live
+    here — not in the render path."""
+    finished_ok = pyqtSignal(object)   # payload dict
+    failed = pyqtSignal(str)
+
+    def __init__(self, base_config, enabled_vars, method, n_samples, swept_fn):
+        super().__init__()
+        self._base = base_config
+        self._ev = enabled_vars
+        self._method = method
+        self._n = n_samples
+        self._swept = swept_fn
+
+    def run(self):
+        try:
+            from core.batch_simulation import run_batch_simulation
+            from scipy.stats.qmc import LatinHypercube
+            ev = self._ev
+            n_vars = len(ev)
+            n = self._n
+            dm = LatinHypercube(d=n_vars, seed=42).random(n=n)
+            X = np.zeros((n, n_vars))
+            y = np.zeros(n)
+            for i in range(n):
+                vals = [vmin + dm[i, j] * (vmax - vmin)
+                        for j, (key, vmin, vmax) in enumerate(ev)]
+                for j, v in enumerate(vals):
+                    X[i, j] = v
+                cfg = self._swept(self._base, ev, vals)
+                try:
+                    y[i] = run_batch_simulation(cfg, seed=42 + i).apogee
+                except Exception:
+                    y[i] = 0.0
+
+            out = {"method": self._method, "X": X, "y": y}
+            if self._method == "Sobol Indices":
+                from scipy.stats import pearsonr
+                tv = np.var(y)
+                s1, st = [], []
+                for j in range(n_vars):
+                    bins = np.linspace(X[:, j].min(), X[:, j].max(), 11)
+                    bidx = np.digitize(X[:, j], bins)
+                    cms = [np.mean(y[bidx == b]) for b in range(1, len(bins))
+                           if np.sum(bidx == b) > 0]
+                    s1v = (np.var(cms) / tv) if (cms and tv > 0) else 0
+                    s1.append(min(s1v, 1.0))
+                    try:
+                        r, _ = pearsonr(X[:, j], y)
+                        stv = r ** 2
+                    except Exception:
+                        stv = s1v
+                    st.append(min(max(stv, s1v), 1.0))
+                out["s1"], out["st"] = s1, st
+            elif self._method == "PRCC":
+                from scipy.stats import spearmanr
+                prcc = []
+                for j in range(n_vars):
+                    try:
+                        r, _ = spearmanr(X[:, j], y)
+                        prcc.append(r)
+                    except Exception:
+                        prcc.append(0)
+                out["prcc"] = prcc
+            else:  # Morris Screening — extra paired elementary-effect sims
+                mu_star, sigma_vals = [], []
+                for j in range(n_vars):
+                    key, vmin, vmax = ev[j]
+                    delta = 0.1
+                    effects = []
+                    for i in range(min(n - 1, 50)):
+                        v1 = X[i, j]
+                        v2 = min(v1 + delta * (vmax - vmin), vmax)
+                        base_vals = [X[i, k] for k in range(n_vars)]
+                        cfg1 = self._swept(self._base, ev, base_vals)
+                        pert = list(base_vals)
+                        pert[j] = v2
+                        cfg2 = self._swept(self._base, ev, pert)
+                        try:
+                            r1 = run_batch_simulation(cfg1, seed=1000 + i).apogee
+                            r2 = run_batch_simulation(cfg2, seed=1000 + i).apogee
+                            dx = v2 - v1
+                            if abs(dx) > 1e-12:
+                                effects.append((r2 - r1) / dx)
+                        except Exception:
+                            pass
+                    if effects:
+                        mu_star.append(np.mean(np.abs(effects)))
+                        sigma_vals.append(np.std(effects))
+                    else:
+                        mu_star.append(0)
+                        sigma_vals.append(0)
+                out["mu_star"], out["sigma"] = mu_star, sigma_vals
+            self.finished_ok.emit(out)
+        except Exception as e:
+            self.failed.emit(str(e))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1413,7 +1558,7 @@ class OptimizationWorkspace(QWidget):
         _style_ax(ax, "Pareto Front — Trade-Off Curve", "", "")
 
         if not result.pareto_front or len(result.pareto_front) < 2:
-            ax.text(0.5, 0.5, "Run multi-objective optimization\nto generate Pareto front",
+            ax.text(0.5, 0.5, "Select ≥2 objectives, then run\nto generate a Pareto front",
                     transform=ax.transAxes, ha="center", va="center",
                     color="#484f58", fontsize=13)
             self._canvas_pareto.draw()
@@ -1628,60 +1773,46 @@ class OptimizationWorkspace(QWidget):
         return build_candidate_config(base_config, variables, dv_list)
 
     def _on_run_doe(self):
-        """Run Design of Experiments analysis."""
+        """Launch Design of Experiments analysis on a worker thread."""
+        if getattr(self, "_doe_worker", None) is not None and self._doe_worker.isRunning():
+            return
+        from core.batch_simulation import BatchSimConfig
+
+        enabled_vars = []
+        for key, (chk, smin, smax, cat) in self._var_widgets.items():
+            if chk.isChecked():
+                enabled_vars.append((key, smin.value(), smax.value()))
+        if len(enabled_vars) < 1:
+            QMessageBox.warning(self, "DOE Error", "Enable at least 1 design variable.")
+            return
+
         self.progress_label.setText("Running DOE analysis…")
         self.btn_run_doe.setEnabled(False)
-
         try:
-            from core.doe_engine import latin_hypercube, full_factorial, compute_main_effects
-            from core.batch_simulation import BatchSimConfig, run_batch_simulation
-
-            # Get enabled variables
-            enabled_vars = []
-            for key, (chk, smin, smax, cat) in self._var_widgets.items():
-                if chk.isChecked():
-                    enabled_vars.append((key, smin.value(), smax.value()))
-
-            if len(enabled_vars) < 1:
-                QMessageBox.warning(self, "DOE Error", "Enable at least 1 design variable.")
-                self.btn_run_doe.setEnabled(True)
-                return
-
-            n_samples = self.spin_doe_samples.value()
-            method = self.combo_doe_method.currentText()
-
-            # Build design matrix
-            n_vars = len(enabled_vars)
-            if method == "Latin Hypercube":
-                from scipy.stats.qmc import LatinHypercube
-                sampler = LatinHypercube(d=n_vars, seed=42)
-                dm = sampler.random(n=n_samples)
-            elif method == "Full Factorial":
-                levels = max(2, int(round(n_samples ** (1.0 / n_vars))))
-                grids = [np.linspace(0, 1, levels) for _ in range(n_vars)]
-                mesh = np.array(np.meshgrid(*grids)).T.reshape(-1, n_vars)
-                dm = mesh[:n_samples]
-            else:  # Taguchi
-                from scipy.stats.qmc import LatinHypercube
-                sampler = LatinHypercube(d=n_vars, seed=42)
-                dm = sampler.random(n=min(n_samples, 27))
-
-            # Scale to actual ranges
             base_config = BatchSimConfig.from_rocket_state(self.engine.state)
-            responses = []
-            for i in range(len(dm)):
-                values = [vmin + dm[i, j] * (vmax - vmin)
-                          for j, (key, vmin, vmax) in enumerate(enabled_vars)]
-                cfg = self._make_swept_config(base_config, enabled_vars, values)
-                try:
-                    res = run_batch_simulation(cfg, seed=42 + i)
-                    responses.append(res.apogee)
-                except Exception:
-                    responses.append(0.0)
+            self._doe_worker = _DOEWorker(
+                base_config, enabled_vars, self.combo_doe_method.currentText(),
+                self.spin_doe_samples.value(), self._make_swept_config)
+            self._doe_worker.finished_ok.connect(
+                lambda dm, resp, ev=enabled_vars: self._render_doe(ev, dm, resp))
+            self._doe_worker.failed.connect(self._on_doe_failed)
+            self._doe_worker.start()
+        except Exception as e:
+            self._on_doe_failed(str(e))
 
-            responses = np.array(responses)
+    def _on_doe_failed(self, msg):
+        QMessageBox.warning(self, "DOE Error", f"DOE analysis failed:\n\n{msg}")
+        logger.error(f"DOE failed: {msg}")
+        self.progress_label.setText("DOE failed.")
+        self.btn_run_doe.setEnabled(True)
 
-            # Plot results
+    def _render_doe(self, enabled_vars, dm, responses):
+        """Plot DOE main effects + response surface (runs on the UI thread)."""
+        try:
+            n_vars = len(enabled_vars)
+            n_samples = len(dm)
+            responses = np.asarray(responses)
+
             ax_left, ax_right = self._ax_doe
             ax_left.clear()
             ax_right.clear()
@@ -1773,129 +1904,74 @@ class OptimizationWorkspace(QWidget):
             self.btn_run_doe.setEnabled(True)
 
     def _on_run_sensitivity(self):
-        """Run sensitivity analysis."""
+        """Launch sensitivity analysis on a worker thread."""
+        if getattr(self, "_sens_worker", None) is not None and self._sens_worker.isRunning():
+            return
+        from core.batch_simulation import BatchSimConfig
+
+        enabled_vars = []
+        for key, (chk, smin, smax, cat) in self._var_widgets.items():
+            if chk.isChecked():
+                enabled_vars.append((key, smin.value(), smax.value()))
+        if len(enabled_vars) < 2:
+            QMessageBox.warning(self, "Sensitivity Error",
+                "Enable at least 2 design variables.")
+            return
+
         self.progress_label.setText("Running sensitivity analysis…")
         self.btn_run_sens.setEnabled(False)
-
         try:
-            from core.batch_simulation import BatchSimConfig, run_batch_simulation
-
-            enabled_vars = []
-            for key, (chk, smin, smax, cat) in self._var_widgets.items():
-                if chk.isChecked():
-                    enabled_vars.append((key, smin.value(), smax.value()))
-
-            if len(enabled_vars) < 2:
-                QMessageBox.warning(self, "Sensitivity Error",
-                    "Enable at least 2 design variables.")
-                self.btn_run_sens.setEnabled(True)
-                return
-
-            n_samples = self.spin_sens_samples.value()
-            n_vars = len(enabled_vars)
-            method = self.combo_sens_method.currentText()
-
             base_config = BatchSimConfig.from_rocket_state(self.engine.state)
+            self._sens_worker = _SensitivityWorker(
+                base_config, enabled_vars, self.combo_sens_method.currentText(),
+                self.spin_sens_samples.value(), self._make_swept_config)
+            self._sens_worker.finished_ok.connect(
+                lambda out, ev=enabled_vars: self._render_sensitivity(ev, out))
+            self._sens_worker.failed.connect(self._on_sens_failed)
+            self._sens_worker.start()
+        except Exception as e:
+            self._on_sens_failed(str(e))
 
-            # Generate samples via LHS
-            from scipy.stats.qmc import LatinHypercube
-            sampler = LatinHypercube(d=n_vars, seed=42)
-            dm = sampler.random(n=n_samples)
+    def _on_sens_failed(self, msg):
+        QMessageBox.warning(self, "Sensitivity Error",
+            f"Sensitivity analysis failed:\n\n{msg}")
+        logger.error(f"Sensitivity analysis failed: {msg}")
+        self.progress_label.setText("Sensitivity analysis failed.")
+        self.btn_run_sens.setEnabled(True)
 
-            # Evaluate
-            X_data = np.zeros((n_samples, n_vars))
-            y_data = np.zeros(n_samples)
-            for i in range(n_samples):
-                values = [vmin + dm[i, j] * (vmax - vmin)
-                          for j, (key, vmin, vmax) in enumerate(enabled_vars)]
-                for j, val in enumerate(values):
-                    X_data[i, j] = val
-                cfg = self._make_swept_config(base_config, enabled_vars, values)
-                try:
-                    res = run_batch_simulation(cfg, seed=42 + i)
-                    y_data[i] = res.apogee
-                except Exception:
-                    y_data[i] = 0.0
-
+    def _render_sensitivity(self, enabled_vars, out):
+        """Plot sensitivity results (runs on the UI thread — no simulation)."""
+        try:
+            n_vars = len(enabled_vars)
             var_names = [v[0].replace("_", " ").title() for v in enabled_vars]
+            X_data, y_data, method = out["X"], out["y"], out["method"]
 
             ax_left, ax_right = self._ax_sens
             ax_left.clear()
             ax_right.clear()
 
             if method == "Sobol Indices":
-                # Approximate Sobol using variance decomposition
                 _style_ax(ax_left, "First-Order Sobol Indices (S1)", "", "")
                 _style_ax(ax_right, "Total-Order Sobol Indices (ST)", "", "")
-
-                total_var = np.var(y_data)
-                s1_vals = []
-                st_vals = []
-                for j in range(n_vars):
-                    # First order: Var(E[Y|Xi]) / Var(Y)
-                    bins = np.linspace(X_data[:, j].min(), X_data[:, j].max(), 11)
-                    bin_idx = np.digitize(X_data[:, j], bins)
-                    conditional_means = []
-                    for b in range(1, len(bins)):
-                        mask = bin_idx == b
-                        if np.sum(mask) > 0:
-                            conditional_means.append(np.mean(y_data[mask]))
-                    if conditional_means and total_var > 0:
-                        s1 = np.var(conditional_means) / total_var
-                    else:
-                        s1 = 0
-                    s1_vals.append(min(s1, 1.0))
-
-                    # Total order: 1 - Var(E[Y|X~i]) / Var(Y)
-                    other_dims = [k for k in range(n_vars) if k != j]
-                    if other_dims:
-                        # Group by other dimensions
-                        from scipy.stats import pearsonr
-                        try:
-                            r, _ = pearsonr(X_data[:, j], y_data)
-                            st = r ** 2
-                        except Exception:
-                            st = s1
-                    else:
-                        st = s1
-                    st_vals.append(min(max(st, s1), 1.0))
-
-                colors_s1 = ["#58a6ff"] * n_vars
-                colors_st = ["#bc8cff"] * n_vars
-
-                ax_left.barh(var_names, s1_vals, color=colors_s1, alpha=0.8,
-                             edgecolor="#30363d")
-                ax_right.barh(var_names, st_vals, color=colors_st, alpha=0.8,
-                              edgecolor="#30363d")
+                ax_left.barh(var_names, out["s1"], color=["#58a6ff"] * n_vars,
+                             alpha=0.8, edgecolor="#30363d")
+                ax_right.barh(var_names, out["st"], color=["#bc8cff"] * n_vars,
+                              alpha=0.8, edgecolor="#30363d")
                 ax_left.set_xlim(0, 1)
                 ax_right.set_xlim(0, 1)
 
             elif method == "PRCC":
-                # Partial Rank Correlation
                 _style_ax(ax_left, "PRCC — Tornado Plot", "PRCC", "")
                 _style_ax(ax_right, "Scatter vs Apogee", "", "Apogee (m)")
-
-                from scipy.stats import spearmanr
-                prcc_vals = []
-                for j in range(n_vars):
-                    try:
-                        r, _ = spearmanr(X_data[:, j], y_data)
-                        prcc_vals.append(r)
-                    except Exception:
-                        prcc_vals.append(0)
-
-                # Sort by absolute value
+                prcc_vals = out["prcc"]
                 sorted_idx = np.argsort(np.abs(prcc_vals))
                 sorted_names = [var_names[i] for i in sorted_idx]
                 sorted_vals = [prcc_vals[i] for i in sorted_idx]
-
                 colors = ["#7ee787" if v > 0 else "#f85149" for v in sorted_vals]
                 ax_left.barh(sorted_names, sorted_vals, color=colors, alpha=0.8,
                              edgecolor="#30363d")
                 ax_left.axvline(0, color="#484f58", linewidth=0.5)
                 ax_left.set_xlim(-1, 1)
-
-                # Scatter of most important variable
                 if sorted_idx.size > 0:
                     best_j = sorted_idx[-1]
                     ax_right.scatter(X_data[:, best_j], y_data,
@@ -1905,56 +1981,21 @@ class OptimizationWorkspace(QWidget):
             else:  # Morris Screening
                 _style_ax(ax_left, "Morris μ* (Importance)", "μ*", "")
                 _style_ax(ax_right, "Morris σ (Interaction)", "σ", "")
-
-                mu_star = []
-                sigma_vals = []
-                for j in range(n_vars):
-                    # Elementary effects
-                    delta = 0.1
-                    effects = []
-                    for i in range(min(n_samples - 1, 50)):
-                        key, vmin, vmax = enabled_vars[j]
-                        v1 = X_data[i, j]
-                        v2 = min(v1 + delta * (vmax - vmin), vmax)
-                        base_vals = [X_data[i, k] for k in range(n_vars)]
-                        cfg1 = self._make_swept_config(base_config, enabled_vars, base_vals)
-                        pert_vals = list(base_vals)
-                        pert_vals[j] = v2
-                        cfg2 = self._make_swept_config(base_config, enabled_vars, pert_vals)
-                        try:
-                            r1 = run_batch_simulation(cfg1, seed=1000 + i).apogee
-                            r2 = run_batch_simulation(cfg2, seed=1000 + i).apogee
-                            dx = v2 - v1
-                            if abs(dx) > 1e-12:
-                                effects.append((r2 - r1) / dx)
-                        except Exception:
-                            pass
-
-                    if effects:
-                        mu_star.append(np.mean(np.abs(effects)))
-                        sigma_vals.append(np.std(effects))
-                    else:
-                        mu_star.append(0)
-                        sigma_vals.append(0)
-
-                ax_left.barh(var_names, mu_star, color="#58a6ff", alpha=0.8,
+                ax_left.barh(var_names, out["mu_star"], color="#58a6ff", alpha=0.8,
                              edgecolor="#30363d")
-                ax_right.barh(var_names, sigma_vals, color="#f0883e", alpha=0.8,
+                ax_right.barh(var_names, out["sigma"], color="#f0883e", alpha=0.8,
                               edgecolor="#30363d")
 
             for a in self._ax_sens:
                 a.figure.tight_layout()
             self._canvas_sens.draw()
-
             self.progress_label.setText(
-                f"Sensitivity analysis complete — {n_samples} samples, "
-                f"{n_vars} variables"
-            )
-
+                f"Sensitivity analysis complete — {len(y_data)} samples, "
+                f"{n_vars} variables")
         except Exception as e:
             QMessageBox.warning(self, "Sensitivity Error",
-                f"Sensitivity analysis failed:\n\n{e}")
-            logger.error(f"Sensitivity analysis failed: {e}", exc_info=True)
+                f"Sensitivity render failed:\n\n{e}")
+            logger.error(f"Sensitivity render failed: {e}", exc_info=True)
         finally:
             self.btn_run_sens.setEnabled(True)
 
