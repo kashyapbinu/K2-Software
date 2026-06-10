@@ -32,4 +32,9 @@ def generate_thrust_curve(avg_thrust, max_thrust, burn_time, num_points=200):
     f = np.array([0.0, max_thrust, avg_thrust, 0.0, 0.0])
     t_interp = np.linspace(0, burn_time * 1.05, num_points)
     f_interp = np.interp(t_interp, t, f)
+    # Normalize to the true total impulse (avg_thrust × burn_time); the raw
+    # trapezoid integrates ~8% high when max_thrust = 1.4 × avg_thrust.
+    impulse = np.trapz(f_interp, t_interp)
+    if impulse > 0:
+        f_interp *= (avg_thrust * burn_time) / impulse
     return t_interp, f_interp

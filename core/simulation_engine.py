@@ -32,7 +32,9 @@ from core.flight_phases import FlightPhase, PhaseManager
 from core.integrators import get_integrator
 from core.event_manager import EventManager, SimEvent
 from core.history_manager import HistoryManager
-from physics.aerodynamics import AeroModel, compute_drag_coefficient, compute_drag_force
+from physics.aerodynamics import (AeroModel, compute_drag_coefficient,
+                                  compute_drag_force,
+                                  compute_pitching_moment_coefficient)
 from environment.wind_model import WindModel
 from vehicle.builder import build_vehicle
 from vehicle.motor import Motor
@@ -246,12 +248,24 @@ class SimulationEngine(QObject):
             return
 
         ramp = bt * 0.1
-        self._thrust_curve = [
+        curve = [
             (0.0, 0.0),
             (ramp, max_t),
             (bt - ramp, avg_t),
             (bt, 0.0),
         ]
+        # Normalize so the curve integrates to the motor's true total impulse
+        # (avg_thrust × burn_time). The raw trapezoid overshoots by ~8% when
+        # max_t = 1.4·avg_t, which inflated every burn's delivered impulse.
+        impulse = sum(
+            0.5 * (curve[i][1] + curve[i + 1][1]) * (curve[i + 1][0] - curve[i][0])
+            for i in range(len(curve) - 1)
+        )
+        target = avg_t * bt
+        if impulse > 0 and target > 0:
+            scale = target / impulse
+            curve = [(t, f * scale) for t, f in curve]
+        self._thrust_curve = curve
 
     def _get_thrust(self, t: float) -> float:
         """Interpolate thrust at time t."""
@@ -321,9 +335,15 @@ class SimulationEngine(QObject):
         alpha = pitch - vel_angle
         alpha = max(-math.radians(45), min(math.radians(45), alpha))
 
-        # Sideslip (yaw plane)
+        # Sideslip (yaw plane): effective sideslip is the angle between the
+        # body axis and the relative wind in the yaw plane — body yaw minus
+        # the lateral flow angle — mirroring alpha = pitch - vel_angle. Using
+        # the flow angle alone left the yaw attitude itself unrestored: a
+        # yawed rocket felt no correcting moment until its velocity drifted.
         if v_rel > 0.5:
-            beta_angle = math.atan2(vrel_y, math.sqrt(vrel_x**2 + vrel_z**2))
+            flow_beta = math.atan2(vrel_y, math.sqrt(vrel_x**2 + vrel_z**2))
+            beta_angle = yaw - flow_beta
+            beta_angle = max(-math.radians(45), min(math.radians(45), beta_angle))
         else:
             beta_angle = 0.0
 
@@ -343,8 +363,13 @@ class SimulationEngine(QObject):
             stab_margin = aero["stability_margin"]
             # Yaw moment (symmetric to pitch for axisymmetric rocket) + yaw
             # damping mirroring the pitch-damping fix (else yaw weathercock is
-            # undamped and tumbles in crosswind just like pitch did).
-            M_yaw = -aero.get("cm", 0) * q_dyn * ref_area * s.diameter * math.sin(beta_angle)
+            # undamped and tumbles in crosswind just like pitch did). Built
+            # from CNα and the effective sideslip directly — the pitch cm
+            # already contains sin(α), so scaling it by sin(β) made yaw
+            # stiffness vanish whenever the pitch AoA was near zero.
+            cm_yaw = compute_pitching_moment_coefficient(
+                aero.get("cn_total", 2.0), cp, cg, s.diameter, beta_angle)
+            M_yaw = cm_yaw * q_dyn * ref_area * s.diameter
             M_yaw += self.aero_model._damping_moment(
                 aero.get("cmq", -1.0), yaw_rate, v_rel, q_dyn,
                 ref_area, s.diameter, aero.get("cn_total", 2.0))
@@ -410,13 +435,14 @@ class SimulationEngine(QObject):
             normal_x = normal_z = 0.0
         # Lateral (yaw-plane) normal force from sideslip — mirrors the pitch-plane
         # term so a crosswind produces side translation, not just a yaw moment.
-        # Same CNα·sin(β) form with the 20° stall clamp; acts to oppose sideslip.
+        # Same CNα·sin(β) form with the 20° stall clamp; acts toward the side
+        # the nose points relative to the flow (lift), like the pitch term.
         _deployed = self._drogue_deployed or self._main_deployed
         if v_rel > 0.5 and abs(beta_angle) > 1e-6 and not _deployed:
             cn_total_now = aero.get("cn_total", 2.0) if self.aero_model is not None else 0.0
             eff_beta = min(abs(beta_angle), math.radians(20))
             F_normal_y = q_dyn * ref_area * cn_total_now * math.sin(eff_beta)
-            normal_y = -math.copysign(F_normal_y, beta_angle)
+            normal_y = math.copysign(F_normal_y, beta_angle)
         else:
             normal_y = 0.0
 
@@ -454,16 +480,16 @@ class SimulationEngine(QObject):
             yaw_accel = max(-MAX_ROT, min(MAX_ROT, yaw_accel))
             roll_accel = max(-MAX_ROT, min(MAX_ROT, roll_accel))
 
-        # Mass flow
+        # Mass flow — Isp is defined against standard g0, not local gravity
         isp = getattr(s, 'motor_isp', 0.0)
         if isp <= 0:
             total_impulse = getattr(s, 'motor_total_impulse', 0.0)
             prop_mass = getattr(s, 'propellant_mass_initial', 0.0)
             if total_impulse > 0 and prop_mass > 0:
-                isp = total_impulse / (prop_mass * g)
+                isp = total_impulse / (prop_mass * G_EARTH)
         if thrust > 0 and (mass - s.dry_mass) > 1e-3:
             if isp > 10:
-                dm_dt = -thrust / (isp * g)
+                dm_dt = -thrust / (isp * G_EARTH)
             elif s.motor_burn_time > 0:
                 dm_dt = -self._initial_prop_mass / s.motor_burn_time
             else:

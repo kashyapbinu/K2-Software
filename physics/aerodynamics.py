@@ -356,9 +356,9 @@ def compute_cd(mach: float, alpha: float = 0.0, fineness_ratio: float = 10.0,
     # 3. Base drag
     cd_base = base_cd(mach) * base_area_ratio
 
-    # 4. Induced drag from AoA
-    alpha_deg = abs(math.degrees(alpha))
-    cd_induced = 2.0 * math.sin(alpha)**2 if alpha_deg > 1.0 else 0.0
+    # 4. Induced drag from AoA — smooth in alpha (the old 1° on/off gate put a
+    #    step discontinuity in CD that optimizer/sensitivity sweeps tripped on)
+    cd_induced = 2.0 * math.sin(alpha)**2
 
     # 5. Transonic / supersonic wave + nose-pressure drag.
     #    Zero subsonic; rises through the transonic drag-divergence region and

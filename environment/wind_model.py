@@ -151,9 +151,12 @@ class WindModel:
         # Ensure non-negative
         speed = max(0.0, speed)
 
-        # Decompose into X and Y components using wind direction
-        vx = speed * math.cos(self.direction)
-        vy = speed * math.sin(self.direction)
+        # Decompose into X and Y components. `direction` is the bearing the
+        # wind blows FROM (meteorological convention, matches the landing
+        # estimator in visualization.mission.flight_envelope), so the air-mass
+        # velocity vector points the opposite way (toward direction + 180°).
+        vx = -speed * math.cos(self.direction)
+        vy = -speed * math.sin(self.direction)
         # Vertical wind component — negligible for typical rocketry
         vz = 0.0
 

@@ -19,7 +19,8 @@ logger = logging.getLogger("K2.History")
 
 # All fields recorded per timestep
 HISTORY_FIELDS = [
-    "time", "x", "altitude", "vx", "vz", "velocity", "pitch", "pitch_rate", "acceleration",
+    "time", "x", "y", "altitude", "vx", "vy", "vz", "velocity",
+    "pitch", "yaw", "roll", "pitch_rate", "yaw_rate", "roll_rate", "acceleration",
     "mach", "thrust", "drag", "net_force",
     "mass", "cg", "cp", "stability_margin",
     "phase", "cd",
