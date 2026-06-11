@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>K2 Cinematic View</title>
+<style>
+  html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden;
+               background:#05070d; font-family:'Segoe UI', system-ui, sans-serif;
+               user-select:none; }
+  #scene { position:absolute; inset:0; }
+
+  /* ── Glass HUD cards ─────────────────────────────────────────── */
+  .hud { position:absolute; color:#e6edf3; pointer-events:none; z-index:10; }
+  .card {
+    background:rgba(13,17,23,0.55);
+    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+    border:1px solid rgba(120,160,255,0.18);
+    border-radius:14px;
+    box-shadow:0 8px 32px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.06);
+    padding:10px 16px;
+  }
+  #telemetry { top:18px; left:18px; display:flex; gap:12px; }
+  .metric { min-width:118px; }
+  .metric .label { font-size:10px; letter-spacing:2px; color:#7d8aa0;
+                   text-transform:uppercase; margin-bottom:2px; }
+  .metric .value { font-size:26px; font-weight:650; font-variant-numeric:tabular-nums;
+                   font-family:'Cascadia Code', Consolas, monospace; line-height:1.1;
+                   text-shadow:0 0 14px rgba(88,166,255,0.35); }
+  .metric .unit { font-size:11px; color:#7d8aa0; margin-left:3px; }
+  .metric .bar { height:3px; border-radius:2px; background:rgba(255,255,255,0.08);
+                 margin-top:6px; overflow:hidden; }
+  .metric .bar > div { height:100%; width:0%; border-radius:2px;
+                       background:linear-gradient(90deg,#1f6feb,#58a6ff);
+                       transition:width 120ms linear; }
+
+  #clockphase { top:18px; right:18px; text-align:right; }
+  #met { font-size:30px; font-weight:700; font-family:'Cascadia Code', Consolas, monospace;
+         font-variant-numeric:tabular-nums; text-shadow:0 0 16px rgba(88,166,255,0.4); }
+  #phase { display:inline-block; margin-top:6px; padding:4px 14px; border-radius:999px;
+           font-size:12px; font-weight:700; letter-spacing:1.5px; text-transform:uppercase;
+           background:rgba(88,166,255,0.12); border:1px solid rgba(88,166,255,0.45);
+           color:#58a6ff; box-shadow:0 0 18px rgba(88,166,255,0.25); }
+  #phase.boost  { background:rgba(240,136,62,0.14); border-color:#f0883e; color:#f0883e;
+                  box-shadow:0 0 18px rgba(240,136,62,0.35); }
+  #phase.chute  { background:rgba(126,231,135,0.12); border-color:#7ee787; color:#7ee787;
+                  box-shadow:0 0 18px rgba(126,231,135,0.3); }
+  #phase.landed { background:rgba(63,185,80,0.15); border-color:#3fb950; color:#3fb950; }
+
+  /* ── Camera buttons ─────────────────────────────────────────── */
+  #cams { bottom:18px; left:50%; transform:translateX(-50%); display:flex; gap:8px;
+          pointer-events:auto; }
+  #cams button {
+    background:rgba(13,17,23,0.55); backdrop-filter:blur(14px);
+    -webkit-backdrop-filter:blur(14px);
+    color:#9aa7b8; border:1px solid rgba(120,160,255,0.18); border-radius:10px;
+    padding:8px 16px; font-size:12px; font-weight:600; letter-spacing:0.6px;
+    cursor:pointer; transition:all 140ms ease; font-family:inherit; }
+  #cams button:hover { color:#e6edf3; border-color:rgba(120,160,255,0.5); }
+  #cams button.active { color:#0d1117; background:linear-gradient(135deg,#58a6ff,#1f6feb);
+                        border-color:transparent; box-shadow:0 0 22px rgba(31,111,235,0.55); }
+
+  #banner { top:50%; left:50%; transform:translate(-50%,-50%); font-size:42px;
+            font-weight:800; letter-spacing:6px; color:#e6edf3; opacity:0;
+            text-shadow:0 0 30px rgba(88,166,255,0.8); transition:opacity 400ms ease;
+            pointer-events:none; }
+
+  #vignette { position:absolute; inset:0; pointer-events:none; z-index:5;
+              background:radial-gradient(ellipse at center,
+                         transparent 58%, rgba(0,0,0,0.42) 100%); }
+</style>
+</head>
+<body>
+  <div id="scene"></div>
+  <div id="vignette"></div>
+
+  <div id="telemetry" class="hud">
+    <div class="card metric"><div class="label">Altitude</div>
+      <div><span class="value" id="v-alt">0</span><span class="unit">m</span></div>
+      <div class="bar"><div id="b-alt"></div></div></div>
+    <div class="card metric"><div class="label">Velocity</div>
+      <div><span class="value" id="v-vel">0</span><span class="unit">m/s</span></div>
+      <div class="bar"><div id="b-vel"></div></div></div>
+    <div class="card metric"><div class="label">Mach</div>
+      <div><span class="value" id="v-mach">0.00</span></div>
+      <div class="bar"><div id="b-mach"></div></div></div>
+    <div class="card metric"><div class="label">Thrust</div>
+      <div><span class="value" id="v-thrust">0</span><span class="unit">N</span></div>
+      <div class="bar"><div id="b-thrust"></div></div></div>
+  </div>
+
+  <div id="clockphase" class="hud card">
+    <div id="met">T+ 00:00.0</div>
+    <div><span id="phase">Pre-Launch</span></div>
+  </div>
+
+  <div id="cams" class="hud">
+    <button data-cam="chase" class="active">CHASE</button>
+    <button data-cam="pad">PAD</button>
+    <button data-cam="side">SIDE</button>
+    <button data-cam="orbit">ORBIT</button>
+    <button data-cam="onboard">ONBOARD</button>
+  </div>
+
+  <div id="banner" class="hud"></div>
+
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <script type="importmap">
+  { "imports": {
+      "three": "./vendor/three.module.js",
+      "three/addons/": "./vendor/jsm/"
+  } }
+  </script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

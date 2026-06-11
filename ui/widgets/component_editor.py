@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QGroupBox,
     QDoubleSpinBox, QSpinBox, QComboBox, QLineEdit, QLabel, QScrollArea,
     QFrame, QPushButton, QCheckBox, QHBoxLayout)
 from PyQt6.QtCore import Qt, pyqtSignal
+from ui.icons import icon
 from core.components import (MATERIALS, NOSE_SHAPES, NOZZLE_TYPES, NoseCone, BodyTube,
     Transition, TrapezoidalFinSet, InnerTube, CenteringRing, Bulkhead,
     EngineBlock, Parachute, ShockCord, MassComponent, LaunchLug, RailButton, Stage, Nozzle)
@@ -90,7 +91,7 @@ class ComponentEditor(QWidget):
         # Presets button
         preset_key = self._get_preset_key(comp)
         if preset_key and preset_key in self._presets:
-            preset_btn = QPushButton("📋  Apply Preset...")
+            preset_btn = QPushButton(icon("settings"), "Apply Preset...")
             preset_btn.setStyleSheet("""
                 QPushButton { background: #161b22; border: 1px solid #30363d;
                     border-radius: 6px; padding: 8px; color: #58a6ff; font-weight: 600; }

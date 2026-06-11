@@ -109,10 +109,10 @@ class AeroWorkspace(QWidget):
         self.lbl_margin.setText(f"{s.stability_margin:.2f} cal")
 
         if s.stability_margin < 0.5:
-            self.lbl_status.setText("⚠ UNSTABLE"); self.lbl_status.setStyleSheet("color: #f85149; font-weight: 600;")
+            self.lbl_status.setText("UNSTABLE"); self.lbl_status.setStyleSheet("color: #f85149; font-weight: 600;")
         elif s.stability_margin < 1.0:
-            self.lbl_status.setText("⚡ MARGINAL"); self.lbl_status.setStyleSheet("color: #d29922; font-weight: 600;")
+            self.lbl_status.setText("MARGINAL"); self.lbl_status.setStyleSheet("color: #d29922; font-weight: 600;")
         elif s.stability_margin <= 2.5:
             self.lbl_status.setText("✓ STABLE"); self.lbl_status.setStyleSheet("color: #7ee787; font-weight: 600;")
         else:
-            self.lbl_status.setText("⚠ OVERSTABLE"); self.lbl_status.setStyleSheet("color: #d29922; font-weight: 600;")
+            self.lbl_status.setText("OVERSTABLE"); self.lbl_status.setStyleSheet("color: #d29922; font-weight: 600;")

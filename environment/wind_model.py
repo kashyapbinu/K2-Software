@@ -92,6 +92,11 @@ class WindModel:
         self.base_speed = base_speed
         self.direction = math.radians(direction)
         self.gust_intensity = gust_intensity
+        # Callers (sim engine, batch sim, weather profiles) pass the user's
+        # gust setting positionally as gust_intensity — honor it as the
+        # turbulence intensity instead of silently using the 0.1 default.
+        if gust_intensity > 0:
+            turbulence_intensity = gust_intensity
         self.turbulence_intensity = turbulence_intensity
 
         # Pink noise state
@@ -192,3 +197,85 @@ class WindModel:
     def reset(self):
         """Reset the wind model state."""
         self._reset_noise()
+
+
+# ── Multi-Level Wind Model ────────────────────────────────────────────────────
+
+class MultiLevelWindModel(WindModel):
+    """
+    Wind model defined by altitude layers, each with its own speed and
+    direction. Speed and direction are linearly interpolated between layers
+    (direction along the shortest arc, so a 350°→10° transition passes
+    through 0°, not 180°). Below the lowest layer and above the highest
+    layer the nearest layer's values are held constant.
+
+    Pink-noise turbulence (inherited from WindModel) is applied on top of
+    the interpolated mean speed, scaled by turbulence_intensity.
+
+    Args:
+        layers: List of (altitude_m, speed_m_s, direction_deg) tuples.
+                Direction is the bearing the wind blows FROM (meteorological
+                convention, same as WindModel).
+        turbulence_intensity: σ/mean (0.0 = smooth interpolated wind).
+        seed:   Random seed for reproducibility.
+    """
+
+    def __init__(self, layers: list, turbulence_intensity: float = 0.0,
+                 seed: int = None):
+        # Sort by altitude and drop malformed rows
+        clean = sorted(
+            (float(a), max(0.0, float(s)), float(d) % 360.0)
+            for a, s, d in layers
+        )
+        if not clean:
+            clean = [(0.0, 0.0, 0.0)]
+        self.layers = clean
+        # base_speed only seeds the parent's turbulence bookkeeping; the
+        # per-altitude σ is computed in get_wind_velocity instead.
+        super().__init__(base_speed=clean[0][1], direction=clean[0][2],
+                         turbulence_intensity=turbulence_intensity, seed=seed)
+
+    def _interpolate(self, altitude: float) -> tuple[float, float]:
+        """Return (mean_speed, direction_rad) at the given altitude."""
+        layers = self.layers
+        if altitude <= layers[0][0]:
+            _, s, d = layers[0]
+            return s, math.radians(d)
+        if altitude >= layers[-1][0]:
+            _, s, d = layers[-1]
+            return s, math.radians(d)
+
+        for i in range(len(layers) - 1):
+            a0, s0, d0 = layers[i]
+            a1, s1, d1 = layers[i + 1]
+            if a0 <= altitude <= a1:
+                f = (altitude - a0) / (a1 - a0) if a1 > a0 else 0.0
+                speed = s0 + f * (s1 - s0)
+                # Shortest-arc direction interpolation
+                delta = ((d1 - d0 + 180.0) % 360.0) - 180.0
+                direction = (d0 + f * delta) % 360.0
+                return speed, math.radians(direction)
+
+        _, s, d = layers[-1]
+        return s, math.radians(d)
+
+    def get_wind_velocity(self, altitude: float, time: float) -> tuple[float, float, float]:
+        """Returns (wind_vx, wind_vy, wind_vz) at the given altitude and time."""
+        mean_speed, direction = self._interpolate(max(0.0, altitude))
+        if mean_speed <= 0:
+            return (0.0, 0.0, 0.0)
+
+        # Pink-noise turbulence around the interpolated mean. The parent's
+        # standard_deviation property uses base_speed, so temporarily point
+        # it at the local mean for correct σ scaling.
+        if self.turbulence_intensity > 0.001:
+            self.base_speed = mean_speed
+            speed = self._get_pink_noise_speed(time, mean_speed)
+        else:
+            speed = mean_speed
+        speed = max(0.0, speed)
+
+        # Same FROM-bearing convention as WindModel
+        vx = -speed * math.cos(direction)
+        vy = -speed * math.sin(direction)
+        return (vx, vy, 0.0)

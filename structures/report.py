@@ -251,7 +251,7 @@ def generate_structural_report(path, state, rep, material_name="Aluminum 6061-T6
         ["Mode 3", f"{md.f3_hz:.0f} Hz"],
     ]))
     if md.low_freq:
-        story.append(Paragraph(f"<font color='#e67e22'>⚠ {md.warning}</font>", ss["K2Body"]))
+        story.append(Paragraph(f"<font color='#e67e22'>{md.warning}</font>", ss["K2Body"]))
 
     # ── Physics Consistency Checks ──
     if getattr(rep, "warnings", None):

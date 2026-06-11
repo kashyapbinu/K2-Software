@@ -16,6 +16,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from physics.structures import MATERIALS, compute_all, compute_for_condition
 from structures.solvers.base import STRUCTURAL_MATERIALS, LoadCase
 from structures import workstation as wks
+from ui.icons import icon
 
 logger = logging.getLogger("K2.StructWS")
 
@@ -99,7 +100,7 @@ class StructuresWorkspace(QWidget):
         sc.setFrameShape(QFrame.Shape.NoFrame)
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(12,14,12,14); lay.setSpacing(12)
 
-        t = QLabel("🏗  Structural Analysis")
+        t = QLabel("Structural Analysis")
         t.setStyleSheet("color:#58a6ff;font-size:15px;font-weight:700;padding:2px 0 6px 0;")
         lay.addWidget(t)
 
@@ -224,14 +225,14 @@ class StructuresWorkspace(QWidget):
         self.lbl_fl_a = _vl(); fl_form.addRow("Max Accel:", self.lbl_fl_a)
         self.lbl_fl_q = _vl(); fl_form.addRow("Max-Q:", self.lbl_fl_q)
         ffl2.addLayout(fl_form)
-        self.btn_import_loads = QPushButton("⤓  Import Last Simulation")
+        self.btn_import_loads = QPushButton(icon("import"), "Import Last Simulation")
         self.btn_import_loads.setStyleSheet(_BTN_S)
         self.btn_import_loads.clicked.connect(self._import_flight_loads)
         ffl2.addWidget(self.btn_import_loads)
         gfl.setLayout(ffl2); lay.addWidget(gfl)
 
         # ── Worst-case search ──
-        self.btn_worst = QPushButton("🔎  Find Worst Structural Condition")
+        self.btn_worst = QPushButton(icon("search"), "Find Worst Structural Condition")
         self.btn_worst.setStyleSheet(_BTN_S)
         self.btn_worst.clicked.connect(self._on_worst_case)
         lay.addWidget(self.btn_worst)
@@ -244,13 +245,13 @@ class StructuresWorkspace(QWidget):
         lay.addWidget(self.lbl_worst)
 
         # Buttons
-        self.btn_static = QPushButton("🔧  Run Static Analysis"); self.btn_static.setStyleSheet(_BTN_P)
+        self.btn_static = QPushButton(icon("static", color="#fff"), "Run Static Analysis"); self.btn_static.setStyleSheet(_BTN_P)
         self.btn_static.clicked.connect(self._run_static); lay.addWidget(self.btn_static)
-        self.btn_modal = QPushButton("🎵  Run Modal Analysis"); self.btn_modal.setStyleSheet(_BTN_S)
+        self.btn_modal = QPushButton(icon("modal"), "Run Modal Analysis"); self.btn_modal.setStyleSheet(_BTN_S)
         self.btn_modal.clicked.connect(self._run_modal); lay.addWidget(self.btn_modal)
-        self.btn_thermal = QPushButton("🌡  Run Thermal Analysis"); self.btn_thermal.setStyleSheet(_BTN_S)
+        self.btn_thermal = QPushButton(icon("thermal"), "Run Thermal Analysis"); self.btn_thermal.setStyleSheet(_BTN_S)
         self.btn_thermal.clicked.connect(self._run_thermal); lay.addWidget(self.btn_thermal)
-        self.btn_report = QPushButton("📄  Export PDF Report"); self.btn_report.setStyleSheet(_BTN_S)
+        self.btn_report = QPushButton(icon("report"), "Export PDF Report"); self.btn_report.setStyleSheet(_BTN_S)
         self.btn_report.clicked.connect(self._export_report); lay.addWidget(self.btn_report)
 
         self._progress = QProgressBar(); self._progress.setRange(0,0); self._progress.setVisible(False)
@@ -283,7 +284,7 @@ class StructuresWorkspace(QWidget):
             logger.error(f"StressViewer load failed: {e}")
             self._stress3d = QLabel(f"3D viewer unavailable: {e}")
         vzl.addWidget(self._stress3d)
-        self._center_tabs.addTab(viz_w, "🚀 3D Stress")
+        self._center_tabs.addTab(viz_w, icon("stress3d"), "3D Stress")
 
         # Stress profile tab
         stress_w = QWidget(); sl = QVBoxLayout(stress_w); sl.setContentsMargins(8,8,8,8)
@@ -294,7 +295,7 @@ class StructuresWorkspace(QWidget):
         except Exception:
             self._stress_plot = QLabel("Plot widget not available")
         sl.addWidget(self._stress_plot)
-        self._center_tabs.addTab(stress_w, "📊 Stress Profile")
+        self._center_tabs.addTab(stress_w, icon("stress_profile"), "Stress Profile")
 
         # Modal tab
         modal_w = QWidget(); ml = QVBoxLayout(modal_w); ml.setContentsMargins(8,8,8,8)
@@ -325,7 +326,7 @@ class StructuresWorkspace(QWidget):
             logger.error(f"Failed to load ModeShapeViewer: {e}")
             self._modal_plot = QLabel(f"Plot widget not available: {e}")
         ml.addWidget(self._modal_plot)
-        self._center_tabs.addTab(modal_w, "🎵 Modal Analysis")
+        self._center_tabs.addTab(modal_w, icon("modal"), "Modal Analysis")
 
         # Thermal tab
         therm_w = QWidget(); tl = QVBoxLayout(therm_w); tl.setContentsMargins(8,8,8,8)
@@ -336,16 +337,16 @@ class StructuresWorkspace(QWidget):
         except Exception:
             self._temp_plot = QLabel("Plot widget not available")
         tl.addWidget(self._temp_plot)
-        self._center_tabs.addTab(therm_w, "🌡 Temperature")
+        self._center_tabs.addTab(therm_w, icon("temperature"), "Temperature")
 
         # ── New workstation tabs ──
-        self._center_tabs.addTab(self._build_deformation_tab(), "📐 Deformation")
-        self._center_tabs.addTab(self._build_fin_tab(), "🛩 Fin Analysis")
-        self._center_tabs.addTab(self._build_recovery_tab(), "🪂 Recovery Loads")
-        self._center_tabs.addTab(self._build_buckling_tab(), "🏛 Buckling")
-        self._center_tabs.addTab(self._build_loadpath_tab(), "🔻 Load Paths")
-        self._center_tabs.addTab(self._build_failuremap_tab(), "🗺 Failure Map")
-        self._center_tabs.addTab(self._build_mass_tab(), "⚖ Mass Efficiency")
+        self._center_tabs.addTab(self._build_deformation_tab(), icon("deformation"), "Deformation")
+        self._center_tabs.addTab(self._build_fin_tab(), icon("fin"), "Fin Analysis")
+        self._center_tabs.addTab(self._build_recovery_tab(), icon("recovery"), "Recovery Loads")
+        self._center_tabs.addTab(self._build_buckling_tab(), icon("buckling"), "Buckling")
+        self._center_tabs.addTab(self._build_loadpath_tab(), icon("loadpath"), "Load Paths")
+        self._center_tabs.addTab(self._build_failuremap_tab(), icon("failuremap"), "Failure Map")
+        self._center_tabs.addTab(self._build_mass_tab(), icon("mass"), "Mass Efficiency")
 
         lay.addWidget(self._center_tabs, 1)
 
@@ -557,7 +558,7 @@ class StructuresWorkspace(QWidget):
         sc = QScrollArea(); sc.setWidgetResizable(True); sc.setMaximumWidth(360)
         sc.setFrameShape(QFrame.Shape.NoFrame)
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(12,14,12,14); lay.setSpacing(12)
-        t = QLabel("📊  Results"); t.setStyleSheet("color:#58a6ff;font-size:15px;font-weight:700;padding:2px 0 6px 0;")
+        t = QLabel("Results"); t.setStyleSheet("color:#58a6ff;font-size:15px;font-weight:700;padding:2px 0 6px 0;")
         lay.addWidget(t)
 
         # ── Structural Safety Score ──
@@ -756,10 +757,10 @@ class StructuresWorkspace(QWidget):
         self._fem_custom_widget.setVisible(is_custom)
 
         if idx == 3:  # Very Fine
-            self._lbl_fem_preset_warn.setText("⚠ Very Fine FEM mesh — slower solve times")
+            self._lbl_fem_preset_warn.setText("Very Fine FEM mesh — slower solve times")
             self._lbl_fem_preset_warn.setVisible(True)
         elif idx == 4:  # Ultra Fine
-            self._lbl_fem_preset_warn.setText("⚠ Ultra Fine FEM — may require significant memory and solve time")
+            self._lbl_fem_preset_warn.setText("Ultra Fine FEM — may require significant memory and solve time")
             self._lbl_fem_preset_warn.setVisible(True)
         else:
             self._lbl_fem_preset_warn.setVisible(False)
@@ -771,7 +772,7 @@ class StructuresWorkspace(QWidget):
             est = circ * axial * 4  # rough element estimate per caliber
             if est > 5000:
                 self._lbl_fem_warn.setText(
-                    f"⚠ High mesh density ({circ}×{axial}) — large models may be slow"
+                    f"High mesh density ({circ}×{axial}) — large models may be slow"
                 )
                 self._lbl_fem_warn.setVisible(True)
             else:
@@ -849,9 +850,9 @@ class StructuresWorkspace(QWidget):
         if sf >= 3.0:
             self.lbl_verdict.setText("✓ SAFE"); self.lbl_verdict.setStyleSheet("color:#7ee787;font-weight:700;font-size:16px;padding:8px;")
         elif sf >= 1.5:
-            self.lbl_verdict.setText("⚡ ADEQUATE"); self.lbl_verdict.setStyleSheet("color:#d29922;font-weight:700;font-size:16px;padding:8px;")
+            self.lbl_verdict.setText("ADEQUATE"); self.lbl_verdict.setStyleSheet("color:#d29922;font-weight:700;font-size:16px;padding:8px;")
         elif sf >= 1.0:
-            self.lbl_verdict.setText("⚠ MARGINAL"); self.lbl_verdict.setStyleSheet("color:#f0883e;font-weight:700;font-size:16px;padding:8px;")
+            self.lbl_verdict.setText("MARGINAL"); self.lbl_verdict.setStyleSheet("color:#f0883e;font-weight:700;font-size:16px;padding:8px;")
         else:
             self.lbl_verdict.setText("✕ FAILURE"); self.lbl_verdict.setStyleSheet("color:#f85149;font-weight:700;font-size:16px;padding:8px;")
 
@@ -944,13 +945,20 @@ class StructuresWorkspace(QWidget):
             else:
                 self._status.setText("CFD map enabled but no CFD results injected yet.")
 
-            # Also look for surface VTK for pressure field mapping
-            p = Path("cfd_run/surface_flow.vtu")
-            if not p.is_file():
-                p = Path("cfd_run/surface_flow.vtk")
-            if p.is_file():
-                cfd_path = p
-                self._status.setText(self._status.text() + f" | VTK: {p.name}")
+            # Surface VTK for pressure-field mapping: prefer the path recorded
+            # by the CFD run; fall back to the default work dir for older
+            # sessions that predate cfd_surface_vtk in the state.
+            candidates = []
+            if getattr(s, 'cfd_surface_vtk', ''):
+                candidates.append(Path(s.cfd_surface_vtk))
+            from cfd.solvers.base import CFDConfig
+            work = CFDConfig().work_dir
+            candidates += [work / "surface_flow.vtu", work / "surface_flow.vtk"]
+            for p in candidates:
+                if p.is_file():
+                    cfd_path = p
+                    self._status.setText(self._status.text() + f" | VTK: {p.name}")
+                    break
 
         self._thread = AnalysisThread(
             fem.analyze,
@@ -1016,9 +1024,9 @@ class StructuresWorkspace(QWidget):
             if sf >= 3.0:
                 self.lbl_verdict.setText("✓ SAFE"); self.lbl_verdict.setStyleSheet("color:#7ee787;font-weight:700;font-size:16px;padding:8px;")
             elif sf >= 1.5:
-                self.lbl_verdict.setText("⚡ ADEQUATE"); self.lbl_verdict.setStyleSheet("color:#d29922;font-weight:700;font-size:16px;padding:8px;")
+                self.lbl_verdict.setText("ADEQUATE"); self.lbl_verdict.setStyleSheet("color:#d29922;font-weight:700;font-size:16px;padding:8px;")
             elif sf >= 1.0:
-                self.lbl_verdict.setText("⚠ MARGINAL"); self.lbl_verdict.setStyleSheet("color:#f0883e;font-weight:700;font-size:16px;padding:8px;")
+                self.lbl_verdict.setText("MARGINAL"); self.lbl_verdict.setStyleSheet("color:#f0883e;font-weight:700;font-size:16px;padding:8px;")
             else:
                 self.lbl_verdict.setText("✕ FAILURE"); self.lbl_verdict.setStyleSheet("color:#f85149;font-weight:700;font-size:16px;padding:8px;")
 
@@ -1100,15 +1108,15 @@ class StructuresWorkspace(QWidget):
                 self.lbl_flutter_margin.setText(f"{margin:.2f}×")
                 verdict = fa.get('verdict', '—')
                 self.lbl_flutter_verdict.setText(verdict)
-                if '✓' in verdict:
+                if '✓' in verdict or 'SAFE' in verdict:
                     self.lbl_flutter_verdict.setStyleSheet(
                         "color:#7ee787;font-weight:700;font-size:12px;padding:4px;"
                     )
-                elif '⚡' in verdict:
+                elif 'ADEQUATE' in verdict:
                     self.lbl_flutter_verdict.setStyleSheet(
                         "color:#d29922;font-weight:700;font-size:12px;padding:4px;"
                     )
-                elif '⚠' in verdict:
+                elif 'MARGINAL' in verdict:
                     self.lbl_flutter_verdict.setStyleSheet(
                         "color:#f0883e;font-weight:700;font-size:12px;padding:4px;"
                     )
@@ -1183,7 +1191,7 @@ class StructuresWorkspace(QWidget):
             self.lbl_tsig.setText(f"{result.max_thermal_stress/1e6:.1f} MPa")
             limit_txt = f"{result.service_temp_limit_K:.0f} K"
             if result.exceeds_service_temp:
-                limit_txt += " ⚠ EXCEEDED"
+                limit_txt += " EXCEEDED"
                 self.lbl_tlimit.setStyleSheet(_VAL + "color:#f85149;")
             else:
                 limit_txt += " ✓ OK"
@@ -1298,7 +1306,7 @@ class StructuresWorkspace(QWidget):
         hist = self._get_history()
         if hist is None:
             self.lbl_worst.setVisible(True)
-            self.lbl_worst.setText("⚠ No flight data. Run a simulation, then search.")
+            self.lbl_worst.setText("No flight data. Run a simulation, then search.")
             return
         self._status.setText("Searching worst-case condition…")
         res = wks.find_worst_case(self.engine.state, hist, self.mat_combo.currentText())
@@ -1372,7 +1380,7 @@ class StructuresWorkspace(QWidget):
         if not warnings:
             self.lbl_warnings.setText("—")
             return
-        icon = {"error": "✕", "warn": "⚠", "info": "✓"}
+        icon = {"error": "✕", "warn": "!", "info": "✓"}
         lines = []
         for w in warnings:
             c = severity_color(w.severity)
@@ -1385,7 +1393,7 @@ class StructuresWorkspace(QWidget):
         self.lbl_modal_f3.setText(f"{me.f3_hz:.0f} Hz" if me.f3_hz else "—")
         if me.low_freq:
             self.lbl_modal_f1.setStyleSheet(_VAL + "color:#d29922;")
-            self.lbl_modal_warn.setText(f"⚠ {me.warning}")
+            self.lbl_modal_warn.setText(f"{me.warning}")
             self.lbl_modal_warn.setStyleSheet("color:#d29922;font-size:10px;padding:2px;font-weight:600;")
         else:
             self.lbl_modal_f1.setStyleSheet(_VAL)

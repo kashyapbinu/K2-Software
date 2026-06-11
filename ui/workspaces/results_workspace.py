@@ -7,6 +7,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
     QPushButton, QTabWidget, QLabel, QFileDialog, QSlider, QFrame, QGridLayout)
 from PyQt6.QtCore import Qt
+from ui.icons import icon
 from ui.widgets.plot_widget import PlotWidget
 
 logger = logging.getLogger("K2.ResultsWS")
@@ -44,11 +45,11 @@ class ResultsWorkspace(QWidget):
         top.addWidget(title)
         top.addStretch()
 
-        self.btn_refresh = QPushButton("🔄 Refresh Plots")
+        self.btn_refresh = QPushButton(icon("refresh"), "Refresh Plots")
         self.btn_refresh.clicked.connect(self.refresh_plots)
         top.addWidget(self.btn_refresh)
 
-        self.btn_export = QPushButton("📥 Export CSV")
+        self.btn_export = QPushButton(icon("export"), "Export CSV")
         self.btn_export.clicked.connect(self._export_csv)
         top.addWidget(self.btn_export)
         layout.addLayout(top)
@@ -191,7 +192,7 @@ class ResultsWorkspace(QWidget):
         # Summary
         s = self.engine.state
         self.summary_label.setText(
-            f"✅ Apogee: {s.max_altitude:.1f} m  |  Max Vel: {s.max_velocity:.1f} m/s  |  "
+            f"Apogee: {s.max_altitude:.1f} m  |  Max Vel: {s.max_velocity:.1f} m/s  |  "
             f"Max Mach: {s.max_mach:.3f}  |  Max Accel: {s.max_acceleration:.1f} m/s²  |  "
             f"Flight Time: {t_vals[-1]:.2f} s  |  {history.count} data points"
         )
@@ -257,4 +258,4 @@ class ResultsWorkspace(QWidget):
             return
 
         self._history.export_csv(path)
-        self.engine.log_message.emit(f"📥 Results exported: {path}")
+        self.engine.log_message.emit(f"Results exported: {path}")

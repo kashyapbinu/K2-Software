@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QHeaderView, QFileDialog,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from ui.icons import icon
 
 logger = logging.getLogger("K2.DynWS")
 
@@ -109,7 +110,7 @@ class DynamicsWorkspace(QWidget):
         sc.setFrameShape(QFrame.Shape.NoFrame)
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(12,14,12,14); lay.setSpacing(12)
 
-        t = QLabel("🔬  Dynamic Analysis")
+        t = QLabel("Dynamic Analysis")
         t.setStyleSheet("color:#58a6ff;font-size:15px;font-weight:700;padding:2px 0 6px 0;")
         lay.addWidget(t)
 
@@ -119,7 +120,7 @@ class DynamicsWorkspace(QWidget):
         self.sp_vmax.setSuffix(" m/s"); f1.addRow("Max Flight Speed:", self.sp_vmax)
         self.sp_mmax = QDoubleSpinBox(); self.sp_mmax.setRange(0.1,5); self.sp_mmax.setValue(1.0)
         self.sp_mmax.setDecimals(2); f1.addRow("Max Mach:", self.sp_mmax)
-        self.btn_fromsim = QPushButton("⤓ Use Last Simulation"); self.btn_fromsim.setStyleSheet(_BTN_S)
+        self.btn_fromsim = QPushButton(icon("import"), "Use Last Simulation"); self.btn_fromsim.setStyleSheet(_BTN_S)
         self.btn_fromsim.clicked.connect(self._fill_from_sim); f1.addRow(self.btn_fromsim)
         self.lbl_simsrc = QLabel("Source: manual input")
         self.lbl_simsrc.setStyleSheet("color:#8b949e;font-size:10px;font-style:italic;")
@@ -134,15 +135,15 @@ class DynamicsWorkspace(QWidget):
         self.sp_psd.setDecimals(3); self.sp_psd.setSuffix(" g²/Hz"); f2.addRow("Input PSD:", self.sp_psd)
         g2.setLayout(f2); lay.addWidget(g2)
 
-        self.btn_all = QPushButton("▶  Run Full Assessment"); self.btn_all.setStyleSheet(_BTN_P)
+        self.btn_all = QPushButton(icon("run", color="#fff"), "Run Full Assessment"); self.btn_all.setStyleSheet(_BTN_P)
         self.btn_all.clicked.connect(self._run_all); lay.addWidget(self.btn_all)
-        self.btn_flutter = QPushButton("🌪  Flutter"); self.btn_flutter.setStyleSheet(_BTN_S)
+        self.btn_flutter = QPushButton(icon("flutter"), "Flutter"); self.btn_flutter.setStyleSheet(_BTN_S)
         self.btn_flutter.clicked.connect(self._run_flutter); lay.addWidget(self.btn_flutter)
-        self.btn_vib = QPushButton("📳  Vibration"); self.btn_vib.setStyleSheet(_BTN_S)
+        self.btn_vib = QPushButton(icon("vibration"), "Vibration"); self.btn_vib.setStyleSheet(_BTN_S)
         self.btn_vib.clicked.connect(self._run_vibration); lay.addWidget(self.btn_vib)
-        self.btn_aero = QPushButton("💨  Aeroelastic"); self.btn_aero.setStyleSheet(_BTN_S)
+        self.btn_aero = QPushButton(icon("aeroelastic"), "Aeroelastic"); self.btn_aero.setStyleSheet(_BTN_S)
         self.btn_aero.clicked.connect(self._run_aeroelastic); lay.addWidget(self.btn_aero)
-        self.btn_modal = QPushButton("〰  Mode Shapes"); self.btn_modal.setStyleSheet(_BTN_S)
+        self.btn_modal = QPushButton(icon("modal"), "Mode Shapes"); self.btn_modal.setStyleSheet(_BTN_S)
         self.btn_modal.clicked.connect(lambda: self._run_modal()); lay.addWidget(self.btn_modal)
 
         self._progress = QProgressBar(); self._progress.setRange(0,0); self._progress.setVisible(False)
@@ -180,7 +181,7 @@ class DynamicsWorkspace(QWidget):
         self._flutter_plot = PlotWidget(title="", xlabel="Altitude (km)", ylabel="Speed (m/s)")
         self._flutter_plot.setMinimumHeight(300)
         fl.addWidget(self._flutter_plot)
-        self._tabs.addTab(fw, "🌪 Flutter Boundary")
+        self._tabs.addTab(fw, "Flutter Boundary")
 
         # FRF + resonance table
         vw = QWidget(); vl = QVBoxLayout(vw); vl.setContentsMargins(8,8,8,8); vl.setSpacing(6)
@@ -198,14 +199,14 @@ class DynamicsWorkspace(QWidget):
             "QHeaderView::section{background:#161b22;color:#8b949e;border:none;padding:4px;font-weight:600;}")
         self._res_table.setMaximumHeight(160)
         vl.addWidget(self._res_table, 1)
-        self._tabs.addTab(vw, "📳 Frequency Response")
+        self._tabs.addTab(vw, "Frequency Response")
 
         # Aeroelastic
         aw = QWidget(); al = QVBoxLayout(aw); al.setContentsMargins(8,8,8,8)
         self._aero_plot = PlotWidget(title="", xlabel="Mach", ylabel="Effectiveness η")
         self._aero_plot.setMinimumHeight(300)
         al.addWidget(self._aero_plot)
-        self._tabs.addTab(aw, "💨 Aeroelastic")
+        self._tabs.addTab(aw, "Aeroelastic")
 
         # Mode Shapes (reuses FEM ModeShapeViewer)
         mw = QWidget(); ml = QVBoxLayout(mw); ml.setContentsMargins(8,8,8,8); ml.setSpacing(6)
@@ -236,7 +237,7 @@ class DynamicsWorkspace(QWidget):
         self._env_plot = PlotWidget(title="", xlabel="Velocity (m/s)", ylabel="Altitude (km)")
         self._env_plot.setMinimumHeight(300)
         el.addWidget(self._env_plot)
-        self._tabs.addTab(ew, "🛡 Flight Envelope")
+        self._tabs.addTab(ew, "Flight Envelope")
 
         self._tabs.currentChanged.connect(self._on_tab_changed)
         lay.addWidget(self._tabs, 1)
@@ -250,7 +251,7 @@ class DynamicsWorkspace(QWidget):
         sc = QScrollArea(); sc.setWidgetResizable(True); sc.setMaximumWidth(380)
         sc.setFrameShape(QFrame.Shape.NoFrame)
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(12,14,12,14); lay.setSpacing(10)
-        t = QLabel("🛡  Flight Safety Assessment")
+        t = QLabel("Flight Safety Assessment")
         t.setStyleSheet("color:#58a6ff;font-size:15px;font-weight:700;padding:2px 0 6px 0;")
         lay.addWidget(t)
 
@@ -962,7 +963,7 @@ class DynamicsWorkspace(QWidget):
             self.lbl_warnings.setStyleSheet("color:#7ee787;font-size:11px;font-weight:600;")
             return
         has_bad = any(s == "UNSAFE" for s, _ in warns)
-        lines = [("⛔ " if s == "UNSAFE" else "⚠ ") + msg for s, msg in warns]
+        lines = [("✗ " if s == "UNSAFE" else "! ") + msg for s, msg in warns]
         self.lbl_warnings.setText("\n".join(lines))
         self.lbl_warnings.setStyleSheet(
             f"color:{_C_BAD if has_bad else _C_CAUT};font-size:11px;font-weight:600;")

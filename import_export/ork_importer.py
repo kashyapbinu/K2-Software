@@ -149,12 +149,15 @@ def _parse_component(elem, tag_lower):
         try:
             val = float(pos_elem.text)
             comp._ork_pos = val
-            # OpenRocket default logic: 
-            # If positionrelativeto is missing:
-            # - Fins default to "bottom"
-            # - Internal components with negative values often imply "bottom" in practice
-            rel_text = _text(elem, "positionrelativeto", "").lower()
+            # Modern ORK files carry the reference on the element itself:
+            # <position type="bottom"> / <axialoffset method="bottom">
+            rel_text = (pos_elem.get("type") or pos_elem.get("method") or "").lower()
             if not rel_text:
+                rel_text = _text(elem, "positionrelativeto", "").lower()
+            if not rel_text:
+                # Legacy fallback guess:
+                # - Fins default to "bottom"
+                # - Internal components with negative values often imply "bottom"
                 if isinstance(comp, TrapezoidalFinSet):
                     rel_text = "bottom"
                 elif val < 0:
@@ -203,11 +206,6 @@ def _parse_component(elem, tag_lower):
         if sweep > 0 and comp.height > 0:
             comp.sweep_angle = math.degrees(math.atan(sweep / comp.height))
         comp.thickness = _float(elem, "thickness", 0.003)
-        # Store ORK positioning metadata
-        comp._ork_offset = _float(elem, "axialoffset", 0.0)
-        comp._ork_rel_to = _text(elem, "positionrelativeto", "bottom").lower()
-        comp._ork_offset = _float(elem, "axialoffset", 0.0)
-        comp._ork_rel_to = _text(elem, "positionrelativeto", "bottom").lower()
 
     elif isinstance(comp, InnerTube):
         comp.length = _float(elem, "length", 0.15)

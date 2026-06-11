@@ -21,6 +21,7 @@ from core.event_manager import SimEvent
 from avionics.flight_computer.flight_computer import FlightComputer
 from ui.toolbar import MainToolbar
 from ui.console_panel import ConsolePanel
+from ui.icons import icon
 from ui.workspaces.design_workspace import DesignWorkspace
 from ui.workspaces.propulsion_workspace import PropulsionWorkspace
 from ui.workspaces.structures_workspace import StructuresWorkspace
@@ -38,8 +39,9 @@ logger = logging.getLogger("K2.MainWindow")
 class MainWindow(QMainWindow):
     """K2 Aerospace main application window with tabbed workspaces."""
 
-    TAB_ICONS = ["🛠", "🔥", "🌊", "🏗", "🔬", "📡", "🚀", "🌍", "📊", "🎲", "🎯"]
-    TAB_NAMES = ["Design", "Propulsion", "CFD", "Structures", "Dynamics", "Avionics", "Simulation", "Mission Visualizer", "Results", "Monte Carlo", "Optimization"]
+    TAB_ICONS = ["design", "propulsion", "cfd", "structures", "dynamics", "avionics",
+                 "simulation", "mission", "mission", "results", "montecarlo", "optimization"]
+    TAB_NAMES = ["Design", "Propulsion", "CFD", "Structures", "Dynamics", "Avionics", "Simulation", "Mission Visualizer", "Cinematic", "Results", "Monte Carlo", "Optimization"]
 
     def __init__(self):
         super().__init__()
@@ -91,6 +93,8 @@ class MainWindow(QMainWindow):
         self.avionics_ws.set_flight_computer(self.flight_computer)
         self.simulation_ws = SimulationWorkspace(self.engine, self.sim_engine, self)
         self.mission_viz_ws = MissionVisualizerWorkspace(self.engine, self.sim_engine, self)
+        from ui.workspaces.cinematic_workspace import CinematicWorkspace
+        self.cinematic_ws = CinematicWorkspace(self.engine, self.sim_engine, self)
         self.results_ws = ResultsWorkspace(self.engine, self.sim_engine, self)
         self.monte_carlo_ws = MonteCarloWorkspace(self.engine, self.sim_engine, self)
         self.optimization_ws = OptimizationWorkspace(self.engine, self.sim_engine, self)
@@ -104,11 +108,12 @@ class MainWindow(QMainWindow):
         workspaces = [
             self.design_ws, self.propulsion_ws, self.cfd_ws,
             self.structures_ws, self.dynamics_ws, self.avionics_ws, self.simulation_ws,
-            self.mission_viz_ws, self.results_ws, self.monte_carlo_ws, self.optimization_ws
+            self.mission_viz_ws, self.cinematic_ws, self.results_ws,
+            self.monte_carlo_ws, self.optimization_ws
         ]
 
-        for icon, name, ws in zip(self.TAB_ICONS, self.TAB_NAMES, workspaces):
-            self.tab_widget.addTab(ws, f"{icon}  {name}")
+        for icon_key, name, ws in zip(self.TAB_ICONS, self.TAB_NAMES, workspaces):
+            self.tab_widget.addTab(ws, icon(icon_key), name)
 
         self.setCentralWidget(self.tab_widget)
 
@@ -126,9 +131,9 @@ class MainWindow(QMainWindow):
         # Connect engine log messages to the console
         def _route_log(msg):
             level = "INFO"
-            if "⚠" in msg or "Warning" in msg:
+            if "Warning" in msg or "warning" in msg:
                 level = "WARNING"
-            elif "❌" in msg or "Error" in msg or "Failed" in msg:
+            elif "Error" in msg or "Failed" in msg:
                 level = "ERROR"
             self.console_panel.log(msg, level)
             
@@ -162,8 +167,13 @@ class MainWindow(QMainWindow):
 
     def _connect_sim_signals(self):
         self.sim_engine.sim_started.connect(lambda: self._set_sim_status("RUNNING", "#7ee787"))
+        # Auto-show a flight view on launch — but respect an already-chosen one
+        # (the Run dialog may have just switched to the Cinematic tab).
+        def _auto_flight_view():
+            if self.tab_widget.currentWidget() not in (self.mission_viz_ws, self.cinematic_ws):
+                self.tab_widget.setCurrentWidget(self.mission_viz_ws)
         self.sim_engine.sim_started.connect(
-            lambda: QTimer.singleShot(300, lambda: self.tab_widget.setCurrentIndex(7))
+            lambda: QTimer.singleShot(300, _auto_flight_view)
         )
         self.sim_engine.sim_paused.connect(lambda: self._set_sim_status("PAUSED", "#d29922"))
         self.sim_engine.sim_resumed.connect(lambda: self._set_sim_status("RUNNING", "#7ee787"))
@@ -178,17 +188,17 @@ class MainWindow(QMainWindow):
         # Wire event manager to console
         em = self.sim_engine.event_mgr
         em.subscribe(SimEvent.MOTOR_BURNOUT, lambda d: self.engine.log_message.emit(
-            f"🔥 Motor burnout at T+{d.get('time',0):.2f}s, alt={d.get('altitude',0):.1f}m"))
+            f"Motor burnout at T+{d.get('time',0):.2f}s, alt={d.get('altitude',0):.1f}m"))
         em.subscribe(SimEvent.APOGEE, lambda d: self.engine.log_message.emit(
-            f"🎯 Apogee reached at T+{d.get('time',0):.2f}s, alt={d.get('altitude',0):.1f}m"))
+            f"Apogee reached at T+{d.get('time',0):.2f}s, alt={d.get('altitude',0):.1f}m"))
         em.subscribe(SimEvent.DROGUE_DEPLOY, lambda d: self.engine.log_message.emit(
-            f"🪂 Drogue deployed at T+{d.get('time',0):.2f}s, alt={d.get('altitude',0):.1f}m"))
+            f"Drogue deployed at T+{d.get('time',0):.2f}s, alt={d.get('altitude',0):.1f}m"))
         em.subscribe(SimEvent.MAIN_DEPLOY, lambda d: self.engine.log_message.emit(
-            f"🪂 Main chute deployed at T+{d.get('time',0):.2f}s, alt={d.get('altitude',0):.1f}m"))
+            f"Main chute deployed at T+{d.get('time',0):.2f}s, alt={d.get('altitude',0):.1f}m"))
         em.subscribe(SimEvent.LANDING, lambda d: self.engine.log_message.emit(
-            f"🛬 Landing at T+{d.get('time',0):.2f}s — Apogee: {d.get('max_altitude',0):.1f}m"))
+            f"Landing at T+{d.get('time',0):.2f}s — Apogee: {d.get('max_altitude',0):.1f}m"))
         em.subscribe(SimEvent.MAX_Q, lambda d: self.engine.log_message.emit(
-            f"💨 Max-Q: {d.get('max_q',0):.0f} Pa at Mach {d.get('mach',0):.3f}"))
+            f"Max-Q: {d.get('max_q',0):.0f} Pa at Mach {d.get('mach',0):.3f}"))
 
     def _set_sim_status(self, text, color):
         self.status_sim.setText(f"SIM: {text}")
@@ -221,10 +231,14 @@ class MainWindow(QMainWindow):
         self.toolbar.action_run_sim.setEnabled(True)
 
     def _show_results(self):
-        """Auto-refresh results and switch to Results tab."""
+        """Auto-refresh results and switch to Results tab.
+
+        Skipped while the Cinematic view is up — touchdown/markers are the
+        payoff there; yanking the user to plots mid-moment is hostile."""
         def _do():
             self.results_ws.refresh_plots()
-            self.tab_widget.setCurrentIndex(8)
+            if self.tab_widget.currentWidget() is not self.cinematic_ws:
+                self.tab_widget.setCurrentWidget(self.results_ws)
         QTimer.singleShot(300, _do)
 
     def _initial_state_push(self):
@@ -309,7 +323,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"Imported: {Path(path).name}")
             comp_count = sum(1 for _ in assembly.all_components()) - len(assembly.stages)
             self.engine.log_message.emit(
-                f"✅ Imported OpenRocket file: {assembly.name} — "
+                f"Imported OpenRocket file: {assembly.name} — "
                 f"{len(assembly.stages)} stage(s), {comp_count} components")
             logger.info(f"Imported ORK: {path}")
         except Exception as e:
@@ -320,8 +334,10 @@ class MainWindow(QMainWindow):
     # ── Simulation controls ──
 
     def _on_run_sim(self):
-        self.tab_widget.setCurrentIndex(6)  # Switch to Simulation tab
-        self.sim_engine.start()
+        # Route through the Simulation workspace so the Normal/Cinematic
+        # launch-view dialog applies to the toolbar Run button too.
+        self.tab_widget.setCurrentWidget(self.simulation_ws)
+        self.simulation_ws._on_run()
 
     def _on_stop_sim(self):
         self.sim_engine.stop()
@@ -330,6 +346,14 @@ class MainWindow(QMainWindow):
         if self.sim_engine.is_running:
             self.sim_engine.stop()
         self.engine.reset()
+        # reset() blanks the whole RocketState — including geometry (diameter,
+        # length, CP/CG). The design assembly still exists, so re-derive state
+        # from it or the next flight runs with zero drag reference area.
+        try:
+            if getattr(self.design_ws, "assembly", None) is not None:
+                self.design_ws._sync_to_engine()
+        except Exception as e:
+            logger.warning(f"Post-reset geometry re-sync failed: {e}")
         self._set_sim_status("Idle", "#8b949e")
         logger.info("State reset")
 

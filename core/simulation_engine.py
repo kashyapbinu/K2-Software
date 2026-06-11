@@ -35,7 +35,7 @@ from core.history_manager import HistoryManager
 from physics.aerodynamics import (AeroModel, compute_drag_coefficient,
                                   compute_drag_force,
                                   compute_pitching_moment_coefficient)
-from environment.wind_model import WindModel
+from environment.wind_model import WindModel, MultiLevelWindModel
 from vehicle.builder import build_vehicle
 from vehicle.motor import Motor
 
@@ -95,7 +95,17 @@ class SimulationEngine(QObject):
 
         if s.motor_designation == "None":
             logger.warning("No motor selected — cannot simulate")
-            self.engine.log_message.emit("⚠ No motor selected. Please select a motor in the Design tab.")
+            self.engine.log_message.emit("No motor selected. Please select a motor in the Design tab.")
+            return
+
+        # Degenerate geometry guard: zero diameter/length means zero drag
+        # reference area — the flight would be ballistic nonsense (happens when
+        # state was reset and geometry never re-synced from the design).
+        if s.diameter <= 0.0 or s.length <= 0.0:
+            logger.warning(f"Invalid geometry (L={s.length}, D={s.diameter}) — cannot simulate")
+            self.engine.log_message.emit(
+                "Rocket geometry is empty (diameter/length = 0). "
+                "Open the Design tab so the airframe is loaded, then run again.")
             return
 
         # Select integrator
@@ -129,7 +139,7 @@ class SimulationEngine(QObject):
         if self.vehicle and self.vehicle.stages:
             sim_motor = Motor(
                 s.motor_designation,
-                empty_mass=s.dry_mass * 0.08,
+                empty_mass=s.motor_dry_mass if s.motor_dry_mass > 0 else s.dry_mass * 0.08,
                 propellant_mass=s.propellant_mass_initial,
                 length=0.3, diameter=0.03
             )
@@ -147,7 +157,19 @@ class SimulationEngine(QObject):
         wind_speed = getattr(s, 'wind_speed', 0.0)
         wind_dir   = getattr(s, 'wind_direction', 0.0)
         wind_gust  = getattr(s, 'wind_gust_intensity', 0.0)
-        self.wind_model = WindModel(wind_speed, wind_dir, wind_gust)
+        wind_mode  = getattr(s, 'wind_mode', 'average')
+        wind_layers = getattr(s, 'wind_layers', [])
+        if wind_mode == 'multi_level' and wind_layers:
+            self.wind_model = MultiLevelWindModel(
+                wind_layers, turbulence_intensity=wind_gust)
+            logger.info(f"Wind: multi-level, {len(wind_layers)} layers, "
+                        f"TI={wind_gust:.2f}")
+        else:
+            self.wind_model = WindModel(wind_speed, wind_dir, wind_gust)
+
+        # Launch-site temperature → ISA+ΔT atmosphere offset
+        self.atmosphere.temperature_offset = (
+            getattr(s, 'ground_temperature', 288.15) - 288.15)
 
         # Reset modules
         self.phase_mgr.reset()
@@ -181,7 +203,7 @@ class SimulationEngine(QObject):
 
         self.sim_started.emit()
         logger.info(f"Simulation started (dt={s.sim_dt}s, speed={s.sim_speed}x, integrator={self.integrator.name})")
-        self.engine.log_message.emit(f"🚀 Simulation started — Motor: {s.motor_designation} | Integrator: {self.integrator.name}")
+        self.engine.log_message.emit(f"Simulation started — Motor: {s.motor_designation} | Integrator: {self.integrator.name}")
 
     def pause(self):
         if self._running and not self._paused:
@@ -487,7 +509,7 @@ class SimulationEngine(QObject):
             prop_mass = getattr(s, 'propellant_mass_initial', 0.0)
             if total_impulse > 0 and prop_mass > 0:
                 isp = total_impulse / (prop_mass * G_EARTH)
-        if thrust > 0 and (mass - s.dry_mass) > 1e-3:
+        if thrust > 0 and (mass - (s.dry_mass + s.motor_dry_mass)) > 1e-3:
             if isp > 10:
                 dm_dt = -thrust / (isp * G_EARTH)
             elif s.motor_burn_time > 0:
@@ -604,7 +626,7 @@ class SimulationEngine(QObject):
         except Exception as e:
             logger.error(f"Integration error at t={t:.3f}s: {e}")
             self.stop()
-            self.engine.log_message.emit(f"❌ Simulation error at T+{t:.2f}s: {e}")
+            self.engine.log_message.emit(f"Simulation error at T+{t:.2f}s: {e}")
             return
 
         # ── Clamp at ground ──
@@ -639,8 +661,9 @@ class SimulationEngine(QObject):
         new_pitch_rate = new_vec[9]
         new_yaw_rate   = new_vec[10]
         new_roll_rate  = new_vec[11]
-        new_mass       = max(s.dry_mass, new_vec[12])
-        new_prop_mass  = max(0.0, new_mass - s.dry_mass)
+        burnout_mass   = s.dry_mass + s.motor_dry_mass
+        new_mass       = max(burnout_mass, new_vec[12])
+        new_prop_mass  = max(0.0, new_mass - burnout_mass)
 
         # Update canonical vehicle propellant consumption
         if self.vehicle is not None:
@@ -681,7 +704,8 @@ class SimulationEngine(QObject):
         prev_phase = self._phase
         self._phase = self.phase_mgr.evaluate(
             self._phase, t + adaptive_dt, new_altitude, new_velocity,
-            thrust, getattr(s, 'main_deploy_altitude', 300.0)
+            thrust, getattr(s, 'main_deploy_altitude', 300.0),
+            drogue_delay=getattr(s, 'drogue_deploy_delay', 1.0),
         )
 
         # ── Events ──
@@ -865,7 +889,12 @@ class SimulationEngine(QObject):
             mass=new_mass,
             cg=s.cg,
             cp=aero.get('cp', s.cp),
-            stability_margin=aero.get('stab_margin', s.stability_margin),
+            # Static margin is meaningless under a canopy (attitude frozen,
+            # AoA pegged at the 45° clamp drags CP to mid-body) — record NaN
+            # so plots show a gap instead of an artificial collapse.
+            stability_margin=(float('nan')
+                              if (self._drogue_deployed or self._main_deployed)
+                              else aero.get('stab_margin', s.stability_margin)),
             phase=self._phase.value,
             cd=cd,
             atm_temperature=atm_temp,
@@ -908,7 +937,7 @@ class SimulationEngine(QObject):
                 f"Max Mach: {s.max_mach:.3f}"
             )
             self.engine.log_message.emit(
-                f"✅ Flight complete — Apogee: {s.max_altitude:.1f}m | "
+                f"Flight complete — Apogee: {s.max_altitude:.1f}m | "
                 f"Max Velocity: {s.max_velocity:.1f}m/s | "
                 f"Max Mach: {s.max_mach:.3f} | "
                 f"Flight Time: {t+dt:.2f}s | "

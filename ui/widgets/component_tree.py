@@ -12,11 +12,11 @@ from core.components import RocketComponent, Stage
 logger = logging.getLogger("K2.CompTree")
 
 ICONS = {
-    "Stage": "📦", "Nose Cone": "▲", "Body Tube": "▬", "Transition": "◇",
+    "Stage": "⬢", "Nose Cone": "▲", "Body Tube": "▬", "Transition": "◇",
     "Trapezoidal Fins": "✦", "Inner Tube": "◎", "Centering Ring": "◉",
-    "Bulkhead": "▣", "Engine Block": "▪", "Parachute": "🪂",
+    "Bulkhead": "▣", "Engine Block": "▪", "Parachute": "☂",
     "Shock Cord": "〰", "Mass Component": "●", "Launch Lug": "▫", "Rail Button": "▪",
-    "Nozzle": "🔥",
+    "Nozzle": "▽",
 }
 
 
@@ -98,7 +98,7 @@ class ComponentTree(QWidget):
         self._updating = True
         self.tree.clear()
 
-        root = QTreeWidgetItem(self.tree, ["🚀 " + self.assembly.name])
+        root = QTreeWidgetItem(self.tree, ["⬢ " + self.assembly.name])
         root.setData(0, Qt.ItemDataRole.UserRole, None)
         f = root.font(0)
         f.setBold(True)
@@ -210,6 +210,6 @@ class ComponentTree(QWidget):
         menu.addAction("▲ Move Up", lambda: QTimer.singleShot(0, self._move_up))
         menu.addAction("▼ Move Down", lambda: QTimer.singleShot(0, self._move_down))
         menu.addSeparator()
-        menu.addAction("📋 Duplicate", lambda: QTimer.singleShot(0, self._duplicate))
-        menu.addAction("❌ Delete", lambda: QTimer.singleShot(0, self._delete))
+        menu.addAction("Duplicate", lambda: QTimer.singleShot(0, self._duplicate))
+        menu.addAction("Delete", lambda: QTimer.singleShot(0, self._delete))
         menu.exec(self.tree.viewport().mapToGlobal(pos))

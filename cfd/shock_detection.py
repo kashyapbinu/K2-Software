@@ -69,24 +69,23 @@ def gaussian_prefilter(
 
     points = np.asarray(mesh.points, dtype=np.float64)
     values = np.asarray(mesh[scalar_name], dtype=np.float64)
+    n_pts = len(points)
+    if n_pts < 4:
+        return mesh
 
+    # Vectorised k-nearest-neighbour Gaussian kernel. The previous
+    # implementation looped query_ball_point() over every point in Python,
+    # which took minutes on ~1M-node volume meshes and froze the UI.
+    k = min(16, n_pts - 1)
     tree = KDTree(points)
-    radius = 3.0 * sigma  # truncate at 3σ
-    smoothed = np.empty_like(values, dtype=np.float32)
+    dists, idxs = tree.query(points, k=k + 1)   # includes self at column 0
+    weights = np.exp(-0.5 * (dists / max(sigma, 1e-12)) ** 2)
+    smoothed = (weights * values[idxs]).sum(axis=1) / weights.sum(axis=1)
 
-    for i in range(len(points)):
-        neighbours = tree.query_ball_point(points[i], radius)
-        if len(neighbours) == 0:
-            smoothed[i] = values[i]
-            continue
-        dists = np.linalg.norm(points[neighbours] - points[i], axis=1)
-        weights = np.exp(-0.5 * (dists / sigma) ** 2)
-        smoothed[i] = np.dot(weights, values[neighbours]) / weights.sum()
-
-    mesh[scalar_name] = smoothed
+    mesh[scalar_name] = smoothed.astype(np.float32)
     logger.debug(
-        "Gaussian pre-filter applied to '%s' (σ=%.2f, radius=%.2f)",
-        scalar_name, sigma, radius,
+        "Gaussian pre-filter applied to '%s' (σ=%.2f, k=%d)",
+        scalar_name, sigma, k,
     )
     return mesh
 
@@ -96,12 +95,20 @@ def gaussian_prefilter(
 # ---------------------------------------------------------------------------
 
 def _find_gradient_name(mesh, base: str) -> str:
-    """Return the actual gradient array name that PyVista created."""
+    """Return the actual gradient array name that PyVista created.
+
+    Only accept exact/prefixed 'gradient*' names. A substring match would
+    wrongly pick up sensor OUTPUT arrays carried over from a previous run
+    (e.g. 'Mach_Gradient', 'Entropy_Gradient' — 1-D scalars, not the fresh
+    (N,3) gradient), crashing the axis-1 norm.
+    """
     preferred = f"gradient_{base}"
     if preferred in mesh.array_names:
         return preferred
+    if "gradient" in mesh.array_names:
+        return "gradient"
     for name in mesh.array_names:
-        if "gradient" in name.lower():
+        if name.lower().startswith("gradient"):
             return name
     return "gradient"
 
@@ -178,8 +185,10 @@ def ducros_shock_sensor(
     if "Velocity" not in volume_mesh.array_names:
         raise KeyError("Volume mesh must contain a 'Velocity' vector field.")
 
+    # Smooth a TEMPORARY copy — never overwrite the cached 'Velocity' array
+    # (the workspace reuses the same volume mesh for slice/streamline views).
+    vel_field = "Velocity"
     if prefilter and KDTree is not None:
-        # Pre-filter velocity magnitude; derivatives become smoother
         vmag = np.linalg.norm(
             np.asarray(volume_mesh["Velocity"]), axis=1
         ).astype(np.float32)
@@ -192,15 +201,18 @@ def ducros_shock_sensor(
         raw_mag = np.where(raw_mag < 1e-30, 1.0, raw_mag)
         scale = (volume_mesh["_VelMag_tmp"] / raw_mag.ravel()).astype(np.float32)
         vel_smooth = np.asarray(volume_mesh["Velocity"]) * scale[:, None]
-        volume_mesh["Velocity"] = vel_smooth.astype(np.float32)
+        volume_mesh["_Vel_tmp"] = vel_smooth.astype(np.float32)
         del volume_mesh.point_data["_VelMag_tmp"]
+        vel_field = "_Vel_tmp"
 
     # Compute divergence (∇·V) and vorticity (ω)
     deriv = volume_mesh.compute_derivative(
-        scalars="Velocity",
+        scalars=vel_field,
         divergence=True,
         vorticity=True,
     )
+    if "_Vel_tmp" in volume_mesh.point_data:
+        del volume_mesh.point_data["_Vel_tmp"]
 
     div_V = np.asarray(deriv["divergence"], dtype=np.float64)
     omega = np.asarray(deriv["vorticity"], dtype=np.float64)
@@ -249,6 +261,8 @@ def dilatation_shock_sensor(
     if "Velocity" not in volume_mesh.array_names:
         raise KeyError("Volume mesh must contain a 'Velocity' vector field.")
 
+    # Smooth a TEMPORARY copy — never overwrite the cached 'Velocity' array.
+    vel_field = "Velocity"
     if prefilter and KDTree is not None:
         vmag = np.linalg.norm(
             np.asarray(volume_mesh["Velocity"]), axis=1
@@ -261,13 +275,16 @@ def dilatation_shock_sensor(
         raw_mag = np.where(raw_mag < 1e-30, 1.0, raw_mag)
         scale = (volume_mesh["_VelMag_tmp"] / raw_mag.ravel()).astype(np.float32)
         vel_smooth = np.asarray(volume_mesh["Velocity"]) * scale[:, None]
-        volume_mesh["Velocity"] = vel_smooth.astype(np.float32)
+        volume_mesh["_Vel_tmp"] = vel_smooth.astype(np.float32)
         del volume_mesh.point_data["_VelMag_tmp"]
+        vel_field = "_Vel_tmp"
 
     deriv = volume_mesh.compute_derivative(
-        scalars="Velocity",
+        scalars=vel_field,
         divergence=True,
     )
+    if "_Vel_tmp" in volume_mesh.point_data:
+        del volume_mesh.point_data["_Vel_tmp"]
 
     div_V = np.asarray(deriv["divergence"], dtype=np.float64)
 
@@ -311,11 +328,20 @@ def mach_gradient_shock_sensor(
     if "Mach" not in volume_mesh.array_names:
         raise KeyError("Volume mesh must contain a 'Mach' scalar field.")
 
+    # Smooth a TEMPORARY copy — never overwrite the cached 'Mach' array
+    # (the Mach slice view reads it after shock detection runs).
+    mach_field = "Mach"
     if prefilter and KDTree is not None:
-        gaussian_prefilter(volume_mesh, "Mach", sigma=sigma)
+        volume_mesh["_Mach_tmp"] = np.asarray(
+            volume_mesh["Mach"], dtype=np.float32
+        ).copy()
+        gaussian_prefilter(volume_mesh, "_Mach_tmp", sigma=sigma)
+        mach_field = "_Mach_tmp"
 
-    grad = volume_mesh.compute_derivative(scalars="Mach")
-    grad_name = _find_gradient_name(grad, "Mach")
+    grad = volume_mesh.compute_derivative(scalars=mach_field)
+    grad_name = _find_gradient_name(grad, mach_field)
+    if "_Mach_tmp" in volume_mesh.point_data:
+        del volume_mesh.point_data["_Mach_tmp"]
     grad_vec = np.asarray(grad[grad_name], dtype=np.float64)
     grad_mag = np.linalg.norm(grad_vec, axis=1).astype(np.float32)
 

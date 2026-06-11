@@ -258,7 +258,10 @@ def detect_separation(surface_mesh) -> Optional[_SeparationResult]:
     if cf_x is None:
         shear = extract_wall_shear(surface_mesh)
         if shear is not None:
-            threshold = float(np.percentile(shear[shear > 0], 5)) * 0.1
+            positive = shear[shear > 0]
+            if len(positive) == 0:
+                return None   # all-zero shear — nothing meaningful to threshold
+            threshold = float(np.percentile(positive, 5)) * 0.1
             separated = shear < threshold
             result = _SeparationResult(
                 mask=separated,

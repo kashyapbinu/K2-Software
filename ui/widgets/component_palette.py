@@ -22,7 +22,7 @@ COMPONENT_DEFS = [
         ("✦\nTrapezoidal", TrapezoidalFinSet),
     ]),
     ("Propulsion", [
-        ("🔥\nNozzle", Nozzle),
+        ("▽\nNozzle", Nozzle),
     ]),
     ("Inner Components", [
         ("◎\nInner Tube", InnerTube),
@@ -31,7 +31,7 @@ COMPONENT_DEFS = [
         ("▪\nEngine\nBlock", EngineBlock),
     ]),
     ("Recovery", [
-        ("🪂\nParachute", Parachute),
+        ("☂\nParachute", Parachute),
         ("〰\nShock Cord", ShockCord),
     ]),
     ("Mass / Attach", [

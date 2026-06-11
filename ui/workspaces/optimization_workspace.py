@@ -41,6 +41,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
 
+from ui.icons import icon as app_icon
+
 logger = logging.getLogger("K2.OptimizationWS")
 
 # ── Stylesheet constants (matches Monte Carlo workspace) ────────────────────
@@ -743,13 +745,13 @@ class OptimizationWorkspace(QWidget):
         vl = QVBoxLayout()
         vl.setSpacing(8)
 
-        self.btn_run = QPushButton("▶  START OPTIMIZATION")
+        self.btn_run = QPushButton(app_icon("run", color="#fff"), "START OPTIMIZATION")
         self.btn_run.setStyleSheet(_BTN_P)
         self.btn_run.setMinimumHeight(42)
         self.btn_run.clicked.connect(self._on_run)
         vl.addWidget(self.btn_run)
 
-        self.btn_cancel = QPushButton("⏹  CANCEL")
+        self.btn_cancel = QPushButton(app_icon("stop", color="#fff"), "CANCEL")
         self.btn_cancel.setStyleSheet(_BTN_D)
         self.btn_cancel.setMinimumHeight(42)
         self.btn_cancel.setEnabled(False)
@@ -776,13 +778,13 @@ class OptimizationWorkspace(QWidget):
 
         # Export row
         eh = QHBoxLayout()
-        self.btn_export_csv = QPushButton("📥 CSV")
+        self.btn_export_csv = QPushButton(app_icon("export"), "CSV")
         self.btn_export_csv.setStyleSheet(_BTN_S)
         self.btn_export_csv.setEnabled(False)
         self.btn_export_csv.clicked.connect(lambda: self._on_export("csv"))
         eh.addWidget(self.btn_export_csv)
 
-        self.btn_export_json = QPushButton("📥 JSON")
+        self.btn_export_json = QPushButton(app_icon("export"), "JSON")
         self.btn_export_json.setStyleSheet(_BTN_S)
         self.btn_export_json.setEnabled(False)
         self.btn_export_json.clicked.connect(lambda: self._on_export("json"))
@@ -895,7 +897,7 @@ class OptimizationWorkspace(QWidget):
         doe_ctrl.addWidget(QLabel("Samples:"))
         doe_ctrl.addWidget(self.spin_doe_samples)
 
-        self.btn_run_doe = QPushButton("▶ Run DOE")
+        self.btn_run_doe = QPushButton(app_icon("run"), "Run DOE")
         self.btn_run_doe.setStyleSheet(_BTN_SUCCESS)
         self.btn_run_doe.setFixedHeight(26)
         self.btn_run_doe.clicked.connect(self._on_run_doe)
@@ -927,7 +929,7 @@ class OptimizationWorkspace(QWidget):
         sens_ctrl.addWidget(QLabel("Samples:"))
         sens_ctrl.addWidget(self.spin_sens_samples)
 
-        self.btn_run_sens = QPushButton("▶ Analyze")
+        self.btn_run_sens = QPushButton(app_icon("run"), "Analyze")
         self.btn_run_sens.setStyleSheet(_BTN_SUCCESS)
         self.btn_run_sens.setFixedHeight(26)
         self.btn_run_sens.clicked.connect(self._on_run_sensitivity)
@@ -959,7 +961,7 @@ class OptimizationWorkspace(QWidget):
         self.btn_add_best.clicked.connect(self._on_add_best_trade)
         trade_ctrl.addWidget(self.btn_add_best)
 
-        self.btn_run_trade = QPushButton("▶ Compare")
+        self.btn_run_trade = QPushButton(app_icon("run"), "Compare")
         self.btn_run_trade.setStyleSheet(_BTN_SUCCESS)
         self.btn_run_trade.setFixedHeight(26)
         self.btn_run_trade.clicked.connect(self._on_run_trade)
@@ -1026,7 +1028,7 @@ class OptimizationWorkspace(QWidget):
         lay.setContentsMargins(12, 14, 12, 14)
         lay.setSpacing(10)
 
-        t = QLabel("🎯  Optimization Results")
+        t = QLabel("Optimization Results")
         t.setStyleSheet(
             "color:#58a6ff; font-size:15px; font-weight:700; padding:2px 0 6px 0;"
         )
@@ -1087,22 +1089,22 @@ class OptimizationWorkspace(QWidget):
             "border-radius:4px;padding:6px;font-size:11px;text-align:left;}}"
             "QPushButton:hover{{background:#1c2333;border-color:#58a6ff;}}"
         )
-        self.btn_sol_apogee = QPushButton("🏆 Best Apogee: —")
+        self.btn_sol_apogee = QPushButton(app_icon("apogee", color="#7ee787"), "Best Apogee: —")
         self.btn_sol_apogee.setStyleSheet(sol_style.format(c="#7ee787"))
         self.btn_sol_apogee.clicked.connect(lambda: self._load_pareto_solution("apogee"))
         fps.addWidget(self.btn_sol_apogee)
 
-        self.btn_sol_reliability = QPushButton("🛡 Best Reliability: —")
+        self.btn_sol_reliability = QPushButton(app_icon("reliability", color="#58a6ff"), "Best Reliability: —")
         self.btn_sol_reliability.setStyleSheet(sol_style.format(c="#58a6ff"))
         self.btn_sol_reliability.clicked.connect(lambda: self._load_pareto_solution("reliability"))
         fps.addWidget(self.btn_sol_reliability)
 
-        self.btn_sol_mass = QPushButton("⚖ Best Mass Efficiency: —")
+        self.btn_sol_mass = QPushButton(app_icon("mass", color="#bc8cff"), "Best Mass Efficiency: —")
         self.btn_sol_mass.setStyleSheet(sol_style.format(c="#bc8cff"))
         self.btn_sol_mass.clicked.connect(lambda: self._load_pareto_solution("mass"))
         fps.addWidget(self.btn_sol_mass)
 
-        self.btn_sol_balanced = QPushButton("⚡ Best Balanced: —")
+        self.btn_sol_balanced = QPushButton(app_icon("balanced", color="#f0883e"), "Best Balanced: —")
         self.btn_sol_balanced.setStyleSheet(sol_style.format(c="#f0883e"))
         self.btn_sol_balanced.clicked.connect(lambda: self._load_pareto_solution("balanced"))
         fps.addWidget(self.btn_sol_balanced)
@@ -1265,7 +1267,25 @@ class OptimizationWorkspace(QWidget):
             parallel=self.chk_parallel.isChecked(),
             n_workers=self.spin_workers.value(),
         )
+        # Remember the user's enabled objectives so plots show THOSE axes,
+        # not just the first keys of the objectives dict.
+        self._active_objectives = [(o.name, o.direction) for o in objectives]
         return config
+
+    def _plot_objective_axes(self, fallback_design):
+        """First two user-enabled objectives as [(key, direction), ...].
+        Falls back to the first two dict keys when fewer than 2 enabled."""
+        active = getattr(self, "_active_objectives", [])
+        if len(active) >= 2:
+            return active[0], active[1]
+        keys = list(fallback_design.objectives.keys())
+        if len(keys) < 2:
+            keys = keys + keys
+        pairs = [(k, "maximize") for k in keys[:2]]
+        if len(active) == 1:
+            other = next((p for p in pairs if p[0] != active[0][0]), pairs[1])
+            return active[0], other
+        return pairs[0], pairs[1]
 
     def _on_run(self):
         """Collect config and start optimization."""
@@ -1512,11 +1532,8 @@ class OptimizationWorkspace(QWidget):
             self._canvas_multi.draw()
             return
 
-        # Get first two objective keys
-        obj_keys = list(result.all_designs[0].objectives.keys())
-        if len(obj_keys) < 2:
-            obj_keys = obj_keys + obj_keys  # duplicate if only one
-        k1, k2 = obj_keys[0], obj_keys[1]
+        # Plot the objectives the user actually optimised
+        (k1, _), (k2, _) = self._plot_objective_axes(result.all_designs[0])
 
         # All designs
         x_all = [d.objectives.get(k1, 0) for d in result.all_designs]
@@ -1564,12 +1581,7 @@ class OptimizationWorkspace(QWidget):
             self._canvas_pareto.draw()
             return
 
-        obj_keys = list(result.pareto_front[0].objectives.keys())
-        if len(obj_keys) < 2:
-            self._canvas_pareto.draw()
-            return
-
-        k1, k2 = obj_keys[0], obj_keys[1]
+        (k1, dir1), (k2, dir2) = self._plot_objective_axes(result.pareto_front[0])
         x_vals = [d.objectives.get(k1, 0) for d in result.pareto_front]
         y_vals = [d.objectives.get(k2, 0) for d in result.pareto_front]
 
@@ -1584,16 +1596,17 @@ class OptimizationWorkspace(QWidget):
         ax.plot([p[0] for p in pairs], [p[1] for p in pairs],
                 color="#58a6ff", linewidth=1.5, alpha=0.4, zorder=2)
 
-        # Annotate best solutions
+        # Annotate best solutions (direction-aware: best of a minimize
+        # objective is its minimum)
         if x_vals:
-            idx_best_x = int(np.argmax(x_vals))
+            idx_best_x = int(np.argmax(x_vals) if dir1 == "maximize" else np.argmin(x_vals))
             ax.annotate("Best " + k1.replace("_", " "),
                         (x_vals[idx_best_x], y_vals[idx_best_x]),
                         textcoords="offset points", xytext=(10, 10),
                         fontsize=8, color="#7ee787",
                         arrowprops=dict(arrowstyle="->", color="#7ee787", lw=0.8))
 
-            idx_best_y = int(np.argmax(y_vals))
+            idx_best_y = int(np.argmax(y_vals) if dir2 == "maximize" else np.argmin(y_vals))
             if idx_best_y != idx_best_x:
                 ax.annotate("Best " + k2.replace("_", " "),
                             (x_vals[idx_best_y], y_vals[idx_best_y]),
@@ -1601,9 +1614,9 @@ class OptimizationWorkspace(QWidget):
                             fontsize=8, color="#bc8cff",
                             arrowprops=dict(arrowstyle="->", color="#bc8cff", lw=0.8))
 
-        # Utopia point
-        ux = max(x_vals) if x_vals else 0
-        uy = max(y_vals) if y_vals else 0
+        # Utopia point (per-axis ideal, respecting objective direction)
+        ux = (max(x_vals) if dir1 == "maximize" else min(x_vals)) if x_vals else 0
+        uy = (max(y_vals) if dir2 == "maximize" else min(y_vals)) if y_vals else 0
         ax.scatter([ux], [uy], c="#f0883e", s=120, marker="D", zorder=5,
                    label="Utopia Point", edgecolors="#ffffff", linewidths=1)
 
@@ -2222,7 +2235,7 @@ class OptimizationWorkspace(QWidget):
             satisfied = info.get("satisfied", True)
             value = info.get("value", 0)
             limit = info.get("limit", 0)
-            icon = "✅" if satisfied else "❌"
+            icon = "✓" if satisfied else "✗"
             color = "#7ee787" if satisfied else "#f85149"
 
             lbl = QLabel(f"{icon} {name}: {value:.2f} (limit: {limit:.2f})")
@@ -2241,7 +2254,7 @@ class OptimizationWorkspace(QWidget):
                     for d in designs]
         if apogees:
             best_idx = int(np.argmax(apogees))
-            self.btn_sol_apogee.setText(f"🏆 Best Apogee: {apogees[best_idx]:.0f} m")
+            self.btn_sol_apogee.setText(f"Best Apogee: {apogees[best_idx]:.0f} m")
             self._pareto_best_apogee = designs[best_idx]
 
         # Best Reliability
@@ -2249,7 +2262,7 @@ class OptimizationWorkspace(QWidget):
         if rel_vals:
             best_idx = int(np.argmax(rel_vals))
             self.btn_sol_reliability.setText(
-                f"🛡 Best Reliability: {rel_vals[best_idx] * 100:.0f}%"
+                f"Best Reliability: {rel_vals[best_idx] * 100:.0f}%"
             )
             self._pareto_best_reliability = designs[best_idx]
 
@@ -2257,15 +2270,19 @@ class OptimizationWorkspace(QWidget):
         masses = [d.variables.get("dry_mass", 999) for d in designs]
         if masses:
             best_idx = int(np.argmin(masses))
-            self.btn_sol_mass.setText(f"⚖ Best Mass: {masses[best_idx]:.2f} kg")
+            self.btn_sol_mass.setText(f"Best Mass: {masses[best_idx]:.2f} kg")
             self._pareto_best_mass = designs[best_idx]
 
-        # Balanced (closest to utopia)
+        # Balanced (closest to utopia) — over the user-enabled objectives only,
+        # with minimize objectives sign-flipped so "utopia" is the true ideal.
         if len(designs) > 2:
-            # Normalize objectives and find min distance to utopia
-            obj_keys = list(designs[0].objectives.keys())
-            obj_matrix = np.array([[d.objectives.get(k, 0) for k in obj_keys]
-                                    for d in designs])
+            active = getattr(self, "_active_objectives", [])
+            if not active:
+                active = [(k, "maximize") for k in list(designs[0].objectives.keys())[:2]]
+            obj_matrix = np.array([
+                [(d.objectives.get(k, 0) if direction == "maximize"
+                  else -d.objectives.get(k, 0)) for k, direction in active]
+                for d in designs])
             if obj_matrix.shape[0] > 0:
                 mins = obj_matrix.min(axis=0)
                 maxs = obj_matrix.max(axis=0)
@@ -2276,7 +2293,7 @@ class OptimizationWorkspace(QWidget):
                 dists = np.sqrt(np.sum((normed - utopia) ** 2, axis=1))
                 best_idx = int(np.argmin(dists))
                 self.btn_sol_balanced.setText(
-                    f"⚡ Balanced: Apogee {apogees[best_idx]:.0f} m"
+                    f"Balanced: Apogee {apogees[best_idx]:.0f} m"
                 )
                 self._pareto_best_balanced = designs[best_idx]
 

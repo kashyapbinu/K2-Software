@@ -448,7 +448,7 @@ def evaluate_candidate(base_config: BatchSimConfig,
         mc_configs = [cfg] * max(mc_sims, 1)
 
     apogees, machs, accels, stabs, landings = [], [], [], [], []
-    rail_exits, successes = [], []
+    rail_exits, successes, velocities = [], [], []
 
     for i, mc_cfg in enumerate(mc_configs):
         try:
@@ -460,6 +460,7 @@ def evaluate_candidate(base_config: BatchSimConfig,
             landings.append(res.landing_distance)
             rail_exits.append(res.rail_exit_velocity)
             successes.append(1.0 if res.success else 0.0)
+            velocities.append(res.max_velocity)
         except Exception:
             apogees.append(0.0)
             machs.append(0.0)
@@ -468,6 +469,7 @@ def evaluate_candidate(base_config: BatchSimConfig,
             landings.append(9999.0)
             rail_exits.append(0.0)
             successes.append(0.0)
+            velocities.append(0.0)
 
     arr_apogee = np.array(apogees)
     arr_mach = np.array(machs)
@@ -551,7 +553,7 @@ def evaluate_candidate(base_config: BatchSimConfig,
     obj_vals = {
         "max_apogee": mean_apogee,
         "max_rail_exit_velocity": float(np.mean(arr_rail)),
-        "max_velocity": float(np.mean(arr_mach)) * 340.0,
+        "max_velocity": float(np.mean(velocities)) if velocities else 0.0,
         "max_payload_fraction": 0.0,
         "max_stability_margin": aero_stability,
         "min_landing_distance": float(np.mean(arr_landing)),

@@ -125,6 +125,10 @@ class RocketState:
     # ── Environment ───────────────────────────────────────────────
     launch_angle: float = 90.0
     wind_speed: float = 0.0
+    wind_direction: float = 0.0           # bearing wind blows FROM (deg)
+    wind_gust_intensity: float = 0.0      # turbulence σ/mean (0 → 0.1 default)
+    wind_mode: str = "average"            # "average" | "multi_level"
+    wind_layers: list = field(default_factory=list)  # [(alt_m, speed_m_s, dir_deg)]
     temperature_ambient: float = 288.15
 
     # ── Motor ─────────────────────────────────────────────────────
@@ -136,6 +140,8 @@ class RocketState:
     motor_isp: float = 0.0
     motor_mass_flow: float = 0.0
     motor_chamber_pressure: float = 0.0
+    motor_dry_mass: float = 0.0  # casing/hardware mass; survives burnout
+    motor_length: float = 0.0    # physical motor length; CG sits motor_length/2 fwd of motor_position
     custom_thrust_curve: list = field(default_factory=list)
 
     # ── Avionics ──────────────────────────────────────────────────
@@ -152,6 +158,7 @@ class RocketState:
     main_cd_area: float = 3.0             # Cd × A for main chute (m²)
 
     # ── Atmosphere Snapshot (updated each tick) ───────────────────
+    ground_temperature: float = 288.15    # launch-site temp (K) → ISA+ΔT offset
     atm_temperature: float = 288.15
     atm_pressure: float = 101325.0
     atm_density: float = 1.225
@@ -168,13 +175,14 @@ class RocketState:
     cfd_force_normal: float = 0.0
     cfd_mach: float = 0.0
     cfd_reynolds: float = 0.0
+    cfd_surface_vtk: str = ""   # path to surface_flow.vtu/.vtk from the last run
 
     def total_mass(self) -> float:
         # Prefer the live propellant_mass, but fall back to the initial load when
         # it has not been synced yet (e.g. a headless caller that only set
         # propellant_mass_initial before the sim engine populated propellant_mass).
         prop = self.propellant_mass if self.propellant_mass > 0 else self.propellant_mass_initial
-        return self.dry_mass + prop
+        return self.dry_mass + self.motor_dry_mass + prop
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -254,9 +262,14 @@ class RocketStateEngine(QObject):
         # ── Dynamic CG calculation ──
         # Even with high-fidelity assembly (auto_estimate_properties=False),
         # the propellant mass changes, so total CG must be updated.
-        total_m = s.dry_mass + s.propellant_mass
+        # Motor mass (casing + remaining propellant) acts at the motor's own CG:
+        # motor_position is the motor AFT end (flush with mount aft end, OR convention),
+        # so the mass centroid sits half the motor length forward of it.
+        motor_m = s.motor_dry_mass + s.propellant_mass
+        motor_cg = max(0.0, s.motor_position - 0.5 * s.motor_length)
+        total_m = s.dry_mass + motor_m
         if total_m > 0:
-            s.cg = (s.dry_mass * s.dry_cg + s.propellant_mass * s.motor_position) / total_m
+            s.cg = (s.dry_mass * s.dry_cg + motor_m * motor_cg) / total_m
 
         # Skip estimations if we have a high-fidelity assembly active
         if not self.auto_estimate_properties:
@@ -282,7 +295,8 @@ class RocketStateEngine(QObject):
         motor_cg = s.length * 0.85
         total_mass = s.total_mass()
         if total_mass > 0:
-            s.cg = (s.dry_mass * body_cg + s.propellant_mass * motor_cg) / total_mass
+            s.cg = (s.dry_mass * body_cg
+                    + (s.motor_dry_mass + s.propellant_mass) * motor_cg) / total_mass
 
         # ── CP and Stability estimation (via AeroModel) ──
         try:

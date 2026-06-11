@@ -67,6 +67,13 @@ def main():
     # High DPI support
     os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
 
+    # QtWebEngine (Cinematic view) must be imported BEFORE the QApplication is
+    # created, or Qt aborts with "Qt.AA_ShareOpenGLContexts must be set".
+    try:
+        import PyQt6.QtWebEngineWidgets  # noqa: F401
+    except Exception:
+        pass  # WebEngine optional — Cinematic tab shows an install hint instead
+
     app = QApplication(sys.argv)
     app.setApplicationName("K2 Aerospace")
     app.setOrganizationName("K2")

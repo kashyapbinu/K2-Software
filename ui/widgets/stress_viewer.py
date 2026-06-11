@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QFrame
 )
 from PyQt6.QtCore import Qt
+from ui.icons import icon
 
 logger = logging.getLogger("K2.StressViewer")
 
@@ -294,7 +295,7 @@ class StressViewer(QWidget):
         self.comp_combo.currentTextChanged.connect(self._on_component)
         bl.addWidget(self.comp_combo)
         bl.addStretch()
-        self.btn_reset = QPushButton("⟳ Reset View")
+        self.btn_reset = QPushButton(icon("reset_view"), "Reset View")
         self.btn_reset.setStyleSheet(_CTRL_BTN)
         self.btn_reset.clicked.connect(self.reset_view)
         bl.addWidget(self.btn_reset)

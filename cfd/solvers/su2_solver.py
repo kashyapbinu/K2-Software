@@ -81,7 +81,8 @@ _TURB_MODEL_MAP = {
     "Laminar": {"solver": "NAVIER_STOKES",  "turb": None,  "turb_line": ""},
     "SA":      {"solver": "RANS",           "turb": "SA",  "turb_line": "KIND_TURB_MODEL= SA"},
     "SST":     {"solver": "RANS",           "turb": "SST", "turb_line": "KIND_TURB_MODEL= SST\nSST_OPTIONS= VORTICITY"},
-    "KE":      {"solver": "RANS",           "turb": "KE",  "turb_line": "KIND_TURB_MODEL= KE"},
+    # NOTE: no "KE" entry — SU2 has no k-epsilon model (SA/SST only).
+    # Unknown keys fall back to SST in generate_case().
 }
 
 _SU2_CONFIG_TEMPLATE = """\
@@ -110,7 +111,9 @@ FREESTREAM_TURBULENCEINTENSITY= 0.001
 FREESTREAM_TURB2LAMVISCRATIO= 10.0
 
 % ── Reference values ─────────────────────────────────────
-% Moment origin = nose tip so Cm is nose-tip moment; CP = nose_x - (Cm/CN)*L
+% Moment origin = nose tip (x=0 in the mesh frame; see cfd/meshing.py).
+% Pitch moment for an AoA run is CMy (SU2 rotates the freestream about Y),
+% so CP-from-nose = -(CMy/CN)*L.
 REF_ORIGIN_MOMENT_X= {moment_x}
 REF_ORIGIN_MOMENT_Y= 0.0
 REF_ORIGIN_MOMENT_Z= 0.0
@@ -165,7 +168,7 @@ SOLUTION_FILENAME= solution_flow.dat
 RESTART_FILENAME= restart_flow.dat
 TABULAR_FORMAT= CSV
 
-HISTORY_OUTPUT= ITER, RMS_DENSITY, RMS_ENERGY, {turb_hist_fields} LIFT, DRAG, DRAG_PRESSURE, DRAG_VISCOUS, MOMENT_Z, FORCE_X, FORCE_Y, FORCE_Z
+HISTORY_OUTPUT= ITER, RMS_DENSITY, RMS_ENERGY, {turb_hist_fields} LIFT, DRAG, DRAG_PRESSURE, DRAG_VISCOUS, MOMENT_Y, FORCE_X, FORCE_Y, FORCE_Z
 CONV_FILENAME= history
 
 VOLUME_FILENAME= flow
@@ -222,6 +225,8 @@ class SU2Solver(CFDSolver):
             bl_layers=cfg.boundary_layer_layers,
             bl_growth=cfg.boundary_layer_growth,
             geometry_dict=cfg.geometry_dict,   # exact dims if available
+            custom_wall_size=cfg.custom_wall_size,
+            target_element_count=cfg.target_element_count,
         )
         self._mesh_path = out_mesh
         logger.info(f"Mesh written to {out_mesh}")
@@ -284,9 +289,12 @@ class SU2Solver(CFDSolver):
         restart_sol = "YES" if self.warm_start else "NO"
         conv_startiter = 10 if self.warm_start else 50
 
-        # Moment origin at nose tip (x=0 in rocket-body frame; nose points forward)
-        # With SU2 mesh: x increases from nozzle (0) to nose (ref_length)
-        moment_x = ref_length   # nose tip location in CFD x-axis
+        # Moment origin at the nose tip. Mesh frame (cfd/meshing.py): nose tip
+        # at x=0, nozzle at x=total_L, flow along +X — so the nose is at x=0,
+        # NOT at x=ref_length. Verified against SU2 v8.5: with origin at x=0
+        # the pitch moment CMy gives CP-from-nose = -(CMy/CN)*L at a plausible
+        # station (0.63L for a finned test rocket); CMz is ~15x smaller noise.
+        moment_x = 0.0   # nose tip location in CFD x-axis
 
         # Store flow metadata for results
         self._flow_meta = {
@@ -392,7 +400,7 @@ class SU2Solver(CFDSolver):
                     f"Re-running serial."
                 )
                 self._emit_log(
-                    f"⚠ MPI probe failed: SU2 is a serial build (launched "
+                    f"MPI probe failed: SU2 is a serial build (launched "
                     f"{self._exec_banner_count} copies). Multi-core unavailable — "
                     f"re-running on 1 core. Results valid."
                 )
@@ -562,10 +570,13 @@ class SU2Solver(CFDSolver):
                             return 0.0
                 return 0.0
 
-            # Core coefficients
+            # Core coefficients. Pitch moment is CMy: SU2 applies AoA as a
+            # rotation about the Y axis (freestream tilts in the x-z plane),
+            # so the AoA-induced normal force is along Z and its moment is
+            # about Y. CMz is the (near-zero) yaw component — do not use it.
             result.cd = abs(_get("CD"))
             result.cl = _get("CL")
-            result.cm = _get("CMz")
+            result.cm = _get("CMy")
             result.iterations = len(rows)
 
             # Drag decomposition
@@ -610,13 +621,17 @@ class SU2Solver(CFDSolver):
             result.solver_name = "SU2"
 
             # CP location — recovered per point from the integrated surface forces.
-            # SU2's LIFT/MOMENT_Z are the integrated pressure+shear loads, so the CP
+            # SU2's LIFT/MOMENT_Y are the integrated pressure+shear loads, so the CP
             # derived from them IS a pressure-integration CP (not a fitted curve).
-            # Cm is taken about REF_ORIGIN_MOMENT_X = nose tip (x = ref_length):
-            #     Cm = -CN * (x_cp - x_moment) / ref_length
-            #  => x_cp = x_moment - (Cm / CN) * ref_length     (CFD x-axis, from nozzle)
-            _CN = result.cl   # normal force coeff ≈ CL for slender body at small AoA
-            _mx = getattr(self, '_flow_meta', {}).get('moment_x', result.ref_length)
+            # Mesh frame: nose tip at x=0, nozzle at x=total_L (cfd/meshing.py).
+            # Cm (= CMy) is taken about REF_ORIGIN_MOMENT_X = 0 (the nose tip):
+            #     My = -(x_cp - 0) * N   ⇒   Cm = -CN * x_cp / ref_length
+            #  => x_cp_from_nose = -(Cm / CN) * ref_length
+            # Verified against SU2 v8.5 (finned 1 m test rocket, AoA 4°):
+            # CMy=-0.54 → x_cp=0.626 m from nose; CMz was 15x smaller (noise).
+            aoa_rad = math.radians(self.config.angle_of_attack_deg)
+            # Normal force coefficient from wind-frame CL/CD (exact, matters >5° AoA)
+            _CN = result.cl * math.cos(aoa_rad) + result.cd * math.sin(aoa_rad)
             # True rocket length for clamping — prefer geometry_dict (exact)
             # over ref_length (which may include fin span from STL bbox)
             _true_len = result.ref_length
@@ -625,30 +640,35 @@ class SU2Solver(CFDSolver):
             # Threshold scales with the swept normal force so a single near-zero-AoA
             # point is excluded (CN→0 makes Cm/CN indeterminate) but every genuinely
             # loaded point is kept and computed independently.
+            # Body-frame normal force (what the airframe actually bends under) —
+            # more correct than the wind-frame CL set above, especially >5° AoA.
+            result.force_normal = abs(_CN) * _q * _A
             if abs(_CN) > 0.003:  # meaningful normal force present
-                _xcp = _mx - (result.cm / _CN) * result.ref_length
+                _xcp_nose = -(result.cm / _CN) * result.ref_length
                 # Clamp to the physical body range [0, true_length]; warn (don't
                 # silently saturate) if the raw value lands outside so a flat-line
                 # artefact is visible in the log rather than hidden.
-                result.cp_location_m = max(0.0, min(_xcp, _true_len))
-                if not (0.0 <= _xcp <= _true_len):
-                    logger.warning(f"CP raw x_cp={_xcp:.4f} m outside body [0,{_true_len:.3f}] "
-                                   f"— clamped (Cm={result.cm:.5f}, CN={_CN:.5f})")
-                result.cp_from_nose_m = max(0.0, _true_len - result.cp_location_m)
+                cp_nose = max(0.0, min(_xcp_nose, _true_len))
+                if not (0.0 <= _xcp_nose <= _true_len):
+                    logger.warning(f"CP raw x_cp={_xcp_nose:.4f} m from nose outside "
+                                   f"body [0,{_true_len:.3f}] — clamped "
+                                   f"(Cm={result.cm:.5f}, CN={_CN:.5f})")
+                result.cp_from_nose_m = cp_nose
+                result.cp_location_m = _true_len - cp_nose   # from nozzle/tail
 
                 # ── Static-stability moment about the CG ─────────────────────
-                # Transfer the integrated nose-tip moment to the CG:
-                #     Cm_cg = CN * (x_cp - x_cg) / ref_length      (CFD x-axis)
-                # CP behind CG (x_cp < x_cg) ⇒ Cm_cg slope < 0 ⇒ statically stable.
-                # This is exactly M = (CP - CG) × F reduced to coefficient form;
-                # no fitted equation is used.
+                # Transfer the integrated nose-tip moment to the CG (both
+                # stations measured from the nose):
+                #     Cm_cg = CN * (x_cg - x_cp) / ref_length
+                # CP aft of CG (x_cp > x_cg) ⇒ Cm_cg < 0 at positive AoA
+                # ⇒ restoring ⇒ statically stable. This is exactly
+                # M = (CG - CP) × F reduced to coefficient form.
                 _cg_nose = self.config.cg_from_nose_m
                 if _cg_nose is not None:
-                    x_cg = result.ref_length - _cg_nose   # nose-frame → CFD x-axis
-                    result.x_cg_m = x_cg
-                    result.cm_cg = _CN * (result.cp_location_m - x_cg) / result.ref_length
-                logger.info(f"CP = {result.cp_location_m:.4f} m from nozzle "
-                            f"({result.cp_from_nose_m:.4f} from nose) "
+                    result.x_cg_m = _cg_nose   # from nose (CFD x-axis)
+                    result.cm_cg = _CN * (_cg_nose - cp_nose) / result.ref_length
+                logger.info(f"CP = {result.cp_from_nose_m:.4f} m from nose "
+                            f"({result.cp_location_m:.4f} from nozzle) "
                             f"(Cm_nose={result.cm:.5f}, Cm_cg={result.cm_cg:.5f}, "
                             f"CN={_CN:.5f}, ref_L={result.ref_length:.3f})")
             else:
@@ -658,13 +678,18 @@ class SU2Solver(CFDSolver):
                 result.cp_location_m = 0.0
                 result.cm_cg = 0.0   # zero normal force ⇒ zero stability moment
 
-            # Converged if residual dropped below -6 order of magnitude
+            # Converged if the residual hit the configured floor, OR SU2
+            # stopped early (a convergence criterion — residual or Cauchy —
+            # fired before the iteration cap). Exhausting max_iterations
+            # without hitting the floor is NOT convergence.
             try:
                 last_rho = _get("rms[Rho]")
-                result.converged = (last_rho < -6.0) or (len(rows) >= self.config.max_iterations)
+                conv_floor = math.log10(self.config.convergence_tolerance)  # e.g. -6
+                stopped_early = len(rows) < self.config.max_iterations
+                result.converged = (last_rho <= conv_floor) or stopped_early
                 result.final_residual = last_rho
             except Exception:
-                result.converged = len(rows) >= 100
+                result.converged = False
 
             # Build residual history for the convergence plot
             for row in rows:

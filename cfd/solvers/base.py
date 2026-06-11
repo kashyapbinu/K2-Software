@@ -21,19 +21,30 @@ logger = logging.getLogger("K2.CFD.Base")
 def isa_conditions(altitude_m: float) -> tuple[float, float, float]:
     """International Standard Atmosphere.
     Returns (pressure_Pa, temperature_K, density_kg_m3) at a given altitude.
-    Valid from 0 to ~20 km (troposphere + lower stratosphere).
+    Standard layered model, valid 0 to 47 km (clamped above); the UI allows
+    altitudes up to 50 km.
     """
-    T0, P0, L, R, g = 288.15, 101325.0, 0.0065, 287.05, 9.80665
-    if altitude_m <= 11000:
-        T = T0 - L * altitude_m
-        P = P0 * (T / T0) ** (g / (L * R))
+    import math
+    R, g = 287.05, 9.80665
+    # (base altitude [m], base temperature [K], base pressure [Pa],
+    #  lapse rate [K/m] — 0 means isothermal layer)
+    layers = [
+        (0.0,     288.15, 101325.0,  -0.0065),   # troposphere
+        (11000.0, 216.65, 22632.06,   0.0),      # tropopause (isothermal)
+        (20000.0, 216.65, 5474.889,   0.0010),   # lower stratosphere
+        (32000.0, 228.65, 868.0187,   0.0028),   # upper stratosphere
+        (47000.0, 270.65, 110.9063,   0.0),      # stratopause cap
+    ]
+    h = max(0.0, min(altitude_m, 47000.0))
+    hb, Tb, Pb, L = next(
+        layer for layer in reversed(layers) if h >= layer[0]
+    )
+    if L == 0.0:
+        T = Tb
+        P = Pb * math.exp(-g * (h - hb) / (R * Tb))
     else:
-        # Isothermal stratosphere from 11 km
-        T11 = T0 - L * 11000
-        P11 = P0 * (T11 / T0) ** (g / (L * R))
-        T = T11
-        import math
-        P = P11 * math.exp(-(altitude_m - 11000) * g / (R * T11))
+        T = Tb + L * (h - hb)
+        P = Pb * (T / Tb) ** (-g / (L * R))
     rho = P / (R * T)
     return P, T, rho
 

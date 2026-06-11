@@ -40,9 +40,15 @@ _LAYER_TOPS = [11000, 20000, 32000, 47000, 51000, 71000, 86000]
 
 
 class Atmosphere:
-    """International Standard Atmosphere model."""
+    """International Standard Atmosphere model.
 
-    def __init__(self):
+    Supports the ISA+ΔT convention via ``temperature_offset``: temperature
+    (and therefore density and speed of sound) is shifted by a constant
+    offset while pressure keeps the standard profile.
+    """
+
+    def __init__(self, temperature_offset: float = 0.0):
+        self.temperature_offset = temperature_offset
         # Pre-compute base pressures for each layer
         self._base_pressures = [P0]
         self._base_densities = [RHO0]
@@ -70,11 +76,11 @@ class Atmosphere:
         return len(_LAYERS) - 1
 
     def temperature(self, altitude: float) -> float:
-        """Temperature in Kelvin at given altitude (m)."""
+        """Temperature in Kelvin at given altitude (m), including ISA+ΔT offset."""
         altitude = max(0.0, min(altitude, 86000.0))
         i = self._get_layer(altitude)
         h_base, T_base, lapse = _LAYERS[i]
-        return T_base + lapse * (altitude - h_base)
+        return max(1.0, T_base + lapse * (altitude - h_base) + self.temperature_offset)
 
     def pressure(self, altitude: float) -> float:
         """Pressure in Pascals at given altitude (m)."""

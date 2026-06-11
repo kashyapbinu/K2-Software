@@ -76,12 +76,12 @@ def _plot_curves(bm: Benchmark) -> list:
 
 # ── markdown ──────────────────────────────────────────────────────────────────
 
-_STATUS = {True: "✅ PASS", False: "❌ FAIL"}
+_STATUS = {True: "PASS", False: "FAIL"}
 
 
 def _bench_md(bm: Benchmark, plot_paths: list) -> str:
     if bm.skipped:
-        return (f"### ⚠️ {bm.name}  *(skipped)*\n\n"
+        return (f"### {bm.name}  *(skipped)*\n\n"
                 f"_Reference:_ {bm.reference}  \n"
                 f"_Reason:_ {bm.skip_reason}\n")
     head = _STATUS[bm.passed]
@@ -96,7 +96,7 @@ def _bench_md(bm: Benchmark, plot_paths: list) -> str:
               (f" / {c.tol_abs:g}" if c.tol_abs else "")
         lines.append(
             f"| {c.label} | {c.k2:.4g} | {c.ref:.4g} | {c.source} | "
-            f"{c.rel_err:.2%} | {tol or '—'} | {'✅' if c.passed else '❌'} |")
+            f"{c.rel_err:.2%} | {tol or '—'} | {'✓' if c.passed else '✗'} |")
     lines.append("")
     for p in plot_paths:
         lines.append(f"![{bm.name}]({p})")

@@ -187,45 +187,92 @@ class PropulsionWorkspace(QWidget):
         import numpy as np
         t = np.array(sim_data["time"])
         f = np.array(sim_data["thrust"])
-        
-        burn_time = t[-1]
+
+        burn_time = float(t[-1])
         max_thrust = float(np.max(f))
-        avg_thrust = float(np.mean(f))
-        
-        # Integrate for total impulse
+
+        # Integrate for total impulse; average = impulse/burn (exact, not
+        # sample-mean which depends on time spacing)
         total_impulse = float(np.trapz(f, t))
+        avg_thrust = total_impulse / burn_time if burn_time > 0 else 0.0
         prop_mass = float(sim_data.get("prop_mass", 0.5))
-        
+
+        # MotorSimulator doesn't model the hardware, so estimate it:
+        # motor length ≈ grain stack + nozzle/closures; casing mass ≈ half the
+        # propellant mass (typical HPR reload hardware ratio). Zero here would
+        # corrupt the CG/stability calc (motor dry mass matters post-burnout).
+        metrics = sim_data.get("metrics", {})
+        prop_len = float(metrics.get("prop_len", 0.0))
+        motor_length = float(sim_data.get("length", 0.0)) or prop_len * 1.2
+        case_mass = float(sim_data.get("case_mass", 0.0)) or prop_mass * 0.5
+
         # Reset combo box to "None" so it doesn't show a pre-selected motor
         self.motor_combo.blockSignals(True)
         self.motor_combo.setCurrentIndex(0)
         self.motor_combo.blockSignals(False)
-        
+
         # Update engine
         self.engine.update(
-            motor_designation="Custom BATES", 
+            motor_designation="Custom BATES",
             motor_avg_thrust=avg_thrust,
             motor_max_thrust=max_thrust,
-            motor_total_impulse=total_impulse, 
+            motor_total_impulse=total_impulse,
             motor_burn_time=burn_time,
-            propellant_mass=prop_mass, 
+            propellant_mass=prop_mass,
             propellant_mass_initial=prop_mass,
+            motor_dry_mass=case_mass,
+            motor_length=motor_length,
             custom_thrust_curve=list(zip(t.tolist(), f.tolist()))
         )
         self._update_display()
 
     def _on_motor_selected(self, idx):
+        # Always clear any custom thrust curve — the sim engine and the plot
+        # both prefer it over the trapezoid, so a stale one would silently fly
+        # the OLD custom motor under the newly selected motor's name.
         if idx == 0:
             self.engine.update(motor_designation="None", motor_avg_thrust=0, motor_max_thrust=0,
-                motor_total_impulse=0, motor_burn_time=0, propellant_mass=0, propellant_mass_initial=0)
+                motor_total_impulse=0, motor_burn_time=0, propellant_mass=0, propellant_mass_initial=0,
+                motor_dry_mass=0, motor_length=0, custom_thrust_curve=[])
         else:
             m = self._filtered[idx - 1]
+            prop, dry = self._sanitized_masses(m)
             self.engine.update(
                 motor_designation=m["designation"], motor_avg_thrust=m["avg_thrust"],
                 motor_max_thrust=m.get("max_thrust", m["avg_thrust"] * 1.4),
                 motor_total_impulse=m["total_impulse"], motor_burn_time=m["burn_time"],
-                propellant_mass=m["propellant_mass"], propellant_mass_initial=m["propellant_mass"])
+                propellant_mass=prop, propellant_mass_initial=prop,
+                motor_dry_mass=dry,
+                motor_length=m.get("length", 0.0),
+                custom_thrust_curve=[])
         self._update_display()
+
+    @staticmethod
+    def _sanitized_masses(m) -> tuple:
+        """(propellant_mass, dry_mass) with catalog-data repair.
+
+        ThrustCurve hybrids (Contrail, SkyRipper, RATT…) list only the fuel
+        grain as propellant_mass — the oxidizer is missing, so the implied
+        Isp is absurd (500–16000 s) and the sim would deplete almost no mass
+        while delivering the full impulse. Reconstruct an effective expended
+        mass from the impulse at a typical delivered Isp instead. Also guards
+        corrupt entries where propellant_mass exceeds total_mass.
+        """
+        imp = m.get("total_impulse", 0.0)
+        prop = m.get("propellant_mass", 0.0)
+        total = m.get("total_mass", 0.0)
+        isp = imp / (prop * 9.81) if prop > 0 else 0.0
+        if prop <= 0 or isp > 350.0 or (total > 0 and prop >= total):
+            prop_fixed = imp / (9.81 * 200.0)   # typical delivered Isp ≈ 200 s
+            if total > 0:
+                prop_fixed = min(prop_fixed, 0.9 * total)
+            logger.warning(
+                f"Motor {m.get('designation')}: implausible catalog masses "
+                f"(prop={prop*1000:.1f} g, Isp={isp:.0f} s) — using effective "
+                f"expended mass {prop_fixed*1000:.1f} g (hybrid oxidizer not in catalog)")
+            prop = prop_fixed
+        dry = max(0.0, total - prop)
+        return prop, dry
 
     def _on_state_changed(self, state):
         # Body diameter may have changed -> refresh fit-body filter + selection sync

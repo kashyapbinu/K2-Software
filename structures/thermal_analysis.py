@@ -286,8 +286,16 @@ def analyze_thermal(assembly, mach: float, altitude_m: float,
                 wt = getattr(comp, 'wall_thickness', 0.002)
                 # Nose tip radius estimation from shape
                 nose_length = getattr(comp, 'length', 0.3)
-                nose_diameter = getattr(comp, 'aft_diameter', d_ref)
-                shape = getattr(comp, 'nose_shape', 'ogive')
+                nose_diameter = getattr(comp, 'diameter', d_ref)
+                # NoseCone.shape values: "Ogive", "Conical", "Haack (LD)",
+                # "Elliptical", "Parabolic" — normalize for matching
+                shape_raw = str(getattr(comp, 'shape', 'Ogive')).lower()
+                if 'conic' in shape_raw:
+                    shape = 'conical'
+                elif 'ellip' in shape_raw:
+                    shape = 'elliptical'
+                else:  # ogive, haack, parabolic → blunt-tip ogive estimate
+                    shape = 'ogive'
                 if shape in ('ogive', 'haack'):
                     # Tangent ogive: ρ = (r² + L²) / (2r)
                     r = nose_diameter / 2

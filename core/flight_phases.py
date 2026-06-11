@@ -86,15 +86,18 @@ class PhaseManager:
     def __init__(self):
         self._apogee_handled = False
         self._prev_velocity = 0.0
+        self._apogee_time = None
 
     def reset(self):
         """Reset for a new simulation run."""
         self._apogee_handled = False
         self._prev_velocity = 0.0
+        self._apogee_time = None
 
     def evaluate(self, phase: FlightPhase, t: float, altitude: float,
                  velocity: float, thrust: float,
-                 main_deploy_alt: float = 300.0) -> FlightPhase:
+                 main_deploy_alt: float = 300.0,
+                 drogue_delay: float = 0.0) -> FlightPhase:
         """
         Determine the next flight phase based on current conditions.
 
@@ -105,6 +108,8 @@ class PhaseManager:
             velocity: Current velocity (m/s, positive = up).
             thrust: Current thrust (N).
             main_deploy_alt: Main parachute deployment altitude (m).
+            drogue_delay: Seconds after apogee before drogue deployment
+                (vehicle falls ballistic during the delay).
 
         Returns:
             New FlightPhase (may be same as input if no transition).
@@ -132,10 +137,13 @@ class PhaseManager:
                 logger.info(f"Phase: COAST → APOGEE (alt={altitude:.1f}m)")
 
         elif phase == FlightPhase.APOGEE:
-            if not self._apogee_handled:
+            if self._apogee_time is None:
+                self._apogee_time = t
+            if not self._apogee_handled and (t - self._apogee_time) >= drogue_delay:
                 self._apogee_handled = True
                 new_phase = FlightPhase.DROGUE_DESCENT
-                logger.info("Phase: APOGEE → DROGUE_DESCENT")
+                logger.info(f"Phase: APOGEE → DROGUE_DESCENT "
+                            f"(delay {drogue_delay:.1f}s elapsed)")
 
         elif phase == FlightPhase.DROGUE_DESCENT:
             if altitude <= main_deploy_alt:

@@ -118,7 +118,7 @@ def _mesh_axisym(comp, nodes, elements, nsets, elsets,
     L = comp.component_length()
     pos = comp.position
     n_axial = max(4, int(axial_per_cal * L / max(d_ref, 0.01)))
-    cname = _safe_name(comp.name)
+    cname = _unique_name(_safe_name(comp.name), nsets)
     cn, ce = [], []
     grid = []
     for i in range(n_axial + 1):
@@ -147,9 +147,9 @@ def _mesh_fin_set(finset, parent, nodes, elements, nsets, elsets, nid, eid, fin_
     sweep_deg = finset.sweep_angle
     pos = finset.position
     body_r = parent.outer_diameter_val / 2
-    sweep_off = h * math.tan(math.radians(sweep_deg)) if sweep_deg > 0 else 0
+    sweep_off = h * math.tan(math.radians(sweep_deg))
     ns, nc = max(3, fin_div), max(3, fin_div)
-    cname = _safe_name(finset.name)
+    cname = _unique_name(_safe_name(finset.name), nsets)
     cn, ce = [], []
     for fi in range(n_fins):
         ang = 2 * math.pi * fi / n_fins
@@ -261,3 +261,14 @@ def _safe_name(name: str) -> str:
     if not s: s = "COMP"
     if s[0].isdigit(): s = "C_" + s
     return s.upper()
+
+
+def _unique_name(base: str, existing: dict) -> str:
+    """Components sharing a display name (e.g. two 'Body Tube') would
+    otherwise overwrite each other's node/element sets."""
+    if base not in existing:
+        return base
+    i = 2
+    while f"{base}_{i}" in existing:
+        i += 1
+    return f"{base}_{i}"

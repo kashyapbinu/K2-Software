@@ -26,7 +26,7 @@ class StructuralMaterial:
     name: str = "Aluminum 6061-T6"
     E: float = 68.9e9           # Young's modulus (Pa)
     nu: float = 0.33            # Poisson's ratio
-    G: float = 26.0e9           # Shear modulus (Pa) — auto-calc if 0
+    G: float = 0.0              # Shear modulus (Pa) — auto-calc from E, nu if 0
     density: float = 2700.0     # kg/m³
     yield_strength: float = 276e6       # Tensile yield (Pa)
     ultimate_strength: float = 310e6    # Ultimate tensile (Pa)
@@ -96,9 +96,31 @@ STRUCTURAL_MATERIALS = {
 }
 
 
+# Component-library material names (core.components.MATERIALS) → nearest
+# structural analogue. Without these, unknown names silently fell back to
+# aluminum — e.g. a fiberglass fin got aluminum's shear modulus, over-
+# predicting flutter speed ~2×.
+_MATERIAL_ALIASES = {
+    "Fiberglass": "Fiberglass (G10)",
+    "Carbon Fiber": "Carbon Fiber Composite",
+    "Aluminum 6061": "Aluminum 6061-T6",
+    "Balsa Wood": "Plywood (Birch)",
+    "Cardboard": "Kraft Phenolic",
+    "Polycarbonate": "ABS Plastic",
+}
+
+
 def get_structural_material(name: str) -> StructuralMaterial:
-    """Look up a material; falls back to Aluminum 6061-T6."""
-    return STRUCTURAL_MATERIALS.get(name, STRUCTURAL_MATERIALS["Aluminum 6061-T6"])
+    """Look up a material (component-library aliases supported);
+    falls back to Aluminum 6061-T6."""
+    if name in STRUCTURAL_MATERIALS:
+        return STRUCTURAL_MATERIALS[name]
+    alias = _MATERIAL_ALIASES.get(name)
+    if alias is not None:
+        return STRUCTURAL_MATERIALS[alias]
+    if name:
+        logger.warning("Unknown structural material '%s' — using Aluminum 6061-T6", name)
+    return STRUCTURAL_MATERIALS["Aluminum 6061-T6"]
 
 
 # ── Load Case ────────────────────────────────────────────────────────────────
@@ -322,7 +344,7 @@ class ModalResult:
     damping_source: str = ""                                # "Material estimate" / "Rayleigh" / etc.
 
     # ── Resonance assessment ──
-    resonance_warnings: list = field(default_factory=list)     # ["⚠ Mode 3 near motor 1P (250 Hz)", ...]
+    resonance_warnings: list = field(default_factory=list)     # ["Mode 3 near motor 1P (250 Hz)", ...]
     motor_1p_hz: float = 0.0                                    # Motor combustion 1P frequency
     motor_2p_hz: float = 0.0                                    # Motor combustion 2P
     aero_buffet_band: tuple = (0.0, 0.0)                        # (low_Hz, high_Hz) Strouhal buffeting

@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QSlider, QToolButton
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from ui.icons import icon
 import pyvista as pv
 from pyvistaqt import QtInteractor
 
@@ -609,7 +610,7 @@ class CFDWorkspace(QWidget):
         lay.setSpacing(12)
 
         # Title
-        title = QLabel("⚡  CFD Analysis")
+        title = QLabel("CFD Analysis")
         title.setStyleSheet("color:#58a6ff;font-size:15px;font-weight:700;padding:2px 0 6px 0;")
         lay.addWidget(title)
 
@@ -634,7 +635,7 @@ class CFDWorkspace(QWidget):
         self._cad_lbl.setWordWrap(True)
         gl.addWidget(self._cad_lbl)
 
-        self._btn_browse = QPushButton("Browse CAD File…")
+        self._btn_browse = QPushButton(icon("browse"), "Browse CAD File…")
         self._btn_browse.setStyleSheet(_BTN_SECONDARY)
         self._btn_browse.setEnabled(False)
         self._btn_browse.clicked.connect(self._browse_cad)
@@ -662,7 +663,8 @@ class CFDWorkspace(QWidget):
         self._sp_aoa.setSuffix(" °")
 
         self._cb_turb = QComboBox()
-        self._cb_turb.addItems(["Euler", "Laminar", "Spalart-Allmaras", "k-\u03c9 SST", "k-\u03b5"])
+        # SU2 supports SA and SST only \u2014 no k-epsilon model exists in SU2.
+        self._cb_turb.addItems(["Euler", "Laminar", "Spalart-Allmaras", "k-\u03c9 SST"])
         self._cb_turb.setCurrentIndex(3)  # SST default
 
         fl.addRow("Mach:", self._sp_mach)
@@ -842,7 +844,7 @@ class CFDWorkspace(QWidget):
         dl.addRow("Colormap:", self._cb_cmap)
 
         # Screenshot button
-        self._btn_screenshot = QPushButton("📸  Screenshot (4K)")
+        self._btn_screenshot = QPushButton(icon("screenshot"), "Screenshot (4K)")
         self._btn_screenshot.setStyleSheet(_BTN_SECONDARY)
         self._btn_screenshot.clicked.connect(self._screenshot_hq)
         dl.addRow("", self._btn_screenshot)
@@ -965,15 +967,15 @@ class CFDWorkspace(QWidget):
         self._mesh_sync_guard = False
 
         # ── Action buttons ──
-        self._btn_export = QPushButton("📐  Export Geometry to STL")
+        self._btn_export = QPushButton(icon("export"), "Export Geometry to STL")
         self._btn_export.setStyleSheet(_BTN_SECONDARY)
         self._btn_export.clicked.connect(self._export_geometry)
 
-        self._btn_run = QPushButton("🚀  Run CFD Analysis")
+        self._btn_run = QPushButton(icon("run", color="#fff"), "Run CFD Analysis")
         self._btn_run.setStyleSheet(_BTN_PRIMARY)
         self._btn_run.clicked.connect(self._run_cfd)
 
-        self._btn_stop = QPushButton("⏹  Stop Solver")
+        self._btn_stop = QPushButton(icon("stop"), "Stop Solver")
         self._btn_stop.setStyleSheet(_BTN_SECONDARY)
         self._btn_stop.setEnabled(False)
         self._btn_stop.clicked.connect(self._stop_cfd)
@@ -1101,14 +1103,14 @@ class CFDWorkspace(QWidget):
         bl.addWidget(self._cb_shock_sensor)
 
         # Probe mode toggle
-        self._btn_probe = QPushButton("📏 Probe")
+        self._btn_probe = QPushButton("Probe")
         self._btn_probe.setStyleSheet(_BTN_SECONDARY)
         self._btn_probe.setCheckable(True)
         self._btn_probe.setFixedHeight(28)
         self._btn_probe.toggled.connect(self._toggle_probe_mode)
         bl.addWidget(self._btn_probe)
 
-        btn_cam = QPushButton("⟳ Reset Camera")
+        btn_cam = QPushButton(icon("reset_view"), "Reset Camera")
         btn_cam.setStyleSheet(_BTN_SECONDARY)
         btn_cam.setFixedHeight(28)
         btn_cam.clicked.connect(lambda: self._plotter.reset_camera())
@@ -1169,7 +1171,7 @@ class CFDWorkspace(QWidget):
         self._cb_polar = QComboBox()
         self._cb_polar.currentIndexChanged.connect(self._refresh_polar)
         bl.addWidget(self._cb_polar)
-        self._btn_polar_export = QPushButton("💾 Export CSV")
+        self._btn_polar_export = QPushButton("Export CSV")
         self._btn_polar_export.setStyleSheet(_BTN_SECONDARY)
         self._btn_polar_export.setFixedHeight(28)
         self._btn_polar_export.setEnabled(False)
@@ -1211,7 +1213,7 @@ class CFDWorkspace(QWidget):
         lay.setContentsMargins(12, 14, 12, 14)
         lay.setSpacing(10)
 
-        title = QLabel("📊  Results")
+        title = QLabel("Results")
         title.setStyleSheet("color:#58a6ff; font-size:15px; font-weight:700; padding:2px 0 6px 0;")
         lay.addWidget(title)
 
@@ -1268,7 +1270,7 @@ class CFDWorkspace(QWidget):
         lay.addWidget(mesh_grp)
 
         # Inject button
-        self._btn_inject = QPushButton("⬆  Inject into Flight Simulation")
+        self._btn_inject = QPushButton(icon("inject"), "Inject into Flight Simulation")
         self._btn_inject.setStyleSheet(_BTN_SUCCESS)
         self._btn_inject.setEnabled(False)
         self._btn_inject.clicked.connect(self._inject_results)
@@ -1321,13 +1323,13 @@ class CFDWorkspace(QWidget):
         lay.addWidget(log_grp)
 
         # Export
-        self._btn_export_vtk = QPushButton("💾  Export VTK Results")
+        self._btn_export_vtk = QPushButton(icon("export"), "Export VTK Results")
         self._btn_export_vtk.setStyleSheet(_BTN_SECONDARY)
         self._btn_export_vtk.setEnabled(False)
         self._btn_export_vtk.clicked.connect(self._export_vtk)
         lay.addWidget(self._btn_export_vtk)
         
-        self._btn_export_struct = QPushButton("🏗  Map Pressure to FEM")
+        self._btn_export_struct = QPushButton(icon("map_fem"), "Map Pressure to FEM")
         self._btn_export_struct.setStyleSheet(_BTN_SECONDARY)
         self._btn_export_struct.setEnabled(False)
         self._btn_export_struct.clicked.connect(self._export_to_structures)
@@ -1365,10 +1367,10 @@ class CFDWorkspace(QWidget):
 
         # Preset warnings for expensive levels
         if idx == 3:  # Very Fine
-            self._lbl_preset_warn.setText("⚠ Very Fine mesh — may take several minutes")
+            self._lbl_preset_warn.setText("Very Fine mesh — may take several minutes")
             self._lbl_preset_warn.setVisible(True)
         elif idx == 4:  # Ultra Fine
-            self._lbl_preset_warn.setText("⚠ Ultra Fine mesh — expect 10+ minutes and high memory usage")
+            self._lbl_preset_warn.setText("Ultra Fine mesh — expect 10+ minutes and high memory usage")
             self._lbl_preset_warn.setVisible(True)
         else:
             self._lbl_preset_warn.setVisible(False)
@@ -1470,13 +1472,13 @@ class CFDWorkspace(QWidget):
         """Show warnings for very large meshes."""
         if count >= 1000000:
             self._lbl_mesh_warn.setText(
-                "⚠ Very large mesh (>1M elements) — may require 8+ GB RAM "
+                "Very large mesh (>1M elements) — may require 8+ GB RAM "
                 "and take 15+ minutes to generate"
             )
             self._lbl_mesh_warn.setVisible(True)
         elif count >= 500000:
             self._lbl_mesh_warn.setText(
-                "⚠ Fine mesh — may take 5–10 minutes to generate"
+                "Fine mesh — may take 5–10 minutes to generate"
             )
             self._lbl_mesh_warn.setVisible(True)
         else:
@@ -1484,7 +1486,7 @@ class CFDWorkspace(QWidget):
 
     def _get_turb_key(self):
         """Map UI turbulence combo index to config key."""
-        return ["Euler", "Laminar", "SA", "SST", "KE"][self._cb_turb.currentIndex()]
+        return ["Euler", "Laminar", "SA", "SST"][self._cb_turb.currentIndex()]
 
     def _browse_cad(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1578,7 +1580,7 @@ class CFDWorkspace(QWidget):
             free_mb = usage.free / (1024 * 1024)
             if free_mb < 500:
                 self._log(
-                    f"⚠ INSUFFICIENT DISK SPACE: only {free_mb:.0f} MB free. "
+                    f"INSUFFICIENT DISK SPACE: only {free_mb:.0f} MB free. "
                     f"CFD needs at least 500 MB. Free up space and try again."
                 )
                 return
@@ -1615,10 +1617,6 @@ class CFDWorkspace(QWidget):
                 except Exception as e:
                     self._log(f"Assembly geometry extraction failed ({e}) - using STL estimate")
 
-        # Inject flow conditions into geometry_dict for BL height computation
-        if geo_dict is not None:
-            geo_dict["_mach"]     = self._sp_mach.value()
-            geo_dict["_altitude"] = self._sp_alt.value()
 
         # CG from nose tip — needed so the sweep can report dCm/dα about the CG
         # (the true static-stability metric). Best-effort; None ⇒ no verdict.
@@ -2021,7 +2019,7 @@ class CFDWorkspace(QWidget):
             cp_val = min(result.cp_location_m, rocket_len)
             if result.cp_location_m > rocket_len * 1.01:
                 self._lbl_cp.setText(f"{cp_val:.4f} m from nozzle")
-                self._log(f"⚠ CP={result.cp_location_m:.4f} m exceeded rocket length "
+                self._log(f"CP={result.cp_location_m:.4f} m exceeded rocket length "
                           f"{rocket_len:.3f} m ({len_source}) — clamped to {cp_val:.4f} m")
             else:
                 self._lbl_cp.setText(f"{cp_val:.4f} m from nozzle")
@@ -2030,7 +2028,7 @@ class CFDWorkspace(QWidget):
 
         # Solver info
         self._lbl_solver.setText(result.solver_name or "SU2")
-        turb_display = {"SA": "Spalart-Allmaras", "SST": "k-\u03c9 SST", "KE": "k-\u03b5",
+        turb_display = {"SA": "Spalart-Allmaras", "SST": "k-\u03c9 SST",
                         "Euler": "Euler", "Laminar": "Laminar"}.get(result.turbulence_model, result.turbulence_model)
         self._lbl_turb_r.setText(turb_display)
         self._lbl_re_r.setText(f"{result.reynolds:.2e}")
@@ -2105,10 +2103,16 @@ class CFDWorkspace(QWidget):
         try:
             from cfd.post_processing import extract_cp_distribution
             if self._surface_mesh is not None and result is not None:
+                # CFDResult carries no static pressure — derive P_inf from
+                # q and Mach (p = 2q / (gamma*M^2)) so the fallback Cp uses
+                # the actual altitude, not sea-level 101325 Pa.
+                _q = max(getattr(result, "dynamic_pressure", 1.0), 1.0)
+                _msq = max(getattr(result, "mach", 0.01), 0.01) ** 2
+                _p_inf = _q * 2.0 / (1.4 * _msq)
                 x_n, cp_v = extract_cp_distribution(
                     self._surface_mesh,
-                    freestream_pressure=getattr(result, "pressure", 101325.0),
-                    dynamic_pressure=max(getattr(result, "dynamic_pressure", 1.0), 1.0),
+                    freestream_pressure=_p_inf,
+                    dynamic_pressure=_q,
                 )
                 if len(x_n) > 0 and hasattr(self._cp_plot, "update_cp"):
                     self._cp_plot.update_cp(x_n, cp_v)
@@ -2165,7 +2169,7 @@ class CFDWorkspace(QWidget):
         SU2 volume output includes cells inside the Boolean-cut rocket geometry
         with stagnant (near-zero momentum) bogus values. These render as a
         dark rectangular artifact on 2D slices. We detect them by:
-          speed < 5 m/s  AND  r < body_radius  AND  x in rocket range
+          speed < 20 m/s  AND  r < body_radius  AND  x in rocket range
         """
         import numpy as np
         sm = self._surface_mesh
@@ -2442,7 +2446,7 @@ class CFDWorkspace(QWidget):
                     if n_nan > 0:
                         cp_vals[nan_mask] = 0.0
                         sm[cp_name] = cp_vals
-                        self._log(f"⚠ Fixed {n_nan} NaN/inf Cp values → 0.0")
+                        self._log(f"Fixed {n_nan} NaN/inf Cp values → 0.0")
 
                     # Light Laplacian smooth (2 iter) to clean up cell artifacts
                     sm = self._smooth_surface_scalars(sm, cp_name, n_iter=2)
@@ -3025,6 +3029,7 @@ class CFDWorkspace(QWidget):
                     )
 
                     if fv_data is not None and fv_data.n_points > 0:
+                        cp_max = 1.0   # arrow clim fallback when Cp array missing
                         # PBR base surface colored by Cp
                         if "Cp" in fv_data.array_names:
                             cp_vals = fv_data["Cp"]
@@ -3355,10 +3360,10 @@ class CFDWorkspace(QWidget):
         if self._result.converged:
             from cfd.post_processing import inject_cfd_results_into_engine
             inject_cfd_results_into_engine(self._result, self.engine)
-            self._log(f"✅ Force coefficients injected: Cd={self._result.cd:.4f}, "
+            self._log(f"Force coefficients injected: Cd={self._result.cd:.4f}, "
                       f"Cl={self._result.cl:.4f}, Cm={self._result.cm:.4f}")
         else:
-            self._log("⚠ CFD did not converge — injecting raw values (use with caution)")
+            self._log("CFD did not converge — injecting raw values (use with caution)")
 
         # Step 2: Extract wall shear and temperature from surface mesh
         sm = self._surface_mesh
@@ -3391,24 +3396,25 @@ class CFDWorkspace(QWidget):
                     break
 
             if info_lines:
-                self._log("📊 Surface field summary:")
+                self._log("Surface field summary:")
                 for line in info_lines:
                     self._log(line)
             else:
-                self._log("⚠ No pressure/shear/temperature arrays found in surface mesh.")
+                self._log("No pressure/shear/temperature arrays found in surface mesh.")
 
             self._log(f"  Surface VTK: {self._result.surface_vtk}")
         else:
-            self._log("⚠ Surface mesh not loaded — run post-processing first.")
+            self._log("Surface mesh not loaded — run post-processing first.")
 
         # Step 3: Confirm readiness
         if self._result.surface_vtk and self._result.surface_vtk.is_file():
-            self._log("✅ Surface VTK ready for FEM pressure mapping.")
+            self._log("Surface VTK ready for FEM pressure mapping.")
             self._log("→ Switch to Structures workspace, check 'Map Pressure from CFD', and run analysis.")
         else:
-            self._log("⚠ No surface VTK file found for direct pressure field mapping.")
+            self._log("No surface VTK file found for direct pressure field mapping.")
 
     def _toggle_interactive_slice(self, state):
+        import numpy as np
         if self._plotter is None or self._volume_mesh is None:
             return
             
@@ -3612,7 +3618,7 @@ class CFDWorkspace(QWidget):
                 transparent_background=False,
                 window_size=(3840, 2160),
             )
-            self._log(f"📸 Screenshot saved: {path} (3840×2160)")
+            self._log(f"Screenshot saved: {path} (3840×2160)")
             self._status_lbl.setText(f"Screenshot saved: {path}")
         except Exception as e:
             self._log(f"Screenshot error: {e}")
