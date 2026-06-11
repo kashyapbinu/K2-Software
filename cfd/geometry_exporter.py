@@ -271,9 +271,9 @@ def _assembly_profile(assembly):
         for comp in stage.children:
             if isinstance(comp, NoseCone):
                 r = comp.diameter / 2
-                pz, pr = _ogive_profile(comp.length, r)   # pz: 0(tip)→L(base)
-                for zz, rr in zip(pz, pr):
-                    zs.append(z - zz)
+                pz, pr = _ogive_profile(comp.length, r)   # pz: 0(base,r=R)→L(tip,r≈0)
+                for zz, rr in zip(pz[::-1], pr[::-1]):    # tip first so z descends
+                    zs.append(z - (comp.length - zz))
                     rs.append(float(rr))
                 z -= comp.length
                 L_sh = getattr(comp, "shoulder_length", 0.0)
