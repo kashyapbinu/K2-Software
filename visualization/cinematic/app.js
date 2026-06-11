@@ -1249,13 +1249,15 @@ buildRocket({});                                   // placeholder until init arr
 if (typeof qt !== 'undefined' && qt.webChannelTransport) {
   new QWebChannel(qt.webChannelTransport, (channel) => {
     const k2 = channel.objects.k2;
+    // initSig only (re)configures the scene — it also fires on tab switches
+    // (showEvent), so it must NOT reset flight state or the recording would
+    // be wiped mid-flight. resetSig (sim start) owns the reset.
     k2.initSig.connect((json) => {
       const d = JSON.parse(json);
       if (d.geometry) buildRocket(d.geometry);
       if (d.max_thrust > 0) maxThrust = d.max_thrust;
       if (d.recovery) recovery = d.recovery;
       if (d.envelope) envParams = { ...envParams, ...d.envelope };
-      resetFlight();
     });
     k2.tickSig.connect((json) => {
       const d = JSON.parse(json);
