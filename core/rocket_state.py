@@ -124,6 +124,7 @@ class RocketState:
 
     # ── Environment ───────────────────────────────────────────────
     launch_angle: float = 90.0
+    launch_rod_length: float = 1.0        # guided length before free flight (m)
     wind_speed: float = 0.0
     wind_direction: float = 0.0           # bearing wind blows FROM (deg)
     wind_gust_intensity: float = 0.0      # turbulence σ/mean (0 → 0.1 default)

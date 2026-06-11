@@ -121,6 +121,16 @@ class SimulationWorkspace(QWidget):
         self.angle_spin.valueChanged.connect(lambda v: self.engine.update(launch_angle=v))
         ef.addRow("Launch Angle:", self.angle_spin)
 
+        self.rod_spin = QDoubleSpinBox()
+        self.rod_spin.setRange(0.3, 15.0); self.rod_spin.setValue(1.0)
+        self.rod_spin.setDecimals(2); self.rod_spin.setSingleStep(0.1)
+        self.rod_spin.setSuffix(" m")
+        self.rod_spin.setToolTip("Launch rod/rail guided length — attitude is "
+                                 "held until the rocket clears it")
+        self.rod_spin.valueChanged.connect(
+            lambda v: self.engine.update(launch_rod_length=v))
+        ef.addRow("Launch Rod:", self.rod_spin)
+
         self.temp_spin = QDoubleSpinBox()
         self.temp_spin.setRange(200, 330); self.temp_spin.setValue(288.15); self.temp_spin.setSuffix(" K")
         self.temp_spin.setDecimals(1)

@@ -323,8 +323,9 @@ class SimulationEngine(QObject):
         mass = max(0.01, mass)
         s = self.engine.state
 
-        # Rail constraint
-        on_rail = z < s.length
+        # Rail constraint — guided until the rocket clears the launch rod/rail
+        rod_len = getattr(s, 'launch_rod_length', 1.0) or 1.0
+        on_rail = z < rod_len
         if on_rail or self._phase == FlightPhase.PRELAUNCH:
             launch_pitch = math.radians(getattr(s, 'launch_angle', 90.0))
             pitch = launch_pitch

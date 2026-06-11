@@ -7,7 +7,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QGroupBox,
     QFormLayout, QLabel, QComboBox, QSplitter, QFrame, QScrollArea, QCheckBox,
     QPushButton)
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from ui.widgets.plot_widget import PlotWidget
 from physics.propulsion import compute_isp, compute_mass_flow_rate, estimate_chamber_pressure, generate_thrust_curve
 
@@ -22,11 +22,30 @@ class ValueLabel(QLabel):
             "font-weight: 600; padding: 2px 4px; background-color: #161b22; border-radius: 4px;")
 
 
+class _CurveFetcher(QThread):
+    """Background fetch of the real ThrustCurve.org samples for one motor."""
+    done = pyqtSignal(str, list)   # (motor_id, curve [(t, N), ...] — [] on failure)
+
+    def __init__(self, motor_id, parent=None):
+        super().__init__(parent)
+        self._motor_id = motor_id
+
+    def run(self):
+        try:
+            from data.thrust_curves import fetch_thrust_curve
+            curve = fetch_thrust_curve(self._motor_id) or []
+        except Exception:
+            curve = []
+        self.done.emit(self._motor_id, [list(p) for p in curve])
+
+
 class PropulsionWorkspace(QWidget):
     def __init__(self, engine, parent=None):
         super().__init__(parent)
         self.engine = engine
         self._motors = self._load_motors()
+        self._curve_fetcher = None
+        self._wanted_motor_id = ""
         self._setup_ui()
         self.engine.state_changed.connect(self._on_state_changed)
         self._update_display()
@@ -231,6 +250,7 @@ class PropulsionWorkspace(QWidget):
         # both prefer it over the trapezoid, so a stale one would silently fly
         # the OLD custom motor under the newly selected motor's name.
         if idx == 0:
+            self._wanted_motor_id = ""
             self.engine.update(motor_designation="None", motor_avg_thrust=0, motor_max_thrust=0,
                 motor_total_impulse=0, motor_burn_time=0, propellant_mass=0, propellant_mass_initial=0,
                 motor_dry_mass=0, motor_length=0, custom_thrust_curve=[])
@@ -245,6 +265,35 @@ class PropulsionWorkspace(QWidget):
                 motor_dry_mass=dry,
                 motor_length=m.get("length", 0.0),
                 custom_thrust_curve=[])
+            self._load_real_curve(m.get("motor_id", ""))
+        self._update_display()
+
+    def _load_real_curve(self, motor_id):
+        """Fill custom_thrust_curve with the measured ThrustCurve.org samples.
+
+        Cached curves apply immediately; otherwise a background fetch fills it
+        in when it arrives (the trapezoid stands in until then / offline).
+        """
+        self._wanted_motor_id = motor_id
+        if not motor_id:
+            return
+        try:
+            from data.thrust_curves import load_cached
+            cached = load_cached(motor_id)
+        except Exception:
+            cached = None
+        if cached:
+            self.engine.update(custom_thrust_curve=[list(p) for p in cached])
+            return
+        self._curve_fetcher = _CurveFetcher(motor_id, self)
+        self._curve_fetcher.done.connect(self._on_curve_fetched)
+        self._curve_fetcher.start()
+
+    def _on_curve_fetched(self, motor_id, curve):
+        # Ignore stale results if the user switched motors meanwhile
+        if not curve or motor_id != self._wanted_motor_id:
+            return
+        self.engine.update(custom_thrust_curve=curve)
         self._update_display()
 
     @staticmethod
