@@ -21,7 +21,7 @@ import logging
 import math
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QUrl, QElapsedTimer, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QObject, QTimer, QUrl, QElapsedTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
 from PyQt6.QtWebChannel import QWebChannel
 
@@ -86,12 +86,23 @@ class CinematicWorkspace(QWidget):
         if not index.is_file():
             logger.error(f"Cinematic assets missing: {index}")
         self._view.load(QUrl.fromLocalFile(str(index)))
+        # Page zoom must stay fixed — wheel/pinch zoom is the 3D camera's job.
+        # JS blocks ctrl+wheel; this catches anything that still slips through.
+        self._view.loadFinished.connect(lambda ok: self._view.setZoomFactor(1.0))
+        self._zoom_guard = QTimer(self)
+        self._zoom_guard.setInterval(1000)
+        self._zoom_guard.timeout.connect(self._pin_zoom)
+        self._zoom_guard.start()
         lay.addWidget(self._view)
 
         # Telemetry feed (shared with the rest of the app)
         self.engine.telemetry_tick.connect(self._on_tick)
         if self.sim_engine is not None:
             self.sim_engine.sim_started.connect(self._on_sim_started)
+            # Sim end updates state via state_changed (not telemetry_tick), so
+            # push one final sample — JS needs running:false to offer replay
+            # and the Landed phase to fire touchdown/envelope.
+            self.sim_engine.sim_finished.connect(self._on_sim_finished)
 
     # ── Init payload (geometry + motor + recovery) ───────────────────────────
 
@@ -134,14 +145,46 @@ class CinematicWorkspace(QWidget):
                 "drogue_cd_area": getattr(s, "drogue_cd_area", 0.5) or 0.5,
                 "main_cd_area": getattr(s, "main_cd_area", 3.0) or 3.0,
             },
+            "envelope": self._envelope_params(s),
         }
         self._bridge.initSig.emit(json.dumps(payload))
+
+    def _envelope_params(self, s):
+        """Mission-envelope inputs, mirroring the Mission Visualizer's sources:
+        target/recovery from its control spinboxes, wind from state, terminal
+        descent from main-chute CdA."""
+        target, recov = 0.0, 1000.0
+        mv = getattr(self.window(), "mission_viz_ws", None)
+        try:
+            if mv is not None and hasattr(mv, "_spin_target"):
+                target = float(mv._spin_target.value())
+                recov = float(mv._spin_recov.value())
+        except Exception:
+            pass
+        m = max(0.1, (getattr(s, "dry_mass", 0.0) or 0.0)
+                + (getattr(s, "propellant_mass", 0.0) or 0.0))
+        cd_area = max(0.1, getattr(s, "main_cd_area", 1.5) or 1.5)
+        descent = math.sqrt(2.0 * m * 9.81 / (1.225 * cd_area))
+        return {
+            "target_apogee": target,
+            "recovery_radius": recov,
+            "wind_speed": getattr(s, "wind_speed", 0.0) or 0.0,
+            "wind_dir_deg": getattr(s, "wind_direction", 0.0) or 0.0,
+            "descent_rate": max(1.0, min(descent, 60.0)),
+        }
 
     def _on_sim_started(self):
         if self._bridge is None:
             return
         self._send_init()
         self._bridge.resetSig.emit()
+
+    def _on_sim_finished(self):
+        self._on_tick(self.engine.state)
+
+    def _pin_zoom(self):
+        if self._view is not None and self._view.zoomFactor() != 1.0:
+            self._view.setZoomFactor(1.0)
 
     # ── Telemetry relay (throttled — JS interpolates between samples) ────────
 
@@ -164,6 +207,7 @@ class CinematicWorkspace(QWidget):
             "roll": getattr(state, "roll", 0.0),
             "thrust": state.thrust,
             "mach": state.mach_number,
+            "acc": abs(getattr(state, "acceleration", 0.0) or 0.0),
             "q": getattr(state, "dynamic_pressure", 0.0),
             "phase": getattr(state, "sim_phase", "Pre-Launch"),
             "running": getattr(state, "sim_running", False),

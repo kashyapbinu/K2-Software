@@ -189,7 +189,7 @@ function buildRocket(geo) {
   for (let i = 1; i <= 12; i++) {                          // ogive
     const f = i / 12, y = L - NL + f * NL;
     const rho = (R * R + NL * NL) / (2 * R);
-    const r = Math.sqrt(Math.max(rho * rho - Math.pow(NL - f * NL, 2), 0)) - (rho - R);
+    const r = Math.sqrt(Math.max(rho * rho - Math.pow(f * NL, 2), 0)) - (rho - R);
     prof.push(new THREE.Vector2(Math.max(r * (1 - f * 0.02), 0.001), y));
   }
   prof.push(new THREE.Vector2(0.001, L));
@@ -411,7 +411,7 @@ function rebuildChute() {
 const T = {
   t: 0, x: 0, y: 0, alt: 0, vx: 0, vy: 0, vz: 0,
   pitch: Math.PI / 2, yaw: 0, roll: 0,
-  thrust: 0, mach: 0, phase: 'Pre-Launch', running: false,
+  thrust: 0, mach: 0, acc: 0, q: 0, phase: 'Pre-Launch', running: false,
 };
 const rocketPos = new THREE.Vector3(0, 0.3, 0);
 const rocketQuat = new THREE.Quaternion();
@@ -419,8 +419,15 @@ const tmpV = new THREE.Vector3(), tmpV2 = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
 
 function applyTelemetry(d) {
+  // Record while flying, plus the first post-flight sample (the landed state)
+  // so a replay reaches touchdown and post-flight overlays rebuild.
+  if (!replay.active && (d.running ||
+      (rec.samples.length && rec.samples[rec.samples.length - 1].running)))
+    rec.push(d);
   Object.assign(T, d);
   hud.update();
+  graphs.push();
+  graphs.draw();
   events.check(d.phase, d);
 }
 
@@ -446,8 +453,9 @@ const hud = {
     this.el.bVel.style.width  = Math.min(speed / this.maxVel * 100, 100) + '%';
     this.el.bMach.style.width = Math.min(T.mach / 2 * 100, 100) + '%';
     this.el.bThr.style.width  = Math.min(T.thrust / Math.max(maxThrust, 1) * 100, 100) + '%';
-    const m = Math.floor(T.t / 60), s = (T.t % 60);
-    this.el.met.textContent = `T+ ${String(m).padStart(2,'0')}:${s < 10 ? '0' : ''}${s.toFixed(1)}`;
+    const h = Math.floor(T.t / 3600), m = Math.floor((T.t % 3600) / 60), s = Math.floor(T.t % 60);
+    this.el.met.textContent =
+      `T+ ${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
     this.el.phase.textContent = T.phase;
     this.el.phase.className = '';
     if (/boost|ignition/i.test(T.phase)) this.el.phase.classList.add('boost');
@@ -455,6 +463,81 @@ const hud = {
     else if (/landed/i.test(T.phase)) this.el.phase.classList.add('landed');
   },
 };
+
+// ── Mini telemetry graphs (sparkline strip, mirrors Mission Visualizer) ─────
+const graphs = {
+  specs: [
+    { id: 'g-alt',  label: 'ALT m',     get: () => T.alt },
+    { id: 'g-vel',  label: 'VEL m/s',   get: () => Math.hypot(T.vx, T.vy, T.vz) },
+    { id: 'g-mach', label: 'MACH',      get: () => T.mach },
+    { id: 'g-acc',  label: 'ACC m/s²',  get: () => T.acc },
+    { id: 'g-q',    label: 'DYN-Q Pa',  get: () => T.q },
+  ],
+  MAX: 2400, DPR: Math.min(window.devicePixelRatio || 1, 2),
+  t: [], series: [], lastT: -1, lastDraw: 0,
+  init() {
+    this.series = this.specs.map(() => []);
+    this.cv = this.specs.map(s => document.getElementById(s.id));
+    this.cx = this.cv.map(c => {
+      c.width = 108 * this.DPR; c.height = 54 * this.DPR;
+      return c.getContext('2d');
+    });
+    this.draw(true);
+  },
+  push() {
+    if (!T.running || T.t <= this.lastT) return;
+    this.lastT = T.t;
+    this.t.push(T.t);
+    this.specs.forEach((s, i) => this.series[i].push(s.get()));
+    if (this.t.length > this.MAX) {            // halve: drop every 2nd sample
+      const keep = (_, i) => i % 2 === 0;
+      this.t = this.t.filter(keep);
+      this.series = this.series.map(a => a.filter(keep));
+    }
+  },
+  clear() {
+    this.t = []; this.series = this.specs.map(() => []); this.lastT = -1;
+    this.draw(true);
+  },
+  draw(force = false) {
+    const now = performance.now();
+    if (!force && now - this.lastDraw < 300) return;
+    this.lastDraw = now;
+    const D = this.DPR;
+    for (let k = 0; k < this.specs.length; k++) {
+      const g = this.cx[k], W = this.cv[k].width, H = this.cv[k].height;
+      g.clearRect(0, 0, W, H);
+      g.fillStyle = 'rgba(255,255,255,0.40)';
+      g.font = `600 ${8.5 * D}px Bahnschrift, "Segoe UI", sans-serif`;
+      g.textAlign = 'left'; g.textBaseline = 'top';
+      g.fillText(this.specs[k].label, 2 * D, 1 * D);
+      const data = this.series[k], n = data.length;
+      if (n < 2) continue;
+      let lo = Infinity, hi = -Infinity;
+      for (const v of data) { if (v < lo) lo = v; if (v > hi) hi = v; }
+      if (hi - lo < 1e-9) { lo -= 0.5; hi += 0.5; }
+      const t0 = this.t[0], t1 = this.t[n - 1], dt = Math.max(t1 - t0, 1e-9);
+      const yPad = 13 * D, plotH = H - yPad - 2 * D;
+      g.strokeStyle = 'rgba(255,255,255,0.85)'; g.lineWidth = 1.1 * D;
+      g.beginPath();
+      for (let i = 0; i < n; i++) {
+        const x = (this.t[i] - t0) / dt * (W - 2 * D) + D;
+        const y = yPad + (1 - (data[i] - lo) / (hi - lo)) * plotH;
+        i === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
+      }
+      g.stroke();
+      const last = data[n - 1];
+      g.fillStyle = '#ffffff';
+      g.font = `300 ${10 * D}px Bahnschrift, "Segoe UI", sans-serif`;
+      g.textAlign = 'right';
+      g.fillText(last >= 10000 ? (last / 1000).toFixed(1) + 'k'
+                 : last >= 100 ? last.toFixed(0) : last.toFixed(2),
+                 W - 2 * D, 1 * D);
+    }
+  },
+};
+graphs.init();
+window.__k2graphs = graphs;          // debug/test handle
 
 // ── 3D event markers (glowing pin + label at the trajectory point) ──────────
 const markers = [];
@@ -482,6 +565,8 @@ function labelTexture(title, sub, colorHex) {
 const markerLog = [];               // names in firing order (debug/test)
 function addMarker(name, pos, alt, t) {
   markerLog.push(name);
+  const node = document.getElementById('tl-' + name);
+  if (node) node.classList.add('done');
   const color = new THREE.Color(MARKER_COLORS[name] || '#58a6ff');
   const grp = new THREE.Group();
   // glowing tip
@@ -512,6 +597,7 @@ function clearMarkers() {
   for (const m of markers) scene.remove(m);
   markers.length = 0;
   markerLog.length = 0;
+  document.querySelectorAll('.tl-node.done').forEach(n => n.classList.remove('done'));
 }
 
 // ── Event banners + marker placement ─────────────────────────────────────────
@@ -527,6 +613,7 @@ const events = {
   fire(name, d) {
     this.banner(name === 'DROGUE' ? 'DROGUE DEPLOY' : name === 'MAIN' ? 'MAIN DEPLOY' : name);
     addMarker(name, rocketPos.clone(), d.alt ?? T.alt, d.t ?? T.t);
+    if (name === 'TOUCHDOWN') envelope.build();
   },
   check(phase, d) {
     // Max-Q: track peak dynamic pressure; fire once it clearly falls off
@@ -551,22 +638,304 @@ const events = {
   },
 };
 
+// ── Flight recorder + replay ─────────────────────────────────────────────────
+const rec = {
+  samples: [], MAX: 36000,                 // ≈20 min at 30 Hz before halving
+  push(d) {
+    this.samples.push(d);
+    if (this.samples.length > this.MAX)
+      this.samples = this.samples.filter((_, i) => i % 2 === 0);
+  },
+  clear() { this.samples = []; },
+  t0() { return this.samples.length ? this.samples[0].t : 0; },
+  duration() {
+    const s = this.samples;
+    return s.length ? s[s.length - 1].t - s[0].t : 0;
+  },
+};
+
+function fmtClock(t) {
+  const m = Math.floor(t / 60), s = Math.floor(t % 60);
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+const replay = {
+  active: false, playing: false, speed: 1, time: 0, idx: 0,
+  el: {
+    bar:  document.getElementById('replay'),
+    play: document.getElementById('rp-play'),
+    scrub: document.getElementById('rp-scrub'),
+    fill: document.getElementById('rp-fill'),
+    dot:  document.getElementById('rp-dot'),
+    time: document.getElementById('rp-time'),
+    live: document.getElementById('rp-live'),
+  },
+  enter() {
+    if (rec.samples.length < 2) return;
+    this.active = true; this.playing = true;
+    this.idx = 0; this.time = rec.t0();
+    resetVisuals();
+  },
+  exit() {
+    if (!this.active) return;
+    this.active = false; this.playing = false;
+    if (rec.samples.length) this.seekFeed(rec.samples.length - 1);  // back to latest
+    T.running = false;              // flight is over; keep the replay bar offered
+  },
+  // Rebuild flight state up to samples[endIdx] after a visual reset.
+  // Fast path: trail/markers/graphs per sample, HUD/DOM only once at the end.
+  seekFeed(endIdx) {
+    resetVisuals();
+    const s = rec.samples;
+    for (let i = 0; i <= endIdx; i++) {
+      const d = s[i];
+      Object.assign(T, d);
+      rocketPos.set(d.x, Math.max(d.alt, 0) + 0.3, d.y);
+      if (d.running && d.alt > 1) pushTrail(rocketPos, d.mach);
+      graphs.push();
+      events.check(d.phase, d);
+    }
+    this.idx = endIdx;
+    this.time = s[endIdx].t;
+    hud.update();
+    graphs.draw(true);
+  },
+  seekFrac(f) {
+    if (rec.samples.length < 2) return;
+    const tt = rec.t0() + rec.duration() * THREE.MathUtils.clamp(f, 0, 1);
+    const s = rec.samples;
+    let lo = 0;
+    while (lo + 1 < s.length && s[lo + 1].t <= tt) lo++;
+    this.seekFeed(lo);
+  },
+  step(dt) {
+    const show = this.active || (rec.samples.length > 10 && !T.running);
+    this.el.bar.classList.toggle('visible', show);
+    if (!show) return;
+    this.el.live.style.display = this.active ? '' : 'none';
+    if (this.active && this.playing) {
+      this.time += dt * this.speed;
+      const s = rec.samples;
+      while (this.idx + 1 < s.length && s[this.idx + 1].t <= this.time) {
+        this.idx++;
+        applyTelemetry(s[this.idx]);
+      }
+      if (this.idx >= s.length - 1) this.playing = false;   // hold on last frame
+    }
+    const f = rec.duration() > 0
+      ? THREE.MathUtils.clamp((this.time - rec.t0()) / rec.duration(), 0, 1) : 0;
+    const pct = (this.active ? f : 1) * 100;
+    this.el.fill.style.width = pct + '%';
+    this.el.dot.style.left = pct + '%';
+    this.el.time.textContent =
+      `${fmtClock(this.active ? this.time - rec.t0() : rec.duration())} / ${fmtClock(rec.duration())}`;
+    this.el.play.textContent = !this.active ? '▶ REPLAY' : (this.playing ? '❚❚' : '▶');
+  },
+};
+window.__k2replay = { rec, replay };       // debug/test handle
+window.__k2feed = applyTelemetry;          // debug/test handle
+
+replay.el.play.addEventListener('click', () => {
+  if (!replay.active || replay.idx >= rec.samples.length - 1) replay.enter();
+  else replay.playing = !replay.playing;
+});
+replay.el.live.addEventListener('click', () => replay.exit());
+document.querySelectorAll('#rp-speeds button').forEach(b => {
+  b.addEventListener('click', () => {
+    replay.speed = parseFloat(b.dataset.spd);
+    document.querySelectorAll('#rp-speeds button')
+      .forEach(x => x.classList.toggle('active', x === b));
+  });
+});
+{ // scrub: click or drag anywhere on the track
+  let scrubbing = false, wasPlaying = false;
+  const toFrac = (e) => {
+    const r = replay.el.scrub.getBoundingClientRect();
+    return (e.clientX - r.left) / Math.max(r.width, 1);
+  };
+  replay.el.scrub.addEventListener('pointerdown', (e) => {
+    if (rec.samples.length < 2) return;
+    if (!replay.active) { replay.enter(); replay.playing = false; }
+    scrubbing = true; wasPlaying = replay.playing; replay.playing = false;
+    replay.el.scrub.setPointerCapture(e.pointerId);
+    replay.seekFrac(toFrac(e));
+  });
+  replay.el.scrub.addEventListener('pointermove', (e) => {
+    if (scrubbing) replay.seekFrac(toFrac(e));
+  });
+  replay.el.scrub.addEventListener('pointerup', () => {
+    if (scrubbing) { scrubbing = false; replay.playing = wasPlaying; }
+  });
+}
+
+// ── Flight envelope (post-flight mission overlay, mirrors Mission Visualizer) ─
+let envParams = { target_apogee: 0, recovery_radius: 1000,
+                  wind_speed: 0, wind_dir_deg: 0, descent_rate: 5 };
+const ENV = { ok: 0x3fb950, warn: 0xd29922, bad: 0xf85149,
+              predicted: 0x56d364, drift: 0xd29922, target: 0x3fb950 };
+
+function groundEllipse(cx, cz, a, b, ang, n = 64, y = 0.4) {
+  const ca = Math.cos(ang), sa = Math.sin(ang), pts = [];
+  for (let i = 0; i < n; i++) {
+    const t = 2 * Math.PI * i / n, ex = a * Math.cos(t), ez = b * Math.sin(t);
+    pts.push(new THREE.Vector3(cx + ex * ca - ez * sa, y, cz + ex * sa + ez * ca));
+  }
+  return pts;
+}
+function fanGeometry(apex, rim) {
+  const pts = [apex, ...rim];
+  const pos = new Float32Array(pts.length * 3);
+  pts.forEach((p, i) => { pos[i * 3] = p.x; pos[i * 3 + 1] = p.y; pos[i * 3 + 2] = p.z; });
+  const idx = [];
+  for (let i = 0; i < rim.length; i++) idx.push(0, 1 + i, 1 + (i + 1) % rim.length);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+const envelope = {
+  group: null, sprites: [], visible: true,
+  clear() {
+    if (this.group) { scene.remove(this.group); this.group = null; }
+    this.sprites.length = 0;
+  },
+  label(text, sub, pos, colorHex) {
+    const spr = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: labelTexture(text, sub, colorHex), transparent: true, depthWrite: false }));
+    spr.center.set(0.5, 0);
+    spr.position.copy(pos);
+    this.group.add(spr);
+    this.sprites.push(spr);
+  },
+  flat(mat) { return new THREE.MeshBasicMaterial({
+    transparent: true, side: THREE.DoubleSide, depthWrite: false, ...mat }); },
+  build() {
+    this.clear();
+    const s = rec.samples;
+    if (s.length < 2) return;
+    this.group = new THREE.Group();
+    this.group.visible = this.visible;
+
+    const launch = s[0], land = s[s.length - 1];
+    let apo = s[0];
+    for (const d of s) if (d.alt > apo.alt) apo = d;
+
+    const R = Math.max(envParams.recovery_radius, 1);
+    const dist = Math.hypot(land.x - launch.x, land.y - launch.y);
+    const outCol = dist <= R * 0.8 ? ENV.ok : dist <= R ? ENV.warn : ENV.bad;
+    const outName = dist <= R * 0.8 ? 'SAFE' : dist <= R ? 'MARGINAL' : 'OUTSIDE';
+    const hex = '#' + outCol.toString(16).padStart(6, '0');
+
+    // Recovery zone: outcome-coloured ring + faint fill (k2 x,y → three x,z)
+    const ring = new THREE.Mesh(new THREE.RingGeometry(R * 0.985, R, 96),
+      this.flat({ color: outCol, opacity: 0.85 }));
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.set(launch.x, 0.35, launch.y);
+    this.group.add(ring);
+    const fill = new THREE.Mesh(new THREE.CircleGeometry(R, 96),
+      this.flat({ color: outCol, opacity: 0.05 }));
+    fill.rotation.x = -Math.PI / 2;
+    fill.position.set(launch.x, 0.25, launch.y);
+    this.group.add(fill);
+    this.label('RECOVERY ZONE', `R ${R.toFixed(0)} m`,
+      new THREE.Vector3(launch.x, 2, launch.y + R), hex);
+
+    // Launch pad marker
+    const pad = new THREE.Mesh(
+      new THREE.RingGeometry(R * 0.006, R * 0.012, 32),
+      this.flat({ color: 0xf0f6fc, opacity: 0.9 }));
+    pad.rotation.x = -Math.PI / 2;
+    pad.position.set(launch.x, 0.45, launch.y);
+    this.group.add(pad);
+
+    // Target apogee plane
+    if (envParams.target_apogee > 0) {
+      const size = Math.max(apo.alt, R * 2.5) * 0.8;
+      const plane = new THREE.Mesh(new THREE.PlaneGeometry(size, size),
+        this.flat({ color: ENV.target, opacity: 0.07 }));
+      plane.rotation.x = -Math.PI / 2;
+      plane.position.set(launch.x, envParams.target_apogee, launch.y);
+      this.group.add(plane);
+      const delta = apo.alt - envParams.target_apogee;
+      this.label('TARGET APOGEE', `${envParams.target_apogee.toFixed(0)} m  ·  ${delta >= 0 ? '+' : ''}${delta.toFixed(0)} m actual`,
+        new THREE.Vector3(launch.x - size / 2, envParams.target_apogee, launch.y), '#3fb950');
+    }
+
+    // Predicted landing (wind drift from apogee) + drift cone
+    const dr = Math.max(envParams.descent_rate, 0.01);
+    if (apo.alt > 1) {
+      const drift = envParams.wind_speed * (apo.alt / dr);
+      const blow = (envParams.wind_dir_deg + 180) * Math.PI / 180;
+      const px = apo.x + drift * Math.cos(blow);
+      const pz = apo.y + drift * Math.sin(blow);
+      const a = Math.max(R * 0.2, drift * 0.25, 50), b = a * 0.6;
+      const rim = groundEllipse(px, pz, a, b, blow);
+      const zone = new THREE.Mesh(
+        fanGeometry(new THREE.Vector3(px, 0.45, pz), rim),
+        this.flat({ color: ENV.predicted, opacity: 0.12 }));
+      this.group.add(zone);
+      const outline = new THREE.LineLoop(
+        new THREE.BufferGeometry().setFromPoints(rim),
+        new THREE.LineBasicMaterial({ color: ENV.predicted, transparent: true, opacity: 0.8 }));
+      this.group.add(outline);
+      this.label('EXPECTED LANDING',
+        `${Math.hypot(px - launch.x, pz - launch.y).toFixed(0)} m downrange`,
+        new THREE.Vector3(px, 2, pz + b), '#56d364');
+
+      // Drift cone: apogee → predicted landing ellipse
+      const cone = new THREE.Mesh(
+        fanGeometry(new THREE.Vector3(apo.x, apo.alt, apo.y), rim),
+        this.flat({ color: ENV.drift, opacity: 0.08 }));
+      this.group.add(cone);
+    }
+
+    // Actual landing
+    this.label(`LANDING · ${outName}`, `${dist.toFixed(0)} m from pad`,
+      new THREE.Vector3(land.x, 2, land.y), hex);
+
+    scene.add(this.group);
+  },
+};
+window.__k2envelope = {                      // debug/test handle
+  get group() { return envelope.group; },
+  setParams(p) { envParams = { ...envParams, ...p }; },
+  params() { return envParams; },
+};
+document.getElementById('env-btn').addEventListener('click', (e) => {
+  envelope.visible = !envelope.visible;
+  if (envelope.group) envelope.group.visible = envelope.visible;
+  e.target.classList.toggle('active', envelope.visible);
+});
+
 // ── Camera rig ───────────────────────────────────────────────────────────────
 let camMode = 'chase';
 let orbitAz = 0;
 let zoom = 1.0;                     // user wheel zoom: <1 closer, >1 farther
 const camPos = new THREE.Vector3(14, 4, 14);
 const camTarget = new THREE.Vector3(0, 2, 0);
-document.querySelectorAll('#cams button').forEach(btn => {
+document.querySelectorAll('#cams button[data-cam]').forEach(btn => {
   btn.addEventListener('click', () => {
     camMode = btn.dataset.cam;
     dragAz = 0; dragEl = 0;        // fresh framing per mode
-    document.querySelectorAll('#cams button').forEach(b => b.classList.toggle('active', b === btn));
+    document.querySelectorAll('#cams button[data-cam]')
+      .forEach(b => b.classList.toggle('active', b === btn));
   });
 });
 window.addEventListener('wheel', (e) => {
-  zoom = THREE.MathUtils.clamp(zoom * Math.exp(e.deltaY * 0.0011), 0.25, 6.0);
-}, { passive: true });
+  // Ctrl+wheel (and trackpad pinch, which Chromium delivers as ctrl+wheel)
+  // would zoom the whole page — claim it for camera zoom instead.
+  if (e.ctrlKey) e.preventDefault();
+  // Post-flight, allow zooming far out so the mission envelope is frameable
+  const zMax = T.running ? 6.0 : 60.0;
+  zoom = THREE.MathUtils.clamp(zoom * Math.exp(e.deltaY * 0.0011), 0.25, zMax);
+}, { passive: false });
+window.addEventListener('keydown', (e) => {
+  // Block browser page-zoom shortcuts (Ctrl +/-/0)
+  if (e.ctrlKey && (e.key === '+' || e.key === '-' || e.key === '=' || e.key === '0'))
+    e.preventDefault();
+});
 
 // Click-drag to rotate the POV around the rocket (chase/side/orbit modes).
 // Azimuth/elevation offsets ride on top of each mode's base placement.
@@ -682,6 +1051,8 @@ let smokeAcc = 0, padAcc = 0;       // fractional particle-emission accumulators
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.05);
+
+  replay.step(dt);                  // advance playback + replay bar UI
 
   // Pose from latest telemetry (smoothed)
   const targetPos = new THREE.Vector3(T.x, Math.max(T.alt, 0) + 0.3, T.y);
@@ -834,6 +1205,11 @@ function animate() {
     const s = Math.max(d * 0.045, rocketLen * 0.8);
     lbl.scale.set(s * 3.2, s * 0.9, 1);
   }
+  for (const spr of envelope.sprites) {
+    const d = camera.position.distanceTo(spr.position);
+    const s = Math.max(d * 0.045, rocketLen * 0.8);
+    spr.scale.set(s * 3.2, s * 0.9, 1);
+  }
 
   // Sun shadow camera follows the action at low altitude
   sun.target.position.copy(rocketPos); sun.target.updateMatrixWorld();
@@ -843,19 +1219,29 @@ function animate() {
 }
 
 // ── Reset ────────────────────────────────────────────────────────────────────
-function resetFlight() {
+// Visual state only — used by both a real flight reset and replay rewinds.
+function resetVisuals() {
   trailCount = 0; trailGeo.setDrawRange(0, 0); lastTrailPt.set(1e9, 1e9, 1e9);
   for (const p of smoke) p.spr.visible = false;
   smokeAcc = 0; padAcc = 0;
   clearMarkers();
+  envelope.clear();
   events.maxQfired = false; events.peakQ = 0;
-  zoom = 1.0; dragAz = 0; dragEl = 0;
   hud.maxAlt = 1; hud.maxVel = 1;
+  graphs.clear();
   events.prev = 'Pre-Launch';
   Object.assign(T, { t: 0, x: 0, y: 0, alt: 0, vx: 0, vy: 0, vz: 0,
                      pitch: Math.PI/2, yaw: 0, roll: 0, thrust: 0, mach: 0,
-                     phase: 'Pre-Launch', running: false });
+                     acc: 0, q: 0, phase: 'Pre-Launch', running: false });
   rocketPos.set(0, 0.3, 0);
+}
+
+// Full reset for a new flight: drop the recording and leave replay mode.
+function resetFlight() {
+  replay.active = false; replay.playing = false;
+  rec.clear();
+  zoom = 1.0; dragAz = 0; dragEl = 0;
+  resetVisuals();
 }
 
 // ── Qt bridge ────────────────────────────────────────────────────────────────
@@ -868,9 +1254,17 @@ if (typeof qt !== 'undefined' && qt.webChannelTransport) {
       if (d.geometry) buildRocket(d.geometry);
       if (d.max_thrust > 0) maxThrust = d.max_thrust;
       if (d.recovery) recovery = d.recovery;
+      if (d.envelope) envParams = { ...envParams, ...d.envelope };
       resetFlight();
     });
-    k2.tickSig.connect((json) => applyTelemetry(JSON.parse(json)));
+    k2.tickSig.connect((json) => {
+      const d = JSON.parse(json);
+      if (replay.active) {
+        if (!d.running) return;     // idle live ticks don't disturb a replay
+        resetFlight();              // new sim launched mid-replay → go live
+      }
+      applyTelemetry(d);
+    });
     k2.resetSig.connect(resetFlight);
     if (k2.ready) k2.ready();
   });
@@ -878,18 +1272,23 @@ if (typeof qt !== 'undefined' && qt.webChannelTransport) {
   // Standalone browser demo: canned flight so the scene can be previewed
   let t = 0;
   setInterval(() => {
+    if (replay.active) return;
     t += 0.05;
     const burn = 2.5, alt = t < burn ? 60 * t * t : Math.max(375 + 150 * (t - burn) - 4.9 * (t - burn) ** 2, 0);
     const vz = t < burn ? 120 * t : 150 - 9.8 * (t - burn);
-    applyTelemetry({ t, x: t * 2, y: 0, alt, vx: 2, vy: 0, vz,
-      pitch: Math.PI / 2 - t * 0.01, yaw: 0, roll: t * 0.4,
-      thrust: t < burn ? 180 : 0, mach: Math.abs(vz) / 340,
-      q: 0.5 * 1.225 * Math.exp(-alt / 8500) * vz * vz,
-      phase: t < burn ? 'Boost'
+    const landed = t > burn && alt <= 0;
+    applyTelemetry({ t, x: t * 2, y: 0, alt, vx: landed ? 0 : 2, vy: 0,
+      vz: landed ? 0 : vz,
+      pitch: Math.PI / 2 - t * 0.01, yaw: 0, roll: landed ? 0 : t * 0.4,
+      thrust: t < burn ? 180 : 0, mach: landed ? 0 : Math.abs(vz) / 340,
+      acc: landed ? 0 : (t < burn ? 110 : 9.8),
+      q: landed ? 0 : 0.5 * 1.225 * Math.exp(-alt / 8500) * vz * vz,
+      phase: landed ? 'Landed'
+        : t < burn ? 'Boost'
         : (vz > 4 ? 'Coast'
         : (vz > -4 ? 'Apogee'
         : (alt > 150 ? 'Drogue Descent' : 'Main Descent'))),
-      running: true });
+      running: !landed });
   }, 33);
 }
 
