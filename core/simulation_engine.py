@@ -890,11 +890,16 @@ class SimulationEngine(QObject):
             mass=new_mass,
             cg=s.cg,
             cp=aero.get('cp', s.cp),
-            # Static margin is meaningless under a canopy (attitude frozen,
-            # AoA pegged at the 45° clamp drags CP to mid-body) — record NaN
-            # so plots show a gap instead of an artificial collapse.
+            # Static margin is meaningless past apogee: at near-zero airspeed
+            # the AoA pegs at the 45° clamp and drags CP to a garbage position
+            # (margin collapses toward zero), and under a canopy the attitude
+            # is frozen entirely. Record NaN from apogee onward so plots show
+            # a clean gap instead of an artificial collapse.
             stability_margin=(float('nan')
-                              if (self._drogue_deployed or self._main_deployed)
+                              if (self._drogue_deployed or self._main_deployed
+                                  or self._phase not in (FlightPhase.PRELAUNCH,
+                                                         FlightPhase.BOOST,
+                                                         FlightPhase.COAST))
                               else aero.get('stab_margin', s.stability_margin)),
             phase=self._phase.value,
             cd=cd,

@@ -238,9 +238,12 @@ class ResultsWorkspace(QWidget):
         for label, (field, fmt) in field_map.items():
             val = snap.get(field, 0)
             widget, unit = self.cursor_readouts[label]
-            text = fmt.format(val)
-            if unit:
-                text += f" {unit}"
+            if isinstance(val, float) and val != val:   # NaN → undefined
+                text = "—"
+            else:
+                text = fmt.format(val)
+                if unit:
+                    text += f" {unit}"
             widget.setText(text)
 
     def _export_csv(self):
