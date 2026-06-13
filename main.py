@@ -22,15 +22,19 @@ from ui.styles import DARK_STYLESHEET
 def setup_logging():
     import io
     from logging.handlers import RotatingFileHandler
-    utf8_stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "k2_crash.log")
+    handlers = [
+        RotatingFileHandler(log_file, maxBytes=5_000_000, backupCount=2, encoding="utf-8"),
+    ]
+    # In a windowed PyInstaller build there is no console, so sys.stdout (and its
+    # .buffer) is None — guard it, otherwise logging setup crashes at launch.
+    if getattr(sys, "stdout", None) is not None and getattr(sys.stdout, "buffer", None) is not None:
+        utf8_stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        handlers.insert(0, logging.StreamHandler(utf8_stdout))
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s  %(name)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.StreamHandler(utf8_stdout),
-            RotatingFileHandler(log_file, maxBytes=5_000_000, backupCount=2, encoding="utf-8"),
-        ]
+        handlers=handlers,
     )
     logging.getLogger("pyvista").setLevel(logging.WARNING)
     logging.getLogger("vtk").setLevel(logging.WARNING)

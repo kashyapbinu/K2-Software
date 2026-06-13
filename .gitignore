@@ -12,6 +12,12 @@ env/
 crash.log
 k2_crash.log*
 
+# ── PyInstaller / installer build outputs (regenerated, huge) ──
+build/
+dist/
+installer_output/
+build_pyinstaller.log
+
 # ── Run artifacts / large outputs (255MB+, regenerated) ──
 cfd_run/
 cfd_run_euler/
