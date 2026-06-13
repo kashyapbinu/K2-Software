@@ -560,6 +560,16 @@ a { color: inherit; }
   margin: 56px auto 0;
   text-align: left;
 }
+.dl-note {
+  margin-top: 22px;
+  font-size: 0.82rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.dl-note code {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
 .dl-steps h3 {
   text-align: center;
   font-size: 1.2rem;
