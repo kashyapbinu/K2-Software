@@ -881,6 +881,7 @@ class OptimizationWorkspace(QWidget):
         fig4, self._ax_pareto = _dark_figure(figsize=(8, 5))
         self._canvas_pareto = FigureCanvas(fig4)
         _style_ax(self._ax_pareto, "Pareto Front", "Objective 1", "Objective 2")
+        self._canvas_pareto.mpl_connect("button_press_event", self._on_pareto_click)
         self.tabs.addTab(self._canvas_pareto, "Pareto Front")
 
         # Tab 5: DOE & Response Surfaces
@@ -1148,6 +1149,9 @@ class OptimizationWorkspace(QWidget):
         self.lbl_stat_evals = _vl(); fs.addRow("Evaluations:", self.lbl_stat_evals)
         self.lbl_stat_time = _vl(); fs.addRow("Time:", self.lbl_stat_time)
         self.lbl_stat_algo = _vl(); fs.addRow("Algorithm:", self.lbl_stat_algo)
+        self.lbl_stat_feasible = _vl(); fs.addRow("Feasible:", self.lbl_stat_feasible)
+        self.lbl_stat_best_gen = _vl(); fs.addRow("Best Generation:", self.lbl_stat_best_gen)
+        self.lbl_stat_hv = _vl(); fs.addRow("Hypervolume:", self.lbl_stat_hv)
         self.lbl_stat_surrogate = _vl(); fs.addRow("Surrogate R²:", self.lbl_stat_surrogate)
         gs.setLayout(fs)
         lay.addWidget(gs)
@@ -1465,68 +1469,102 @@ class OptimizationWorkspace(QWidget):
 
     def _update_convergence_incremental(self, gen_data):
         """Incrementally update the convergence plot."""
-        ax = self._ax_conv
         if not hasattr(self, '_conv_bests'):
             self._conv_bests = []
             self._conv_means = []
             self._conv_worsts = []
+            self._conv_feas = []
 
         self._conv_bests.append(gen_data.get("best_fitness", 0))
         self._conv_means.append(gen_data.get("mean_fitness", 0))
         self._conv_worsts.append(gen_data.get("worst_fitness", 0))
+        self._conv_feas.append(gen_data.get("feasible_pct", 0))
 
+        self._draw_convergence(self._conv_bests, self._conv_means,
+                               self._conv_worsts, self._conv_feas,
+                               draw_idle=True)
+
+    def _draw_convergence(self, bests, means, worsts, feas, draw_idle=False):
+        """Render the Best/Mean/Worst fitness curves + a feasible-% secondary
+        axis. Quadratic constraint penalties can drive worst fitness to large
+        negative values that would flatten the readable Best/Mean trend under
+        autoscale — so the y-axis is clipped to a robust range built from the
+        Best/Mean curves, and Worst is drawn clipped (still visible where it
+        enters range)."""
+        ax = self._ax_conv
+        fig = ax.figure
+        # Drop any previous twin axis so we don't stack feasible-% axes.
+        for extra in [a for a in fig.axes if a is not ax]:
+            extra.remove()
         ax.clear()
         _style_ax(ax, "Fitness Convergence", "Generation", "Fitness")
 
-        gens = list(range(len(self._conv_bests)))
-        ax.plot(gens, self._conv_bests, color="#7ee787", linewidth=2, label="Best")
-        ax.fill_between(gens, self._conv_worsts, self._conv_bests,
-                         alpha=0.15, color="#58a6ff")
-        ax.plot(gens, self._conv_means, color="#58a6ff", linewidth=1.2,
-                alpha=0.7, linestyle="--", label="Mean")
-        ax.plot(gens, self._conv_worsts, color="#f85149", linewidth=0.8,
-                alpha=0.5, label="Worst")
+        gens = list(range(len(bests)))
+        ax.plot(gens, bests, color="#7ee787", linewidth=2, label="Best", zorder=4)
+        ax.plot(gens, means, color="#58a6ff", linewidth=1.2, alpha=0.8,
+                linestyle="--", label="Mean", zorder=3)
+        ax.fill_between(gens, worsts, bests, alpha=0.12, color="#58a6ff", zorder=1)
+        ax.plot(gens, worsts, color="#f85149", linewidth=0.8, alpha=0.5,
+                label="Worst", zorder=2)
+
+        # Robust y-limits from the Best/Mean curves (the meaningful signal).
+        focus = np.array([v for v in (bests + means)
+                          if v is not None and np.isfinite(v)], dtype=float)
+        if focus.size:
+            ylo, yhi = float(focus.min()), float(focus.max())
+            pad = 0.1 * (yhi - ylo) if yhi > ylo else (abs(yhi) * 0.1 or 1.0)
+            # Let the y-axis reach a little below Best/Mean toward Worst, but not
+            # all the way to catastrophic penalty values.
+            wfin = np.array([w for w in worsts if w is not None and np.isfinite(w)],
+                            dtype=float)
+            floor = ylo - pad
+            if wfin.size:
+                floor = max(float(np.percentile(wfin, 25)), ylo - 5 * (yhi - ylo + 1))
+            ax.set_ylim(min(floor, ylo - pad), yhi + pad)
+
+        # Feasible-% secondary curve.
+        if any(f for f in feas):
+            ax2 = ax.twinx()
+            ax2.plot(gens, feas, color="#d29922", linewidth=1.1, alpha=0.7,
+                     linestyle=":", label="Feasible %")
+            ax2.set_ylim(0, 105)
+            ax2.set_ylabel("Feasible %", color="#d29922", fontsize=9)
+            ax2.tick_params(axis="y", colors="#d29922", labelsize=8)
+            ax2.spines["right"].set_color("#30363d")
+            ax2.spines["top"].set_visible(False)
 
         ax.legend(facecolor="#161b22", edgecolor="#30363d",
                   labelcolor="#c9d1d9", fontsize=8, loc="lower right")
-
-        ax.figure.tight_layout()
-        self._canvas_conv.draw_idle()
+        fig.tight_layout()
+        if draw_idle:
+            self._canvas_conv.draw_idle()
+        else:
+            self._canvas_conv.draw()
 
     def _update_all_plots(self, result):
         """Update all plots after optimization completes."""
         self._conv_bests = []
         self._conv_means = []
         self._conv_worsts = []
+        self._conv_feas = []
 
         self._plot_convergence(result)
         self._plot_multi_objective(result)
         self._plot_pareto(result)
 
     def _plot_convergence(self, result):
-        ax = self._ax_conv
-        ax.clear()
-        _style_ax(ax, "Fitness Convergence", "Generation", "Fitness")
-
         if not result.generation_history:
+            self._ax_conv.clear()
+            _style_ax(self._ax_conv, "Fitness Convergence", "Generation", "Fitness")
             self._canvas_conv.draw()
             return
 
-        gens = [g.get("generation", i) for i, g in enumerate(result.generation_history)]
-        bests = [g.get("best_fitness", 0) for g in result.generation_history]
-        means = [g.get("mean_fitness", 0) for g in result.generation_history]
-        worsts = [g.get("worst_fitness", 0) for g in result.generation_history]
-
-        ax.plot(gens, bests, color="#7ee787", linewidth=2, label="Best", zorder=3)
-        ax.fill_between(gens, worsts, bests, alpha=0.12, color="#58a6ff")
-        ax.plot(gens, means, color="#58a6ff", linewidth=1.2, alpha=0.8,
-                linestyle="--", label="Mean")
-        ax.plot(gens, worsts, color="#f85149", linewidth=0.8, alpha=0.5, label="Worst")
-
-        ax.legend(facecolor="#161b22", edgecolor="#30363d",
-                  labelcolor="#c9d1d9", fontsize=8, loc="lower right")
-        ax.figure.tight_layout()
-        self._canvas_conv.draw()
+        hist = result.generation_history
+        bests = [g.get("best_fitness", 0) for g in hist]
+        means = [g.get("mean_fitness", 0) for g in hist]
+        worsts = [g.get("worst_fitness", 0) for g in hist]
+        feas = [g.get("feasible_pct", 0) for g in hist]
+        self._draw_convergence(bests, means, worsts, feas)
 
     def _plot_multi_objective(self, result):
         ax = self._ax_multi
@@ -1590,6 +1628,14 @@ class OptimizationWorkspace(QWidget):
         x_vals = [d.objectives.get(k1, 0) for d in result.pareto_front]
         y_vals = [d.objectives.get(k2, 0) for d in result.pareto_front]
 
+        # Cache for click-to-inspect (see _on_pareto_click).
+        self._pareto_pick = {
+            "designs": list(result.pareto_front),
+            "x": np.asarray(x_vals, dtype=float),
+            "y": np.asarray(y_vals, dtype=float),
+            "k1": k1, "k2": k2,
+        }
+
         # Rank by color gradient
         n = len(result.pareto_front)
         colors = np.linspace(0.2, 0.9, n)
@@ -1631,6 +1677,54 @@ class OptimizationWorkspace(QWidget):
                   labelcolor="#c9d1d9", fontsize=8, loc="upper right")
         ax.figure.tight_layout()
         self._canvas_pareto.draw()
+
+    def _on_pareto_click(self, event):
+        """Click a Pareto point to inspect it: highlight it, annotate its key
+        metrics, and load its full parameter set into the results panel."""
+        pick = getattr(self, "_pareto_pick", None)
+        if pick is None or event.inaxes is not self._ax_pareto:
+            return
+        if event.xdata is None or event.ydata is None or not len(pick["x"]):
+            return
+
+        ax = self._ax_pareto
+        # Nearest point in axis-normalized space (the two objectives have very
+        # different scales, so normalize by the current view limits).
+        xr = (ax.get_xlim()[1] - ax.get_xlim()[0]) or 1.0
+        yr = (ax.get_ylim()[1] - ax.get_ylim()[0]) or 1.0
+        dx = (pick["x"] - event.xdata) / xr
+        dy = (pick["y"] - event.ydata) / yr
+        idx = int(np.argmin(dx * dx + dy * dy))
+        design = pick["designs"][idx]
+
+        # Remove a previous pick annotation/marker, if any.
+        for art in getattr(self, "_pareto_pick_artists", []):
+            try:
+                art.remove()
+            except Exception:
+                pass
+        self._pareto_pick_artists = []
+
+        px, py = pick["x"][idx], pick["y"][idx]
+        m = ax.scatter([px], [py], s=180, facecolors="none",
+                       edgecolors="#f0883e", linewidths=2.0, zorder=6)
+        v = design.variables
+        mc = design.mc_stats or {}
+        txt = (f"{pick['k1'].replace('_', ' ')}: {px:.2f}\n"
+               f"{pick['k2'].replace('_', ' ')}: {py:.2f}\n"
+               f"Ø {v.get('diameter', 0):.3f} m · L {v.get('length', 0):.2f} m\n"
+               f"mass {v.get('dry_mass', 0):.2f} kg · "
+               f"apogee {mc.get('mean_apogee', 0):.0f} m")
+        ann = ax.annotate(txt, (px, py), textcoords="offset points", xytext=(12, 12),
+                          fontsize=8, color="#e6edf3",
+                          bbox=dict(boxstyle="round,pad=0.4", fc="#161b22",
+                                    ec="#f0883e", lw=1.0),
+                          zorder=7)
+        self._pareto_pick_artists = [m, ann]
+        self._canvas_pareto.draw_idle()
+
+        # Push the full design into the right-hand results panel.
+        self._update_results_panel_from_design(design)
 
     # ═════════════════════════════════════════════════════════════════════════
     #  DESIGN SPACE EXPLORER
@@ -1837,23 +1931,30 @@ class OptimizationWorkspace(QWidget):
 
             # Main effects plot
             var_names = [v[0] for v in enabled_vars]
-            _style_ax(ax_left, "Main Effects", "Variable", "Mean Response")
-            if len(enabled_vars) <= 8:
-                effects = []
-                for j in range(n_vars):
-                    median_val = np.median(dm[:, j])
-                    low_mask = dm[:, j] < median_val
-                    high_mask = dm[:, j] >= median_val
-                    if np.sum(low_mask) > 0 and np.sum(high_mask) > 0:
-                        effect = np.mean(responses[high_mask]) - np.mean(responses[low_mask])
-                    else:
-                        effect = 0
-                    effects.append(effect)
+            _style_ax(ax_left, "Main Effects (Δ mean response)", "Apogee Δ (m)", "")
+            # Main effect of each variable = mean response over its upper half
+            # minus its lower half. Computed for every variable (no cap) and
+            # ranked by magnitude so the panel is never blank when DOE data
+            # exists and reads as an importance ranking.
+            effects = []
+            for j in range(n_vars):
+                median_val = np.median(dm[:, j])
+                low_mask = dm[:, j] < median_val
+                high_mask = dm[:, j] >= median_val
+                if np.sum(low_mask) > 0 and np.sum(high_mask) > 0:
+                    effect = np.mean(responses[high_mask]) - np.mean(responses[low_mask])
+                else:
+                    effect = 0.0
+                effects.append(effect)
 
-                colors = ["#7ee787" if e > 0 else "#f85149" for e in effects]
-                ax_left.barh(var_names, effects, color=colors, alpha=0.8,
-                             edgecolor="#30363d")
-                ax_left.axvline(0, color="#484f58", linewidth=0.5)
+            effects = np.asarray(effects, dtype=float)
+            order = np.argsort(np.abs(effects))        # ascending → largest on top
+            names_o = [var_names[i] for i in order]
+            eff_o = effects[order]
+            colors = ["#7ee787" if e > 0 else "#f85149" for e in eff_o]
+            ax_left.barh(names_o, eff_o, color=colors, alpha=0.8,
+                         edgecolor="#30363d")
+            ax_left.axvline(0, color="#484f58", linewidth=0.5)
 
             # Response surface contour (first two variables)
             _style_ax(ax_right, "Response Surface", "", "")
@@ -1971,9 +2072,15 @@ class OptimizationWorkspace(QWidget):
             if method == "Sobol Indices":
                 _style_ax(ax_left, "First-Order Sobol Indices (S1)", "", "")
                 _style_ax(ax_right, "Total-Order (linear r² proxy)", "", "")
-                ax_left.barh(var_names, out["s1"], color=["#58a6ff"] * n_vars,
+                # Rank by first-order influence (largest at top) so both panels
+                # read as an importance ranking, not raw variable order.
+                s1 = np.asarray(out["s1"], dtype=float)
+                st = np.asarray(out["st"], dtype=float)
+                order = np.argsort(s1)              # ascending → barh puts max on top
+                names_o = [var_names[i] for i in order]
+                ax_left.barh(names_o, s1[order], color="#58a6ff",
                              alpha=0.8, edgecolor="#30363d")
-                ax_right.barh(var_names, out["st"], color=["#bc8cff"] * n_vars,
+                ax_right.barh(names_o, st[order], color="#bc8cff",
                               alpha=0.8, edgecolor="#30363d")
                 ax_left.set_xlim(0, 1)
                 ax_right.set_xlim(0, 1)
@@ -1999,9 +2106,14 @@ class OptimizationWorkspace(QWidget):
             else:  # Morris Screening
                 _style_ax(ax_left, "Morris μ* (Importance)", "μ*", "")
                 _style_ax(ax_right, "Morris σ (Interaction)", "σ", "")
-                ax_left.barh(var_names, out["mu_star"], color="#58a6ff", alpha=0.8,
+                # Rank by μ* (importance), largest at top.
+                mu = np.asarray(out["mu_star"], dtype=float)
+                sig = np.asarray(out["sigma"], dtype=float)
+                order = np.argsort(mu)
+                names_o = [var_names[i] for i in order]
+                ax_left.barh(names_o, mu[order], color="#58a6ff", alpha=0.8,
                              edgecolor="#30363d")
-                ax_right.barh(var_names, out["sigma"], color="#f0883e", alpha=0.8,
+                ax_right.barh(names_o, sig[order], color="#f0883e", alpha=0.8,
                               edgecolor="#30363d")
 
             for a in self._ax_sens:
@@ -2280,7 +2392,9 @@ class OptimizationWorkspace(QWidget):
 
         # Balanced (closest to utopia) — over the user-enabled objectives only,
         # with minimize objectives sign-flipped so "utopia" is the true ideal.
-        if len(designs) > 2:
+        # Works for any front size (a single-objective run has one design, which
+        # is trivially the balanced one) so the button is never left empty.
+        if len(designs) >= 1:
             active = getattr(self, "_active_objectives", [])
             if not active:
                 active = [(k, "maximize") for k in list(designs[0].objectives.keys())[:2]]
@@ -2308,11 +2422,66 @@ class OptimizationWorkspace(QWidget):
         self.lbl_stat_time.setText(f"{result.elapsed_time:.1f} s")
         self.lbl_stat_algo.setText(result.algorithm_used.upper())
 
+        # Feasible count + percentage of the final population.
+        designs = result.all_designs or []
+        n_total = len(designs)
+        n_feasible = sum(1 for d in designs if d.feasible)
+        if n_total:
+            self.lbl_stat_feasible.setText(
+                f"{n_feasible} / {n_total}  ({n_feasible / n_total * 100:.0f} %)")
+        else:
+            self.lbl_stat_feasible.setText("—")
+
+        # Best generation = first generation that reached the max best-fitness.
+        hist = result.generation_history or []
+        if hist:
+            bests = [g.get("best_fitness", float("-inf")) for g in hist]
+            best_gen = int(np.argmax(bests))
+            self.lbl_stat_best_gen.setText(f"{best_gen} / {len(hist) - 1}")
+        else:
+            self.lbl_stat_best_gen.setText("—")
+
+        # Hypervolume — only meaningful with ≥2 enabled objectives (a real
+        # Pareto front). 2D dominated hypervolume over the normalized front,
+        # measured from the nadir; larger = better coverage of the trade-off.
+        active = getattr(self, "_active_objectives", [])
+        hv = self._hypervolume(result.pareto_front, active) if len(active) >= 2 else None
+        self.lbl_stat_hv.setText(f"{hv:.4f}" if hv is not None else "N/A (single-obj)")
+
         if result.surrogate_accuracy:
             r2 = result.surrogate_accuracy.get("r2", 0)
             self.lbl_stat_surrogate.setText(f"{r2:.3f}")
         else:
             self.lbl_stat_surrogate.setText("N/A")
+
+    @staticmethod
+    def _hypervolume(front, active):
+        """Normalized 2D hypervolume of a Pareto *front* over the first two
+        *active* objectives. Objectives are sign-flipped to all-maximize, scaled
+        to [0,1] by their own spread, and the dominated area is measured from
+        the (0,0) nadir. Returns None when it can't be computed."""
+        if not front or len(active) < 2:
+            return None
+        (k1, d1), (k2, d2) = active[0], active[1]
+        s1 = 1.0 if d1 == "maximize" else -1.0
+        s2 = 1.0 if d2 == "maximize" else -1.0
+        pts = np.array([[s1 * d.objectives.get(k1, 0.0),
+                         s2 * d.objectives.get(k2, 0.0)] for d in front], dtype=float)
+        if pts.shape[0] < 1:
+            return None
+        mins = pts.min(axis=0)
+        maxs = pts.max(axis=0)
+        rng = maxs - mins
+        rng[rng < 1e-12] = 1.0
+        norm = (pts - mins) / rng                      # [0,1]^2, larger = better
+        # Sweep the non-dominated staircase, summing rectangle areas to (0,0).
+        order = norm[np.argsort(-norm[:, 0])]          # descending obj1
+        hv, prev_y = 0.0, 0.0
+        for x, y in order:
+            if y > prev_y:
+                hv += x * (y - prev_y)
+                prev_y = y
+        return float(hv)
 
     def _update_improvement(self, result):
         """Show improvement over baseline."""
@@ -2338,27 +2507,35 @@ class OptimizationWorkspace(QWidget):
             d_land = opt_land - baseline.landing_distance
             d_mass = opt_mass - base.dry_mass
 
-            pct_a = (d_apogee / baseline.apogee * 100) if baseline.apogee > 0 else 0
+            def _pct(delta, base_val):
+                return (delta / abs(base_val) * 100) if abs(base_val) > 1e-9 else 0.0
+
+            pct_a = _pct(d_apogee, baseline.apogee)
+            pct_s = _pct(d_stab, baseline.min_stability_margin)
+            pct_l = _pct(d_land, baseline.landing_distance)
+            pct_m = _pct(d_mass, base.dry_mass)
 
             c_pos = "#7ee787"
             c_neg = "#f85149"
 
+            # "better" direction differs per metric: apogee/stability up is good,
+            # landing distance and mass down is good.
             self.lbl_imp_apogee.setText(f"{d_apogee:+.1f} m ({pct_a:+.1f}%)")
             self.lbl_imp_apogee.setStyleSheet(
                 _VAL.replace("#e6edf3", c_pos if d_apogee > 0 else c_neg)
             )
 
-            self.lbl_imp_stability.setText(f"{d_stab:+.2f} cal")
+            self.lbl_imp_stability.setText(f"{d_stab:+.2f} cal ({pct_s:+.1f}%)")
             self.lbl_imp_stability.setStyleSheet(
                 _VAL.replace("#e6edf3", c_pos if d_stab > 0 else c_neg)
             )
 
-            self.lbl_imp_landing.setText(f"{d_land:+.0f} m")
+            self.lbl_imp_landing.setText(f"{d_land:+.0f} m ({pct_l:+.1f}%)")
             self.lbl_imp_landing.setStyleSheet(
                 _VAL.replace("#e6edf3", c_pos if d_land < 0 else c_neg)
             )
 
-            self.lbl_imp_mass.setText(f"{d_mass:+.3f} kg")
+            self.lbl_imp_mass.setText(f"{d_mass:+.3f} kg ({pct_m:+.1f}%)")
             self.lbl_imp_mass.setStyleSheet(
                 _VAL.replace("#e6edf3", c_pos if d_mass < 0 else c_neg)
             )
