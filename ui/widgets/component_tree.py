@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem,
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QBrush, QFont
 from core.components import RocketComponent, Stage
+from ui.icons import icon as app_icon
 
 logger = logging.getLogger("K2.CompTree")
 
@@ -66,26 +67,28 @@ class ComponentTree(QWidget):
         bl.setContentsMargins(0, 0, 0, 0)
         bl.setSpacing(4)
 
-        self.btn_up = QPushButton("▲")
-        self.btn_up.setToolTip("Move Up")
+        # Crisp qtawesome icons + descriptive hover tooltips (the old ▲▼⧉✕
+        # glyphs rendered inconsistently and read as random characters).
+        self.btn_up = QPushButton(app_icon("move_up", color="#c9d1d9"), "")
+        self.btn_up.setToolTip("Move component up")
         self.btn_up.setFixedSize(36, 30)
         self.btn_up.clicked.connect(self._move_up)
         bl.addWidget(self.btn_up)
 
-        self.btn_down = QPushButton("▼")
-        self.btn_down.setToolTip("Move Down")
+        self.btn_down = QPushButton(app_icon("move_down", color="#c9d1d9"), "")
+        self.btn_down.setToolTip("Move component down")
         self.btn_down.setFixedSize(36, 30)
         self.btn_down.clicked.connect(self._move_down)
         bl.addWidget(self.btn_down)
 
-        self.btn_dup = QPushButton("⧉")
-        self.btn_dup.setToolTip("Duplicate")
+        self.btn_dup = QPushButton(app_icon("duplicate", color="#58a6ff"), "")
+        self.btn_dup.setToolTip("Duplicate component")
         self.btn_dup.setFixedSize(36, 30)
         self.btn_dup.clicked.connect(self._duplicate)
         bl.addWidget(self.btn_dup)
 
-        self.btn_del = QPushButton("✕")
-        self.btn_del.setToolTip("Delete")
+        self.btn_del = QPushButton(app_icon("delete", color="#f85149"), "")
+        self.btn_del.setToolTip("Delete component")
         self.btn_del.setFixedSize(36, 30)
         self.btn_del.setProperty("danger", True)
         self.btn_del.clicked.connect(self._delete)

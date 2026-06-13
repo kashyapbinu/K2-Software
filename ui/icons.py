@@ -69,6 +69,8 @@ _MAP = {
     "export":        "fa5s.download",
     "duplicate":     "fa5s.clone",
     "delete":        "fa5s.trash-alt",
+    "move_up":       "fa5s.arrow-up",
+    "move_down":     "fa5s.arrow-down",
     "search":        "fa5s.search",
     "report":        "fa5s.file-pdf",
     "screenshot":    "fa5s.camera",
