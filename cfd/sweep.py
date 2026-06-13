@@ -161,6 +161,68 @@ def build_value_list(start: float, stop: float, step: float) -> list[float]:
     return vals
 
 
+# ── Analytic skin-friction build-up (Euler hybrid polar mode) ────────────────
+
+def analytic_friction_cd(
+    geometry: dict,
+    reynolds: float,
+    mach: float,
+    ref_area: float,
+) -> Optional[float]:
+    """Component flat-plate skin-friction drag coefficient (about ref_area).
+
+    Used with inviscid (Euler) sweep points: SU2 supplies the pressure field
+    (lift, moments, CP, wave drag) and this supplies the friction drag the
+    inviscid solve cannot. Standard engineering build-up — the same approach
+    OpenRocket/Barrowman-class tools use:
+
+      Cf   = 0.455 / (log10 Re)^2.58            (Schlichting, fully turbulent)
+      Cf  *= (1 + 0.144 M²)^-0.65               (compressibility correction)
+      body FF = 1 + 60/f³ + 0.0025·f            (Hoerner, fineness f = L/d)
+      fin  FF = 1 + 2(t/c)                      (thin-airfoil form factor)
+      Cd_f = Σ Cf_i · FF_i · S_wet_i / S_ref
+
+    Fully-turbulent Cf is the right default at flight Reynolds numbers
+    (≥1e6); it slightly over-predicts below that. Returns None when the
+    geometry dict or Reynolds number is unusable.
+    """
+    if not geometry or reynolds <= 1e3 or ref_area <= 0:
+        return None
+    L = geometry.get("length", 0.0)
+    r = geometry.get("body_radius", 0.0)
+    if L <= 0 or r <= 0:
+        return None
+    nose_L = geometry.get("nose_length", 0.3 * L)
+    body_L = max(0.0, geometry.get("body_length", L - nose_L))
+
+    def cf_turb(re: float) -> float:
+        re = max(re, 1e4)
+        cf = 0.455 / (math.log10(re) ** 2.58)
+        return cf * (1.0 + 0.144 * mach * mach) ** -0.65
+
+    # Body of revolution: cone-slant nose + cylinder, Re over full length.
+    s_nose = math.pi * r * math.sqrt(nose_L * nose_L + r * r)
+    s_body = 2.0 * math.pi * r * body_L
+    fineness = L / (2.0 * r)
+    ff_body = 1.0 + 60.0 / fineness ** 3 + 0.0025 * fineness
+    cd_f = cf_turb(reynolds) * ff_body * (s_nose + s_body) / ref_area
+
+    # Fins: both faces of each panel, Re over the mean chord.
+    n_fin = int(geometry.get("fin_count", 0))
+    cr = geometry.get("fin_root", 0.0)
+    ct = geometry.get("fin_tip", cr * 0.5)
+    h = geometry.get("fin_height", 0.0)
+    if n_fin > 0 and cr > 0 and h > 0:
+        mean_chord = 0.5 * (cr + ct)
+        s_fins = 2.0 * n_fin * mean_chord * h
+        t_over_c = geometry.get("fin_thick", 0.003) / max(mean_chord, 1e-6)
+        ff_fin = 1.0 + 2.0 * t_over_c
+        re_fin = reynolds * mean_chord / L
+        cd_f += cf_turb(re_fin) * ff_fin * s_fins / ref_area
+
+    return cd_f
+
+
 # ── Mesh staging ─────────────────────────────────────────────────────────────
 
 def stage_mesh(mesh_path: Path, work_dir: Path) -> Path:
@@ -223,6 +285,27 @@ def run_sweep_point(
     for _it, _rms in solver.run():
         pass  # progress already streamed via callback
     result = solver.parse_results()
+
+    # Hybrid Euler polar: the inviscid solve has no skin friction, so add the
+    # analytic flat-plate build-up to the total drag. Pressure/wave drag, lift,
+    # moments and CP keep their integrated (inviscid) values untouched.
+    if cfg.euler_analytic_friction:
+        cd_f = analytic_friction_cd(
+            cfg.geometry_dict, result.reynolds, result.mach,
+            result.reference_area_m2,
+        )
+        if cd_f is not None:
+            result.cd += cd_f
+            result.cd_friction = cd_f
+            result.force_axial = result.cd * result.dynamic_pressure * result.reference_area_m2
+            result.solver_name = "SU2 Euler + flat-plate friction"
+            logger.info(f"Analytic friction added: Cd_f={cd_f:.4f}")
+        else:
+            logger.warning(
+                "Euler+friction mode: geometry/Reynolds unavailable — "
+                "Cd is inviscid-only for this point."
+            )
+
     logger.info(
         f"Sweep point {var}={value:g} → Cd={result.cd:.4f} Cl={result.cl:.4f} "
         f"Cm={result.cm:.4f} conv={result.converged}"

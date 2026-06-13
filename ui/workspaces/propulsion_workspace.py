@@ -26,14 +26,16 @@ class _CurveFetcher(QThread):
     """Background fetch of the real ThrustCurve.org samples for one motor."""
     done = pyqtSignal(str, list)   # (motor_id, curve [(t, N), ...] — [] on failure)
 
-    def __init__(self, motor_id, parent=None):
+    def __init__(self, motor_id, expected_impulse=0.0, parent=None):
         super().__init__(parent)
         self._motor_id = motor_id
+        self._expected_impulse = expected_impulse
 
     def run(self):
         try:
             from data.thrust_curves import fetch_thrust_curve
-            curve = fetch_thrust_curve(self._motor_id) or []
+            curve = fetch_thrust_curve(
+                self._motor_id, expected_impulse=self._expected_impulse) or []
         except Exception:
             curve = []
         self.done.emit(self._motor_id, [list(p) for p in curve])
@@ -265,27 +267,29 @@ class PropulsionWorkspace(QWidget):
                 motor_dry_mass=dry,
                 motor_length=m.get("length", 0.0),
                 custom_thrust_curve=[])
-            self._load_real_curve(m.get("motor_id", ""))
+            self._load_real_curve(m.get("motor_id", ""), m["total_impulse"])
         self._update_display()
 
-    def _load_real_curve(self, motor_id):
+    def _load_real_curve(self, motor_id, expected_impulse=0.0):
         """Fill custom_thrust_curve with the measured ThrustCurve.org samples.
 
         Cached curves apply immediately; otherwise a background fetch fills it
         in when it arrives (the trapezoid stands in until then / offline).
+        Curves whose impulse contradicts the catalog are rejected upstream,
+        so the trapezoid simply remains in effect for those motors.
         """
         self._wanted_motor_id = motor_id
         if not motor_id:
             return
         try:
             from data.thrust_curves import load_cached
-            cached = load_cached(motor_id)
+            cached = load_cached(motor_id, expected_impulse)
         except Exception:
             cached = None
         if cached:
             self.engine.update(custom_thrust_curve=[list(p) for p in cached])
             return
-        self._curve_fetcher = _CurveFetcher(motor_id, self)
+        self._curve_fetcher = _CurveFetcher(motor_id, expected_impulse, self)
         self._curve_fetcher.done.connect(self._on_curve_fetched)
         self._curve_fetcher.start()
 

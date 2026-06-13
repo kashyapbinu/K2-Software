@@ -83,6 +83,11 @@ class CFDConfig:
     max_iterations: int = 5000
     convergence_tolerance: float = 1e-6
     turbulence_model: str = "SST"       # "Euler" | "Laminar" | "SA" | "SST" | "KE"
+    # Hybrid polar mode: solve inviscid (turbulence_model="Euler") and add a
+    # flat-plate skin-friction build-up to Cd per sweep point. Avoids the
+    # spurious viscous body lift + inflated pressure drag of wall-unresolved
+    # RANS on the tet-only mesh (y+ >> 1, no prism layers, no wall functions).
+    euler_analytic_friction: bool = False
     n_cores: int = 0                    # MPI ranks for SU2_CFD. 0 = auto (all cores).
                                         # Requires an MPI-built SU2 + mpiexec on PATH/bin;
                                         # falls back to serial if neither is present.
@@ -120,6 +125,7 @@ class CFDResult:
     # Flow conditions (stored for display)
     reynolds: float = 0.0        # Reynolds number
     dynamic_pressure: float = 0.0  # q∞ (Pa)
+    yplus_mean: float = 0.0      # Mean wall y+ (viscous runs; 0 = unknown/inviscid)
     ref_length: float = 0.0      # Characteristic length (m)
     turbulence_model: str = ""   # Active turbulence model name
     solver_name: str = "SU2"     # Solver backend name

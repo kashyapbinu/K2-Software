@@ -138,9 +138,7 @@ class SolverThread(QThread):
             "target_element_count": cfg.target_element_count,
         }
 
-        # Write params to a temp JSON file
         params_file = cfg.work_dir / "_mesh_params.json"
-        params_file.write_text(json.dumps(mesh_params, default=str), encoding="utf-8")
 
         # Build a small standalone script (avoids quoting issues with -c)
         script_file = cfg.work_dir / "_run_mesh.py"
@@ -167,6 +165,10 @@ class SolverThread(QThread):
             ")\n"
             "print('MESH_OK')\n",
             encoding="utf-8",
+        )
+
+        params_file.write_text(
+            json.dumps(mesh_params, default=str), encoding="utf-8"
         )
 
         # Run in subprocess — same Python interpreter, K2 root as cwd
@@ -491,7 +493,6 @@ class SweepThread(QThread):
             "target_element_count": cfg.target_element_count,
         }
         params_file = cfg.work_dir / "_mesh_params.json"
-        params_file.write_text(json.dumps(mesh_params, default=str), encoding="utf-8")
 
         script_file = cfg.work_dir / "_run_mesh.py"
         script_file.write_text(
@@ -517,6 +518,10 @@ class SweepThread(QThread):
             ")\n"
             "print('MESH_OK')\n",
             encoding="utf-8",
+        )
+
+        params_file.write_text(
+            json.dumps(mesh_params, default=str), encoding="utf-8"
         )
 
         self._mesh_proc = subprocess.Popen(
@@ -731,6 +736,22 @@ class CFDWorkspace(QWidget):
         swl.addRow("Start:", self._sp_sw_start)
         swl.addRow("Stop:",  self._sp_sw_stop)
         swl.addRow("Step:",  self._sp_sw_step)
+
+        # Hybrid fidelity mode: inviscid SU2 + analytic flat-plate friction.
+        # Recommended default — wall-unresolved RANS on the tet-only mesh
+        # (y+ >> 1, no prism layers) produces spurious viscous body lift that
+        # biases CP forward and roughly doubles Cd₀.
+        self._chk_euler_fric = QCheckBox("Euler + flat-plate friction (recommended)")
+        self._chk_euler_fric.setChecked(True)
+        self._chk_euler_fric.setStyleSheet("color:#c9d1d9; font-size:12px;")
+        self._chk_euler_fric.setToolTip(
+            "Solve each sweep point inviscid (Euler) and add an analytic\n"
+            "skin-friction build-up (Schlichting flat plate + form factors)\n"
+            "to Cd. Cleaner CP/stability and realistic Cd₀ on this mesh,\n"
+            "which cannot resolve the boundary layer for RANS (y+ ≫ 1).\n"
+            "Uncheck to sweep with the turbulence model selected above."
+        )
+        swl.addRow("", self._chk_euler_fric)
 
         self._lbl_sweep_info = QLabel("9 points")
         self._lbl_sweep_info.setStyleSheet("color:#8b949e; font-size:11px; padding:2px 0;")
@@ -1061,7 +1082,7 @@ class CFDWorkspace(QWidget):
             "Vorticity Magnitude",        # 8
             "Q-Criterion Iso-Surface",    # 9
             "Cp \u2014 Volume Slice",          # 10
-            "Shock Detection",            # 11
+            "Compression Region",         # 11
             "Boundary Layer \u2014 Y+",        # 12
             "Wall Shear Stress",          # 13
             "Force Vectors",              # 14
@@ -1091,7 +1112,7 @@ class CFDWorkspace(QWidget):
         self._chk_mesh_edges.stateChanged.connect(self._refresh_vis)
         bl.addWidget(self._chk_mesh_edges)
 
-        # Shock sensor selector (visible only on shock detection view)
+        # Compression sensor selector (visible only on compression region view)
         self._cb_shock_sensor = QComboBox()
         self._cb_shock_sensor.addItems([
             "Pressure Gradient", "Ducros Sensor", "Dilatation",
@@ -1722,6 +1743,20 @@ class CFDWorkspace(QWidget):
         self._sweep_max_iter = 800
         base_cfg.max_iterations = self._sweep_max_iter
         base_cfg.convergence_tolerance = 1e-8
+        # Hybrid Euler + analytic-friction polar (see checkbox tooltip).
+        self._sweep_euler_fric = self._chk_euler_fric.isChecked()
+        if self._sweep_euler_fric:
+            base_cfg.turbulence_model = "Euler"
+            base_cfg.euler_analytic_friction = True
+            if base_cfg.geometry_dict is None:
+                self._log(
+                    "Euler+friction mode: no exact geometry available (STL source) — "
+                    "friction build-up will be skipped, Cd will be inviscid-only."
+                )
+            self._log(
+                "Polar fidelity: Euler (inviscid) + flat-plate friction build-up. "
+                "Uncheck the sweep option to use the selected turbulence model."
+            )
         self._btn_run.setEnabled(False)
         self._btn_stop.setEnabled(True)
         self._set_params_locked(True)
@@ -1861,6 +1896,27 @@ class CFDWorkspace(QWidget):
                         f"@ M {m.get('mach_at_wave_peak', 0):.3f}")
             if "cp_shift_m" in m:
                 txt += f"   |   CP shift = {m['cp_shift_m']*1000:.1f} mm"
+
+        if getattr(self, "_sweep_euler_fric", False):
+            cdf = [p.result.cd_friction for p in d.points if p.result.cd_friction > 0]
+            cdf_txt = f", Cd_f ≈ {sum(cdf)/len(cdf):.4f}" if cdf else ""
+            txt += (f"\nMode: Euler + flat-plate friction build-up"
+                    f"{cdf_txt} (lift / CP / wave drag inviscid)")
+
+        # ── Fidelity caveats — the numbers above are only as good as the solve ──
+        n_unconv = sum(1 for p in d.points if not p.result.converged)
+        if n_unconv:
+            txt += (f"\n⚠ {n_unconv}/{len(d.points)} points unconverged "
+                    f"(forces not stationary) — treat affected values as approximate.")
+        yp = [p.result.yplus_mean for p in d.points if p.result.yplus_mean > 0]
+        if yp and (sum(yp) / len(yp)) > 30.0:
+            txt += (f"\n⚠ Wall under-resolved (mean y+ ≈ {sum(yp)/len(yp):.0f}, "
+                    f"tet-only mesh, no wall functions): Cd is inflated and CP "
+                    f"biased forward — spurious viscous body lift can read as "
+                    f"\"Unstable\". Trends vs AoA/Mach are usable; absolute Cd₀ "
+                    f"and the stability verdict are not. Cross-check CP against "
+                    f"Barrowman, or re-run with the \"Euler + flat-plate "
+                    f"friction\" sweep option for a cleaner pressure CP.")
         self._lbl_polar_metrics.setText(txt)
 
     def _on_sweep_finished(self, data):
@@ -2347,7 +2403,7 @@ class CFDWorkspace(QWidget):
             self._sp_smin.setValue(self._sp_smin.minimum())
             self._sp_smax.setValue(self._sp_smax.minimum())
             self._last_vis_idx = idx
-        # Show shock sensor combo only on shock detection view
+        # Show compression sensor combo only on compression region view
         self._cb_shock_sensor.setVisible(idx == 11)
         # Turn off probe mode when switching views to prevent click conflicts
         if self._btn_probe.isChecked():
@@ -2801,7 +2857,7 @@ class CFDWorkspace(QWidget):
                 else:
                     self._status_lbl.setText("Cp not in output -- check VOLUME_OUTPUT= ..., PRESSURE_COEFFICIENT")
 
-            # ── idx 11: Shock Detection (unified sensor interface) ─────
+            # ── idx 11: Compression Region (unified sensor interface) ─────
             elif idx == 11 and vm_local:
                 try:
                     sensor_idx = self._cb_shock_sensor.currentIndex()
@@ -2858,7 +2914,7 @@ class CFDWorkspace(QWidget):
                                         smooth_shading=True,
                                         specular=0.3, specular_power=20,
                                         ambient=0.15,
-                                        label=f"{sensor_label} shock surface"
+                                        label=f"{sensor_label} compression surface"
                                     )
                                     # Also show on slice for context
                                     if p_name in slc.array_names:
@@ -2872,9 +2928,9 @@ class CFDWorkspace(QWidget):
                                                              "color": "#c9d1d9"}
                                         )
                                 else:
-                                    self._status_lbl.setText(f"{sensor_label}: no shock structures detected")
+                                    self._status_lbl.setText(f"{sensor_label}: no compression structures detected")
                             except ImportError:
-                                self._status_lbl.setText("Shock detection module not available")
+                                self._status_lbl.setText("Compression sensor module not available")
                             except Exception as se:
                                 self._status_lbl.setText(f"{sensor_label} error: {se}")
 
@@ -2889,7 +2945,7 @@ class CFDWorkspace(QWidget):
                                     self._plotter.add_mesh(
                                         iso, color="#ff7b72", opacity=0.5,
                                         smooth_shading=True, specular=0.3,
-                                        label="Shock surface"
+                                        label="Compression surface"
                                     )
                             except Exception:
                                 pass
@@ -2904,9 +2960,9 @@ class CFDWorkspace(QWidget):
                             f"(M_max={max_mach:.2f})"
                         )
                     else:
-                        self._status_lbl.setText("Pressure not found for shock detection")
+                        self._status_lbl.setText("Pressure not found for compression region view")
                 except Exception as e:
-                    self._status_lbl.setText(f"Shock detection error: {e}")
+                    self._status_lbl.setText(f"Compression region error: {e}")
                     import traceback; traceback.print_exc()
 
             # ── idx 12: Boundary Layer Y+ ───────────────────────────
@@ -2946,7 +3002,10 @@ class CFDWorkspace(QWidget):
             # ── idx 13: Wall Shear Stress + Skin-Friction Lines ────────
             elif idx == 13 and sm:
                 from cfd.boundary_layer import extract_wall_shear, detect_separation
-                shear = extract_wall_shear(sm)
+                # SU2 stores the dimensionless skin-friction coefficient —
+                # dimensionalize with q_inf so the scalar bar really is Pa.
+                _q_inf = getattr(self._result, "dynamic_pressure", None) if self._result else None
+                shear = extract_wall_shear(sm, q_inf=_q_inf)
                 if shear is not None:
                     sm["WallShear"] = shear
                     sm = self._smooth_surface_scalars(sm, "WallShear", n_iter=2)
@@ -3376,7 +3435,9 @@ class CFDWorkspace(QWidget):
                 P = sm["Pressure"]
                 info_lines.append(f"  Pressure: min={P.min():.0f} Pa, max={P.max():.0f} Pa")
 
-            # Wall shear stress
+            # Wall shear stress — SU2 stores the dimensionless coefficient;
+            # report it dimensionalized (τ = Cf·q_inf) so structures gets Pa.
+            q_inf = float(getattr(self._result, "dynamic_pressure", 0.0) or 0.0)
             for shear_name in ["Skin_Friction_Coefficient", "Wall_Shear", "Cf"]:
                 if shear_name in sm.array_names:
                     cf = sm[shear_name]
@@ -3384,8 +3445,15 @@ class CFDWorkspace(QWidget):
                         cf_mag = np.linalg.norm(cf, axis=1)
                     else:
                         cf_mag = np.abs(cf)
-                    info_lines.append(f"  Wall shear ({shear_name}): "
-                                      f"min={cf_mag.min():.6f}, max={cf_mag.max():.6f}")
+                    if shear_name in ("Skin_Friction_Coefficient", "Cf") and q_inf > 0:
+                        tau = cf_mag * q_inf
+                        info_lines.append(
+                            f"  Wall shear: min={tau.min():.2f} Pa, "
+                            f"max={tau.max():.2f} Pa (Cf max={cf_mag.max():.5f}, "
+                            f"q_inf={q_inf:.0f} Pa)")
+                    else:
+                        info_lines.append(f"  Wall shear ({shear_name}): "
+                                          f"min={cf_mag.min():.6f}, max={cf_mag.max():.6f}")
                     break
 
             # Temperature

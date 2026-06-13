@@ -126,10 +126,25 @@ def extract_yplus(surface_mesh) -> Optional[np.ndarray]:
     return None
 
 
-def extract_wall_shear(surface_mesh) -> Optional[np.ndarray]:
-    """Extract wall shear stress magnitude from the surface mesh."""
+def extract_wall_shear(surface_mesh, q_inf: Optional[float] = None) -> Optional[np.ndarray]:
+    """Extract wall shear stress magnitude from the surface mesh.
+
+    SU2 surface output stores the dimensionless *skin-friction
+    coefficient* (Cf ~ 1e-3), not the stress. Pass the freestream
+    dynamic pressure ``q_inf`` (Pa) to dimensionalize coefficient
+    fields into actual wall shear stress  τ_w = Cf · q_inf.  Fields
+    already stored as stress (e.g. OpenFOAM ``wallShearStress``) are
+    returned unscaled.
+    """
     if surface_mesh is None:
         return None
+
+    def _dimensionalize(mag: np.ndarray, field_name: str) -> np.ndarray:
+        is_coeff = ("skin_friction" in field_name.lower()
+                    or field_name.startswith("SF"))
+        if is_coeff and q_inf is not None and q_inf > 0:
+            return (mag * q_inf).astype(np.float32)
+        return mag
 
     # Try vector wall shear first
     for name in ["Wall_Shear_Stress", "Skin_Friction_Coefficient",
@@ -137,8 +152,10 @@ def extract_wall_shear(surface_mesh) -> Optional[np.ndarray]:
         if name in surface_mesh.array_names:
             data = surface_mesh[name]
             if data.ndim > 1:
-                return np.linalg.norm(data, axis=1).astype(np.float32)
-            return np.asarray(data, dtype=np.float32)
+                mag = np.linalg.norm(data, axis=1).astype(np.float32)
+            else:
+                mag = np.asarray(data, dtype=np.float32)
+            return _dimensionalize(mag, name)
 
     # Try skin friction components
     for prefix in ["Skin_Friction_Coefficient", "SF"]:
@@ -149,7 +166,8 @@ def extract_wall_shear(surface_mesh) -> Optional[np.ndarray]:
             cfx = surface_mesh[x_name]
             cfy = surface_mesh[y_name] if y_name else np.zeros_like(cfx)
             cfz = surface_mesh[z_name] if z_name else np.zeros_like(cfx)
-            return np.sqrt(cfx**2 + cfy**2 + cfz**2).astype(np.float32)
+            mag = np.sqrt(cfx**2 + cfy**2 + cfz**2).astype(np.float32)
+            return _dimensionalize(mag, prefix)
 
     logger.warning("Wall shear stress field not found in surface mesh.")
     return None
@@ -812,6 +830,7 @@ def estimate_boundary_layer_thickness(
 def analyze_boundary_layer(
     surface_mesh,
     volume_mesh=None,
+    q_inf: Optional[float] = None,
 ) -> BoundaryLayerData:
     """Full boundary layer analysis returning structured diagnostics.
 
@@ -822,6 +841,10 @@ def analyze_boundary_layer(
     volume_mesh : pyvista.UnstructuredGrid, optional
         Volume mesh.  When provided, prism layer quality and BL
         thickness diagnostics are also computed.
+    q_inf : float, optional
+        Freestream dynamic pressure (Pa).  When given, skin-friction
+        coefficient fields are dimensionalized so the wall shear stats
+        are in Pa instead of dimensionless Cf.
 
     Returns
     -------
@@ -836,7 +859,7 @@ def analyze_boundary_layer(
             data.yplus_range = (float(np.min(valid)), float(np.max(valid)))
             data.yplus_mean = float(np.mean(valid))
 
-    shear = extract_wall_shear(surface_mesh)
+    shear = extract_wall_shear(surface_mesh, q_inf=q_inf)
     if shear is not None and len(shear) > 0:
         data.wall_shear_max = float(np.max(shear))
         data.wall_shear_mean = float(np.mean(shear))

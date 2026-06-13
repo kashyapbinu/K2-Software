@@ -168,7 +168,10 @@ SOLUTION_FILENAME= solution_flow.dat
 RESTART_FILENAME= restart_flow.dat
 TABULAR_FORMAT= CSV
 
-HISTORY_OUTPUT= ITER, RMS_DENSITY, RMS_ENERGY, {turb_hist_fields} LIFT, DRAG, DRAG_PRESSURE, DRAG_VISCOUS, MOMENT_Y, FORCE_X, FORCE_Y, FORCE_Z
+% NOTE: DRAG_PRESSURE / DRAG_VISCOUS are not valid SU2 history fields (they
+% never appear in history.csv) — the pressure/friction split is integrated
+% from surface_flow.vtu in parse_results() instead.
+HISTORY_OUTPUT= ITER, RMS_DENSITY, RMS_ENERGY, {turb_hist_fields} LIFT, DRAG, MOMENT_Y, FORCE_X, FORCE_Y, FORCE_Z
 CONV_FILENAME= history
 
 VOLUME_FILENAME= flow
@@ -183,6 +186,70 @@ VOLUME_OUTPUT= COORDINATES, SOLUTION, PRIMITIVE, PRESSURE_COEFFICIENT, MACH, VOR
 % SURFACE_OUTPUT= COORDINATES, SOLUTION, PRESSURE_COEFFICIENT, SKIN_FRICTION, Y_PLUS
 """
 
+
+
+def _integrate_surface_forces(
+    surf_vtk: Path,
+    p_inf: float,
+    q_inf: float,
+    ref_area: float,
+    aoa_deg: float,
+) -> Optional[dict]:
+    """Integrate wall pressure and skin friction from SU2's surface VTK.
+
+    Returns the real pressure/friction drag split (wind-axis) plus the mean
+    wall y+, or None if the file/fields are unavailable. SU2 has no valid
+    history fields for the split, so this integration is the only honest
+    source — verified to reproduce SU2's own CFx/CFz/CMy to 4 decimals.
+    Skin_Friction_Coefficient is stored dimensionless (τ = Cf·q∞).
+    """
+    try:
+        import numpy as np
+        import pyvista as pv
+        if not Path(surf_vtk).is_file():
+            return None
+        mesh = pv.read(str(surf_vtk))
+        try:
+            surf = mesh.extract_surface(algorithm=None)
+        except TypeError:
+            surf = mesh.extract_surface()
+        if "Pressure" not in surf.point_data:
+            return None
+        surf = surf.compute_normals(
+            cell_normals=True, point_normals=False, consistent_normals=False
+        )
+        cell = surf.point_data_to_cell_data()
+        area = np.asarray(surf.compute_cell_sizes()["Area"], dtype=float)
+        normals = np.asarray(surf.cell_data["Normals"], dtype=float)
+
+        # Wind-axis drag direction (AoA rotates the freestream in x-z).
+        a = math.radians(aoa_deg)
+        drag_dir = np.array([math.cos(a), 0.0, math.sin(a)])
+
+        # Pressure force on the body: dF = -(p - p_inf) * n_outward * dA
+        p = np.asarray(cell["Pressure"], dtype=float)
+        f_pressure = (-(p - p_inf)[:, None] * normals * area[:, None]).sum(axis=0)
+
+        out = {
+            "cd_pressure": float(f_pressure @ drag_dir) / (q_inf * ref_area),
+            "cd_friction": 0.0,
+            "yplus_mean": 0.0,
+        }
+
+        if "Skin_Friction_Coefficient" in cell.array_names:
+            cf = np.asarray(cell["Skin_Friction_Coefficient"], dtype=float)
+            if cf.ndim == 2 and cf.shape[1] >= 3:
+                f_friction = (cf * q_inf * area[:, None]).sum(axis=0)
+                out["cd_friction"] = float(f_friction @ drag_dir) / (q_inf * ref_area)
+        if "Y_Plus" in cell.array_names:
+            yp = np.asarray(cell["Y_Plus"], dtype=float)
+            yp = yp[np.isfinite(yp) & (yp > 0)]
+            if yp.size:
+                out["yplus_mean"] = float(yp.mean())
+        return out
+    except Exception as e:
+        logger.warning(f"Surface force integration failed: {e}")
+        return None
 
 
 class SU2Solver(CFDSolver):
@@ -310,7 +377,11 @@ class SU2Solver(CFDSolver):
         is_viscous = turb_cfg["solver"] != "EULER"
         is_rans = turb_cfg["solver"] == "RANS"
 
-        # Wall BC: Euler uses slip wall, viscous uses no-slip heatflux
+        # Wall BC: Euler uses slip wall, viscous uses no-slip heatflux.
+        # NOTE: no wall functions — SU2's STANDARD_WALL_FUNCTION diverges
+        # (T_Wall < 0 → NaN) from a freestream cold start on this tet-only
+        # mesh with strongly varying y+. Without a wall model, skin
+        # friction is under-resolved at y+ >> 1 (known accuracy limit).
         if is_viscous:
             wall_bc = "MARKER_HEATFLUX= ( rocket_wall, 0.0 )"
         else:
@@ -570,18 +641,72 @@ class SU2Solver(CFDSolver):
                             return 0.0
                 return 0.0
 
+            # Tail window for coefficient averaging. On this tet-only mesh the
+            # density residual limit-cycles (unsteady base flow under steady
+            # RANS) while the force coefficients plateau — so the last row can
+            # land anywhere in the cycle. Averaging the tail gives the
+            # cycle-mean force; the window spread doubles as a force-convergence
+            # check independent of the (never-satisfied) residual floor.
+            tail_n = min(50, len(rows))
+
+            def _get_tail(key):
+                """Mean of a column over the last tail_n rows (case-insensitive)."""
+                key_lower = key.lower()
+                col = None
+                for k in rows[-1].keys():
+                    if k.lower().strip() == key_lower:
+                        col = k
+                        break
+                if col is None:
+                    return 0.0, 0.0, 0.0
+                vals = []
+                for row in rows[-tail_n:]:
+                    try:
+                        vals.append(float(row[col]))
+                    except (ValueError, TypeError, KeyError):
+                        pass
+                if not vals:
+                    return 0.0, 0.0, 0.0
+                mean = sum(vals) / len(vals)
+                return mean, min(vals), max(vals)
+
             # Core coefficients. Pitch moment is CMy: SU2 applies AoA as a
             # rotation about the Y axis (freestream tilts in the x-z plane),
             # so the AoA-induced normal force is along Z and its moment is
             # about Y. CMz is the (near-zero) yaw component — do not use it.
-            result.cd = abs(_get("CD"))
-            result.cl = _get("CL")
-            result.cm = _get("CMy")
+            cd_mean, cd_min, cd_max = _get_tail("CD")
+            result.cd = abs(cd_mean)
+            result.cl = _get_tail("CL")[0]
+            result.cm = _get_tail("CMy")[0]
             result.iterations = len(rows)
+            # Forces stationary ⇔ CD spread over the tail window is small
+            # relative to its mean. Used below to grant convergence when the
+            # residual limit-cycles above the floor.
+            forces_stationary = (
+                len(rows) > tail_n
+                and abs(cd_mean) > 1e-6
+                and (cd_max - cd_min) / abs(cd_mean) < 0.005
+            )
 
-            # Drag decomposition
-            result.cd_pressure = abs(_get("CD_Pressure") or _get("DRAG_PRESSURE"))
-            result.cd_friction = abs(_get("CD_Viscous") or _get("DRAG_VISCOUS"))
+            # Drag decomposition — integrate the real pressure/friction split
+            # from the surface VTK (SU2 writes no valid history fields for it;
+            # the old DRAG_PRESSURE/DRAG_VISCOUS lookups always returned 0 and
+            # the split silently fell back to a fixed 55/30/15 guess).
+            _meta = getattr(self, '_flow_meta', {})
+            split = _integrate_surface_forces(
+                surf_vtk,
+                p_inf=_meta.get("P", 101325.0),
+                q_inf=_meta.get("dynamic_pressure", 1.0),
+                ref_area=_meta.get("ref_area", 0.1),
+                aoa_deg=self.config.angle_of_attack_deg,
+            )
+            if split is not None:
+                result.cd_pressure = abs(split["cd_pressure"])
+                result.cd_friction = abs(split["cd_friction"])
+                result.yplus_mean = split["yplus_mean"]
+            else:
+                result.cd_pressure = 0.0
+                result.cd_friction = 0.0
             # Estimate base drag and wave drag from total
             if result.cd > 0 and result.cd_pressure + result.cd_friction > 0:
                 accounted = result.cd_pressure + result.cd_friction
@@ -680,13 +805,19 @@ class SU2Solver(CFDSolver):
 
             # Converged if the residual hit the configured floor, OR SU2
             # stopped early (a convergence criterion — residual or Cauchy —
-            # fired before the iteration cap). Exhausting max_iterations
-            # without hitting the floor is NOT convergence.
+            # fired before the iteration cap), OR the force coefficients are
+            # stationary over the tail window. The last case covers residual
+            # limit cycles (unsteady base flow under steady RANS) where the
+            # density residual orbits above the floor forever while CD/CL/CMy
+            # are flat to <0.5% — the forces, which are what the polar reports,
+            # ARE converged there.
             try:
                 last_rho = _get("rms[Rho]")
                 conv_floor = math.log10(self.config.convergence_tolerance)  # e.g. -6
                 stopped_early = len(rows) < self.config.max_iterations
-                result.converged = (last_rho <= conv_floor) or stopped_early
+                result.converged = (
+                    (last_rho <= conv_floor) or stopped_early or forces_stationary
+                )
                 result.final_residual = last_rho
             except Exception:
                 result.converged = False

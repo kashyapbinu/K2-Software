@@ -21,8 +21,38 @@ API = "https://www.thrustcurve.org/api/v1/download.json"
 CACHE_DIR = Path(__file__).parent / "thrust_curves"
 
 
-def load_cached(motor_id: str):
-    """Return the cached curve [(t, N), ...] or None if not cached."""
+def curve_impulse(curve) -> float:
+    """Trapezoid-integrated total impulse (N·s) of a [(t, N), ...] curve."""
+    return sum((t2 - t1) * (v1 + v2) / 2.0
+               for (t1, v1), (t2, v2) in zip(curve, curve[1:]))
+
+
+def _matches_catalog(curve, expected_impulse, motor_id) -> bool:
+    """True if the curve's impulse is within 20% of the catalog value.
+
+    ThrustCurve.org data files are user-submitted and occasionally belong to
+    a different motor entirely (e.g. the RATT K600TR-P file integrates to
+    ~614 N·s against a 2170 N·s catalog entry). Such a curve silently flies
+    the sim on a much smaller motor, so reject it and let the caller fall
+    back to the impulse-normalized trapezoid.
+    """
+    if not expected_impulse:
+        return True
+    imp = curve_impulse(curve)
+    if abs(imp - expected_impulse) <= 0.2 * expected_impulse:
+        return True
+    logger.warning(
+        f"Rejecting thrust curve for {motor_id}: integrates to {imp:.0f} N*s "
+        f"but catalog says {expected_impulse:.0f} N*s")
+    return False
+
+
+def load_cached(motor_id: str, expected_impulse: float = 0.0):
+    """Return the cached curve [(t, N), ...] or None if not cached.
+
+    A cached curve whose impulse contradicts expected_impulse is treated as
+    corrupt: the cache file is removed and None is returned.
+    """
     if not motor_id:
         return None
     f = CACHE_DIR / f"{motor_id}.json"
@@ -30,10 +60,17 @@ def load_cached(motor_id: str):
         return None
     try:
         curve = json.loads(f.read_text(encoding="utf-8"))
-        return [(float(t), float(v)) for t, v in curve] or None
+        curve = [(float(t), float(v)) for t, v in curve] or None
     except Exception as exc:
         logger.warning(f"Bad curve cache for {motor_id}: {exc}")
         return None
+    if curve and not _matches_catalog(curve, expected_impulse, motor_id):
+        try:
+            f.unlink()
+        except OSError:
+            pass
+        return None
+    return curve
 
 
 def _pick_result(results: list) -> list:
@@ -44,15 +81,18 @@ def _pick_result(results: list) -> list:
     return best.get("samples") or []
 
 
-def fetch_thrust_curve(motor_id: str, timeout: float = 15.0):
+def fetch_thrust_curve(motor_id: str, timeout: float = 15.0,
+                       expected_impulse: float = 0.0):
     """Fetch the measured thrust curve for a motor_id.
 
     Returns [(time_s, thrust_N), ...] or None on any failure. Successful
     fetches are cached; failures are not (so a later retry can succeed).
+    If expected_impulse is given, curves deviating more than 20% from it
+    are rejected (and not cached).
     """
     if not motor_id:
         return None
-    cached = load_cached(motor_id)
+    cached = load_cached(motor_id, expected_impulse)
     if cached is not None:
         return cached
 
@@ -78,6 +118,8 @@ def fetch_thrust_curve(motor_id: str, timeout: float = 15.0):
         return None
     if curve[0][0] > 0:                  # RASP files may omit the t=0 point
         curve.insert(0, (0.0, 0.0))
+    if not _matches_catalog(curve, expected_impulse, motor_id):
+        return None
 
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
