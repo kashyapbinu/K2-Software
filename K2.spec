@@ -24,7 +24,7 @@ binaries = []
 hiddenimports = []
 
 # ── Packages with dynamic imports / data files PyInstaller can't trace ────────
-for pkg in ("pyvista", "pyvistaqt", "vtkmodules", "qtawesome", "sklearn", "reportlab"):
+for pkg in ("pyvista", "pyvistaqt", "vtkmodules", "qtawesome", "sklearn", "reportlab", "gmsh"):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b

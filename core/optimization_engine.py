@@ -237,6 +237,7 @@ def get_default_objectives() -> list:
 def get_default_constraints() -> list:
     return [
         Constraint("stability_min", "Stability > 1.2", "greater_than", 1.2, 1000.0, True),
+        Constraint("stability_max", "Stability < 3.0", "less_than", 3.0, 1000.0, True),
         Constraint("rail_exit_min", "Rail Exit > 15", "greater_than", 15.0, 1000.0, True),
         Constraint("mach_max", "Mach < 2", "less_than", 2.0, 1000.0, False),
         Constraint("accel_max", "Accel < 100G", "less_than", 981.0, 500.0, False),
@@ -633,6 +634,7 @@ def _constraint_value(name: str, obj_vals: dict, variables: dict, cfg) -> float:
     """Extract the numeric value for a named constraint."""
     mapping = {
         "stability_min": "max_stability_margin",
+        "stability_max": "max_stability_margin",
         "rail_exit_min": "max_rail_exit_velocity",
         "mach_max": "max_mach",
         "accel_max": "max_accel",

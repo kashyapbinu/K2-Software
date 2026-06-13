@@ -701,6 +701,7 @@ class OptimizationWorkspace(QWidget):
 
         constraints_defs = [
             ("stability_min", "Stability >", 1.2, "cal", "greater_than"),
+            ("stability_max", "Stability <", 3.0, "cal", "less_than"),
             ("rail_exit_min", "Rail Exit Vel >", 15.0, "m/s", "greater_than"),
             ("mach_max", "Max Mach <", 2.0, "", "less_than"),
             ("accel_max", "Max Accel <", 100.0, "G", "less_than"),
@@ -718,7 +719,7 @@ class OptimizationWorkspace(QWidget):
             chk = QCheckBox(display)
             chk.setStyleSheet(_CHK)
             chk.setFixedWidth(130)
-            if key in ("stability_min", "rail_exit_min"):
+            if key in ("stability_min", "stability_max", "rail_exit_min"):
                 chk.setChecked(True)
             row.addWidget(chk)
 

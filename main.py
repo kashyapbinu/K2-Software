@@ -118,4 +118,14 @@ def main():
 if __name__ == "__main__":
     import multiprocessing
     multiprocessing.freeze_support()
+    # Frozen-safe helper execution. In a PyInstaller build sys.executable is
+    # K2.exe, so a subprocess launched as [sys.executable, script.py] would
+    # re-open the GUI in a new window (this broke CFD meshing). When invoked as
+    # `K2.exe --run-script <file>` we run that script instead of the GUI.
+    if len(sys.argv) >= 3 and sys.argv[1] == "--run-script":
+        import runpy
+        _target = sys.argv[2]
+        sys.argv = [_target] + sys.argv[3:]
+        runpy.run_path(_target, run_name="__main__")
+        sys.exit(0)
     main()

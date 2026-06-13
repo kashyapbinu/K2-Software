@@ -173,9 +173,14 @@ class SolverThread(QThread):
             json.dumps(mesh_params, default=str), encoding="utf-8"
         )
 
-        # Run in subprocess — same Python interpreter, K2 root as cwd
+        # Run in subprocess. In a frozen build sys.executable is K2.exe, so it
+        # must be told to run the script (else it re-opens the GUI); in a source
+        # run sys.executable is python and runs the script directly.
+        cmd = ([sys.executable, "--run-script", str(script_file)]
+               if getattr(sys, "frozen", False)
+               else [sys.executable, str(script_file)])
         self._mesh_proc = subprocess.Popen(
-            [sys.executable, str(script_file)],
+            cmd,
             cwd=k2_root,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -526,8 +531,12 @@ class SweepThread(QThread):
             json.dumps(mesh_params, default=str), encoding="utf-8"
         )
 
+        # Frozen build: tell K2.exe to run the script (else it re-opens the GUI).
+        cmd = ([sys.executable, "--run-script", str(script_file)]
+               if getattr(sys, "frozen", False)
+               else [sys.executable, str(script_file)])
         self._mesh_proc = subprocess.Popen(
-            [sys.executable, str(script_file)],
+            cmd,
             cwd=k2_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace",
         )
