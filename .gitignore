@@ -30,7 +30,11 @@ fem_test_run/
 *.dat
 
 # ── Bundled third-party binaries (69MB SU2 build) ──
-bin/
+# Ignore bin/ contents but keep the app icon assets tracked (negation only
+# works when the directory itself isn't excluded, hence bin/* not bin/).
+bin/*
+!bin/k2.ico
+!bin/k2_icon.png
 
 # ── Vendored upstream repo (keep out of history) ──
 scratch/openMotor_repo/

@@ -85,7 +85,24 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("K2 Aerospace")
     app.setOrganizationName("K2")
-    app.setApplicationVersion("0.1.0")
+    app.setApplicationVersion("0.1.2")
+
+    # ── App / window / taskbar icon ──────────────────────────────────────────
+    # Resolve the bundled icon (under bin/, kept relative in the frozen bundle).
+    from PyQt6.QtGui import QIcon
+    _base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    for _name in ("k2_icon.png", "k2.ico"):
+        _ip = os.path.join(_base, "bin", _name)
+        if os.path.exists(_ip):
+            app.setWindowIcon(QIcon(_ip))
+            break
+    # Windows: distinct taskbar grouping/icon (else groups under the host exe).
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("K2.Aerospace.0.1")
+        except Exception:
+            pass
 
     # Apply dark theme
     app.setStyleSheet(DARK_STYLESHEET)

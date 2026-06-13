@@ -31,8 +31,8 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-; Uncomment once bin\k2.ico exists:
-; SetupIconFile=bin\k2.ico
+SetupIconFile=bin\k2.ico
+UninstallDisplayIcon={app}\K2.exe
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
