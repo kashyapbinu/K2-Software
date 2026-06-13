@@ -224,6 +224,11 @@ class _SensitivityWorker(QThread):
                            if np.sum(bidx == b) > 0]
                     s1v = (np.var(cms) / tv) if (cms and tv > 0) else 0
                     s1.append(min(s1v, 1.0))
+                    # NOTE: this is a linear correlation (r²) proxy for the
+                    # total-order index, NOT a true variance-based ST. True ST
+                    # needs Saltelli A/B re-sampling (n·(d+2) sims); the LHS
+                    # sweep here can't capture interaction variance. Labeled as
+                    # a proxy in the plot.
                     try:
                         r, _ = pearsonr(X[:, j], y)
                         stv = r ** 2
@@ -630,7 +635,7 @@ class OptimizationWorkspace(QWidget):
                 ("max_apogee", "Max Apogee", "maximize"),
                 ("max_rail_exit_velocity", "Max Rail Exit Vel", "maximize"),
                 ("max_velocity", "Max Velocity", "maximize"),
-                ("max_payload_fraction", "Max Payload Fraction", "maximize"),
+                ("max_payload_fraction", "Max Inert Mass Frac", "maximize"),
             ]),
             ("  ▸ Safety", [
                 ("max_stability_margin", "Max Stability Margin", "maximize"),
@@ -1965,7 +1970,7 @@ class OptimizationWorkspace(QWidget):
 
             if method == "Sobol Indices":
                 _style_ax(ax_left, "First-Order Sobol Indices (S1)", "", "")
-                _style_ax(ax_right, "Total-Order Sobol Indices (ST)", "", "")
+                _style_ax(ax_right, "Total-Order (linear r² proxy)", "", "")
                 ax_left.barh(var_names, out["s1"], color=["#58a6ff"] * n_vars,
                              alpha=0.8, edgecolor="#30363d")
                 ax_right.barh(var_names, out["st"], color=["#bc8cff"] * n_vars,

@@ -207,11 +207,27 @@ def _build_thrust_curve(cfg: BatchSimConfig) -> List[tuple]:
     if bt <= 0:
         return []
 
-    ramp = bt * 0.1
+    # Rated impulse the curve must integrate to (so apogee isn't biased high).
+    total_impulse = cfg.motor_total_impulse if cfg.motor_total_impulse > 0 else avg_t * bt
+
+    # Trapezoid (0 → peak → plateau → 0) with 10% ramp/tail. Solve the plateau
+    # so the area equals total_impulse exactly:
+    #   area = 0.5·(1-ramp_frac)·bt·(max_t + plateau) = total_impulse
+    # The old code hard-coded plateau = avg_t, which over-delivered ~3.5%.
+    ramp_frac = 0.1
+    ramp = bt * ramp_frac
+    plateau = 2.0 * total_impulse / ((1.0 - ramp_frac) * bt) - max_t
+
+    if plateau < 0.0:
+        # Peak alone exceeds the impulse budget — fall back to a triangle whose
+        # area (0.5·max·bt) matches the rated impulse.
+        max_t = 2.0 * total_impulse / bt
+        return [(0.0, 0.0), (ramp, max_t), (bt, 0.0)]
+
     return [
         (0.0, 0.0),
         (ramp, max_t),
-        (bt - ramp, avg_t),
+        (bt - ramp, plateau),
         (bt, 0.0),
     ]
 

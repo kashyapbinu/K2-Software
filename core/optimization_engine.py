@@ -224,7 +224,7 @@ def get_default_objectives() -> list:
         ObjectiveFunction("max_apogee", "Max Apogee", "maximize", 1.0, True),
         ObjectiveFunction("max_rail_exit_velocity", "Max Rail Exit Vel", "maximize", 1.0, False),
         ObjectiveFunction("max_velocity", "Max Velocity", "maximize", 1.0, False),
-        ObjectiveFunction("max_payload_fraction", "Max Payload Fraction", "maximize", 1.0, False),
+        ObjectiveFunction("max_payload_fraction", "Max Inert Mass Frac", "maximize", 1.0, False),
         ObjectiveFunction("max_stability_margin", "Max Stability Margin", "maximize", 1.0, False),
         ObjectiveFunction("min_landing_distance", "Min Landing Distance", "minimize", 1.0, False),
         ObjectiveFunction("max_prob_target", "Max P(Target Alt)", "maximize", 1.0, False),
@@ -570,7 +570,8 @@ def evaluate_candidate(base_config: BatchSimConfig,
         "rail_exit_velocity": float(np.mean(arr_rail)),
     }
 
-    # Payload fraction
+    # Inert (structure + payload) mass fraction = 1 - propellant/total. Not the
+    # true payload fraction (payload mass isn't a design variable here).
     total_mass = variables.get("dry_mass", cfg.dry_mass) + cfg.propellant_mass
     if total_mass > 0:
         obj_vals["max_payload_fraction"] = 1.0 - (cfg.propellant_mass / total_mass)
@@ -597,6 +598,10 @@ def evaluate_candidate(base_config: BatchSimConfig,
         fitness = _robust_fitness(obj_vals, mc_stats, objectives, constraints, cons_eval)
     else:
         fitness = _standard_fitness(obj_vals, objectives, constraints, cons_eval)
+
+    # Expose scalar fitness as an objective so NSGA-II domination can track it
+    # in mission mode (otherwise NSGA-II sorts on raw apogee and ignores target).
+    obj_vals["fitness"] = fitness
 
     return CandidateDesign(
         variables=dict(variables),
@@ -692,13 +697,20 @@ def _mission_fitness(obj_vals, mc_stats, target, objectives, constraints, cons_e
     success = mc_stats.get("success_rate", 0.0)
     mean_apogee = mc_stats.get("mean_apogee", 0.0)
 
-    # Primary: P(target) × success_rate
-    fitness = 1000.0 * p_target * success
-
-    # Penalise deviation from target
+    # Primary: smooth proximity to target × success. A continuous proximity term
+    # (1 at target, 0 at ≥100% error) replaces the old binary 1000·p_target,
+    # which had a 1000-point cliff at the ±10% tolerance boundary that stalled
+    # gradient-following — especially at low mc_sims where p_target is just 0/1.
     if target > 0 and mean_apogee > 0:
         relative_error = abs(mean_apogee - target) / target
-        fitness -= 200.0 * relative_error
+    else:
+        relative_error = 1.0
+    proximity = max(0.0, 1.0 - relative_error)
+    fitness = 1000.0 * success * proximity
+
+    # Reliability bonus: still reward the fraction of MC runs inside tolerance,
+    # but as a secondary term so it can't dominate the smooth proximity signal.
+    fitness += 200.0 * p_target * success
 
     # Secondary objectives
     for o in objectives:
@@ -1174,6 +1186,15 @@ def _run_nsga2(config: OptimizationConfig,
     dvs = [dv for dv in config.design_variables if dv.enabled]
     pop_size = config.population_size
     total_evals = 0
+
+    # Mission mode is single-objective (hit target). Drive NSGA-II domination
+    # by the scalar mission fitness, otherwise it sorts on raw apogee and
+    # blows past the target. Multi-objective runs keep the user's objectives.
+    if config.mission_mode and config.target_apogee > 0:
+        sort_objs = [ObjectiveFunction("fitness", "Mission Fitness", "maximize", 1.0, True)]
+    else:
+        sort_objs = config.objectives
+
     executor = _make_executor(config)
     try:
         # Initialise — batch-evaluate the random population
@@ -1192,9 +1213,9 @@ def _run_nsga2(config: OptimizationConfig,
                 break
 
             # Non-dominated sort + crowding
-            fronts = _fast_non_dominated_sort(population, config.objectives)
+            fronts = _fast_non_dominated_sort(population, sort_objs)
             for front in fronts:
-                _crowding_distance(population, front, config.objectives)
+                _crowding_distance(population, front, sort_objs)
 
             # Record
             fitnesses = [c.fitness for c in population]
@@ -1249,10 +1270,10 @@ def _run_nsga2(config: OptimizationConfig,
 
             # Combine parent + offspring, select best pop_size
             combined = population + offspring
-            fronts = _fast_non_dominated_sort(combined, config.objectives)
+            fronts = _fast_non_dominated_sort(combined, sort_objs)
             new_pop = []
             for front in fronts:
-                _crowding_distance(combined, front, config.objectives)
+                _crowding_distance(combined, front, sort_objs)
                 if len(new_pop) + len(front) <= pop_size:
                     new_pop.extend([combined[i] for i in front])
                 else:
@@ -1265,7 +1286,7 @@ def _run_nsga2(config: OptimizationConfig,
             population = new_pop
 
         # Extract Pareto front (rank 0)
-        fronts = _fast_non_dominated_sort(population, config.objectives)
+        fronts = _fast_non_dominated_sort(population, sort_objs)
         pareto = [population[i] for i in fronts[0]] if fronts else []
 
         # "Best" single design must come from the non-dominated front — a high
