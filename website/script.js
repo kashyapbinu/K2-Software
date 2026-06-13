@@ -167,31 +167,6 @@
   }
 })();
 
-/* ── Point download buttons at the latest git tag ──────────────────────────
-   Buttons ship with an [href] to the main.zip archive as a fallback. On load
-   we ask the GitHub API for the newest tag and rewrite the href to that tag's
-   source zip, so downloads track stable releases instead of a moving main.
-   If the repo has no tags yet (or the API is rate-limited/offline), the
-   main.zip fallback is left untouched. */
-(function () {
-  const REPO = "kashyapbinu/K2-Software";
-  const btns = document.querySelectorAll("[data-download-latest]");
-  if (!btns.length) return;
-
-  fetch(`https://api.github.com/repos/${REPO}/tags?per_page=1`)
-    .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
-    .then((tags) => {
-      if (!Array.isArray(tags) || !tags.length) return; // no tags → keep main.zip
-      const tag = tags[0].name;
-      const url = `https://github.com/${REPO}/archive/refs/tags/${encodeURIComponent(tag)}.zip`;
-      btns.forEach((b) => {
-        b.href = url;
-        b.setAttribute("data-tag", tag);
-      });
-      // Reflect the resolved version in the download meta line, if present.
-      document.querySelectorAll(".dl-meta").forEach((m) => {
-        m.textContent = m.textContent.replace(/^Latest source/, `${tag} release`);
-      });
-    })
-    .catch(() => { /* keep the main.zip fallback */ });
-})();
+/* Download buttons link directly to the GitHub Releases asset
+   (releases/latest/download/K2-Setup.exe) — a stable URL that always resolves
+   to the newest release, so no client-side tag lookup is needed. */
