@@ -344,6 +344,17 @@ def build_candidate_config(base_config: BatchSimConfig,
     if cfg.motor_avg_thrust > 0:
         cfg.motor_max_thrust = max(cfg.motor_max_thrust, cfg.motor_avg_thrust * 1.3)
 
+    # Couple propellant mass to total impulse: I = m_prop · Isp · g0. When the
+    # optimizer varies motor_total_impulse but NOT propellant_mass directly, the
+    # propellant must scale with impulse — otherwise impulse is bought for free
+    # (fixed 0.18 kg delivering 5000 N·s ⇒ Isp ~2800 s) and apogees run away to
+    # tens of km. Skipped when propellant_mass is itself an optimized variable.
+    prop_optimized = any(dv.enabled and dv.name == "propellant_mass" for dv in design_vars)
+    impulse_optimized = any(dv.enabled and dv.name == "motor_total_impulse" for dv in design_vars)
+    if impulse_optimized and not prop_optimized and cfg.motor_total_impulse > 0:
+        isp = cfg.motor_isp if cfg.motor_isp > 10 else 200.0
+        cfg.propellant_mass = cfg.motor_total_impulse / (isp * 9.80665)
+
     return cfg
 
 
@@ -453,7 +464,11 @@ def evaluate_candidate(base_config: BatchSimConfig,
     for i, mc_cfg in enumerate(mc_configs):
         try:
             res = run_batch_simulation(mc_cfg, seed=seed + i * 7)
-            apogees.append(res.apogee)
+            # A diverged/failed run (e.g. the >2000 m/s guard truncated a
+            # too-fast trajectory) reports a meaningless truncated apogee.
+            # Don't let it score as a real altitude — zero it so the optimizer
+            # neither rewards nor selects numerically fragile designs.
+            apogees.append(res.apogee if res.success else 0.0)
             machs.append(res.max_mach)
             accels.append(res.max_acceleration)
             stabs.append(res.min_stability_margin)
