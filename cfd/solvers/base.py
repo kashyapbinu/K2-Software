@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Callable
 
+from core.paths import user_data_dir
+
 logger = logging.getLogger("K2.CFD.Base")
 
 
@@ -92,8 +94,9 @@ class CFDConfig:
                                         # Requires an MPI-built SU2 + mpiexec on PATH/bin;
                                         # falls back to serial if neither is present.
 
-    # Paths (populated at runtime)
-    work_dir: Path = field(default_factory=lambda: Path("cfd_run"))
+    # Paths (populated at runtime). Per-user writable in a frozen build; resolves
+    # to repo/cfd_run in a source run (unchanged dev behavior).
+    work_dir: Path = field(default_factory=lambda: user_data_dir("cfd_run"))
     geometry_stl: Optional[Path] = None   # filled by geometry exporter
     geometry_dict: Optional[dict] = None  # exact dims from extract_cfd_geometry()
 

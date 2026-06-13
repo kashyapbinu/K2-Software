@@ -17,7 +17,8 @@ class FEMInterface:
     """Orchestrates structural analysis for K2 Aerospace."""
 
     def __init__(self, work_dir: Path = None):
-        self.work_dir = work_dir or Path("fem_run")
+        from core.paths import user_data_dir
+        self.work_dir = work_dir or user_data_dir("fem_run")
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
     def _get_work_dir(self, analysis_type: str) -> Path:

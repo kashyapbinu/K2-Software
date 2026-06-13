@@ -6,6 +6,8 @@ from __future__ import annotations
 import logging, math, threading
 from pathlib import Path
 
+from core.paths import user_data_dir
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QGroupBox,
     QLabel, QPushButton, QComboBox, QDoubleSpinBox, QSpinBox,
@@ -1529,7 +1531,7 @@ class CFDWorkspace(QWidget):
         if assembly is None:
             self._log("No rocket assembly available.")
             return
-        work = Path("cfd_run"); work.mkdir(exist_ok=True)
+        work = user_data_dir("cfd_run"); work.mkdir(exist_ok=True)
         stl = work / "rocket.stl"
         try:
             export_assembly_to_stl(assembly, stl)
@@ -1597,7 +1599,7 @@ class CFDWorkspace(QWidget):
 
         # ── Disk space check ──────────────────────────────────────────────
         try:
-            usage = shutil.disk_usage(str(Path("cfd_run").resolve().drive or "C:\\"))
+            usage = shutil.disk_usage(str(user_data_dir("cfd_run").resolve().drive or "C:\\"))
             free_mb = usage.free / (1024 * 1024)
             if free_mb < 500:
                 self._log(
@@ -1661,7 +1663,7 @@ class CFDWorkspace(QWidget):
             max_iterations=self._sp_iter.value(),
             n_cores=self._sp_cores.value(),
             turbulence_model=self._get_turb_key(),
-            work_dir=Path("cfd_run"),
+            work_dir=user_data_dir("cfd_run"),
             geometry_stl=self._current_stl,
             geometry_dict=geo_dict,
             custom_wall_size=custom_wall,
@@ -2118,7 +2120,7 @@ class CFDWorkspace(QWidget):
         _mach_sq = max(result.mach, 0.01) ** 2
         P_inf = result.dynamic_pressure * 2.0 / (1.4 * _mach_sq) if _mach_sq > 0 else 101325.0
         q_inf = result.dynamic_pressure
-        self._pp_thread = PostProcessThread(Path("cfd_run"), P_inf, q_inf)
+        self._pp_thread = PostProcessThread(user_data_dir("cfd_run"), P_inf, q_inf)
         self._pp_thread.log_msg.connect(self._log)
         self._pp_thread.done.connect(self._on_postprocess_done)
         self._pp_thread.start()

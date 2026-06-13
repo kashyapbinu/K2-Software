@@ -22,7 +22,11 @@ from ui.styles import DARK_STYLESHEET
 def setup_logging():
     import io
     from logging.handlers import RotatingFileHandler
-    log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "k2_crash.log")
+    from core.paths import user_data_dir
+    # Write the log to a per-user writable dir. Next to the executable fails in
+    # an installed build (Program Files is read-only) — that PermissionError
+    # crashed the app at launch.
+    log_file = str(user_data_dir() / "k2_crash.log")
     handlers = [
         RotatingFileHandler(log_file, maxBytes=5_000_000, backupCount=2, encoding="utf-8"),
     ]

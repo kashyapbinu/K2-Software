@@ -18,7 +18,10 @@ from pathlib import Path
 logger = logging.getLogger("K2.ThrustCurves")
 
 API = "https://www.thrustcurve.org/api/v1/download.json"
-CACHE_DIR = Path(__file__).parent / "thrust_curves"
+# Per-user writable cache (the install dir is read-only in a frozen build).
+# In a source run this resolves back to data/thrust_curves as before.
+from core.paths import user_data_dir
+CACHE_DIR = user_data_dir("data/thrust_curves")
 
 
 def curve_impulse(curve) -> float:
