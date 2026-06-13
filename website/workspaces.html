@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Workspaces — K2 AeroSim</title>
+<meta name="description" content="A detailed tour of all twelve K2 AeroSim workspaces: Design, Propulsion, CFD, Structures, Dynamics, Avionics, Simulation, Mission Visualizer, Cinematic, Results, Monte Carlo and Optimization.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>🚀</text></svg>">
+</head>
+<body>
+
+<canvas id="starfield" aria-hidden="true"></canvas>
+
+<!-- ───────────────────────── NAV ───────────────────────── -->
+<nav class="nav">
+  <div class="nav-inner">
+    <a href="index.html" class="brand">
+      <span class="brand-mark">K2</span>
+      <span class="brand-text">AEROSIM</span>
+    </a>
+    <div class="nav-links">
+      <a href="index.html#gallery">Screenshots</a>
+      <a href="index.html#capabilities">Capabilities</a>
+      <a href="index.html#validation">Validation</a>
+      <a href="index.html#download" class="nav-cta">Download</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ───────────────────────── PAGE HERO ───────────────────────── -->
+<header class="page-hero">
+  <span class="kicker">INSIDE THE COCKPIT</span>
+  <h1>Twelve workspaces.<br><span class="grad">One living rocket model.</span></h1>
+  <p>Every tab below reads and writes the same state engine — edit a fin in Design and
+  the CFD mesh, the FEM model, the flutter solver and the 6DOF simulation all see it
+  instantly. This is the full tour, workspace by workspace.</p>
+</header>
+
+<!-- ───────────────────────── JUMP NAV ───────────────────────── -->
+<nav class="jump-nav" aria-label="Workspace index">
+  <a href="#design">01 Design</a>
+  <a href="#propulsion">02 Propulsion</a>
+  <a href="#cfd">03 CFD</a>
+  <a href="#structures">04 Structures</a>
+  <a href="#dynamics">05 Dynamics</a>
+  <a href="#avionics">06 Avionics</a>
+  <a href="#simulation">07 Simulation</a>
+  <a href="#missionviz">08 Mission Visualizer</a>
+  <a href="#cinematic">09 Cinematic</a>
+  <a href="#results">10 Results</a>
+  <a href="#montecarlo">11 Monte Carlo</a>
+  <a href="#optimization">12 Optimization</a>
+</nav>
+
+<main class="wsd-main">
+
+<!-- ── 01 DESIGN ── -->
+<section class="wsd reveal" id="design">
+  <div class="wsd-text">
+    <span class="wsd-num">01</span>
+    <h2>Design</h2>
+    <p class="wsd-tag">Build the airframe — and know it's stable before you leave the tab.</p>
+    <p>The structured component tree mirrors how a real rocket goes together: stages hold
+    nose cones, body tubes and transitions; fin sets, motor mounts, bulkheads and couplers
+    nest where they physically live. A live 3D viewer (with a 2D line / wireframe toggle)
+    redraws the vehicle as you type, and a Barrowman stability panel recomputes with every
+    keystroke.</p>
+    <ul class="wsd-feats">
+      <li>Component palette — nose cones, body tubes, transitions, trapezoidal fin sets, inner components</li>
+      <li>Live CP / CG / static-margin readout in calibers with STABLE / MARGINAL / UNSTABLE / OVERSTABLE verdicts</li>
+      <li>Barrowman implementation ported from OpenRocket — CP agrees exactly on imported designs</li>
+      <li>Per-component materials with mass roll-up and total mass / weight properties</li>
+      <li>Live 3D preview + 2D wireframe mode, camera reset, component highlighting</li>
+      <li>OpenRocket <code>.ork</code> import with exact positioning and round-trip <code>.k2proj</code> saves</li>
+    </ul>
+  </div>
+  <figure class="wsd-shot">
+    <img src="assets/design.png" alt="Design workspace — component tree, 3D rocket, stability analysis" loading="lazy">
+    <img src="assets/design-wireframe.png" alt="Design — 2D wireframe mode with Barrowman stability panel" loading="lazy">
+  </figure>
+</section>
+
+<!-- ── 02 PROPULSION ── -->
+<section class="wsd wsd-flip reveal" id="propulsion">
+  <div class="wsd-text">
+    <span class="wsd-num">02</span>
+    <h2>Propulsion</h2>
+    <p class="wsd-tag">The entire ThrustCurve.org certified catalog, filtered to what actually fits your rocket.</p>
+    <p>1,129 real motors with measured thrust curves — not idealized rectangles. Filter by
+    impulse class and diameter, tick <em>Fit current body</em> and the list collapses to
+    motors that physically fit the mount you designed. Selecting a motor pulls its real
+    curve and immediately updates vehicle mass, CG and stability.</p>
+    <ul class="wsd-feats">
+      <li>1,129-motor catalog — the full ThrustCurve.org certified database, refreshable</li>
+      <li>Real measured thrust-vs-time curves, plotted as you browse</li>
+      <li>Class / diameter / fit-current-body / hide-out-of-production filters</li>
+      <li>Motor properties: total impulse, average and peak thrust, burn time, propellant mass</li>
+      <li>Computed performance for <em>your</em> vehicle: thrust-to-weight, burnout estimates</li>
+      <li>Custom motor creator with internal-ballistics grain regression for experimental solids</li>
+      <li>Motor casing mass tracked separately — stability stays honest after burnout</li>
+    </ul>
+  </div>
+  <figure class="wsd-shot">
+    <img src="assets/propulsion.png" alt="Propulsion workspace — AeroTech K1999 thrust curve" loading="lazy">
+    <img src="assets/propulsion-n4100.png" alt="Propulsion — Cesaroni N4100 thrust curve and motor properties" loading="lazy">
+  </figure>
+</section>
+
+<!-- ── 03 CFD ── -->
+<section class="wsd reveal" id="cfd">
+  <div class="wsd-text">
+    <span class="wsd-num">03</span>
+    <h2>CFD</h2>
+    <p class="wsd-tag">A real SU2 pipeline — design to converged flow field without touching a config file.</p>
+    <p>One click takes the current design (or an external CAD file), exports a watertight
+    surface, meshes it with curvature-aware gmsh refinement and hands it to SU2. Pick
+    Euler, Laminar, Spalart–Allmaras or k-ω SST; flow conditions come from the ISA
+    atmosphere at your chosen altitude. The result is a fully interactive 3D field — not a
+    static report.</p>
+    <ul class="wsd-feats">
+      <li>Solvers: Euler, Laminar, Spalart–Allmaras, k-ω SST — multithreaded OpenMP SU2 build</li>
+      <li>3D field view: mid-plane slices (density, temperature, pressure gradient), streamlines as tubes / lines / ribbons, interactive slicing, contour lines, mesh edges, point probe</li>
+      <li>Drag decomposition by surface integration: pressure / friction / base / wave shares of total Cd</li>
+      <li>Lift, moment, and CP location from integrated surface forces</li>
+      <li>Polars tab: AoA and Mach sweeps reusing a single mesh, with concurrent sweep points</li>
+      <li>Hybrid Euler + flat-plate-friction drag mode for fast, trustworthy polars</li>
+      <li>Convergence residuals, mesh-quality metrics, boundary-layer Y+ and wall-shear views, full solver log, CSV export</li>
+    </ul>
+  </div>
+  <figure class="wsd-shot">
+    <img src="assets/cfd-pressure.png" alt="CFD — pressure gradient compression regions" loading="lazy">
+    <img src="assets/cfd-temperature.png" alt="CFD — temperature field around the rocket" loading="lazy">
+  </figure>
+</section>
+
+<!-- ── 04 STRUCTURES ── -->
+<section class="wsd wsd-flip reveal" id="structures">
+  <div class="wsd-text">
+    <span class="wsd-num">04</span>
+    <h2>Structures</h2>
+    <p class="wsd-tag">An ANSYS-style structures workstation with a bundled CalculiX FEM solver.</p>
+    <p>Import the worst-case loads straight from your last flight — the workstation searches
+    the whole trajectory for the critical instant — and analyze the airframe across eleven
+    dedicated tabs. CFD surface pressures can be mapped directly onto the FEM mesh as
+    distributed loads, and everything rolls up into a single structural safety score.</p>
+    <ul class="wsd-feats">
+      <li>Eleven analysis tabs: 3D stress, stress profile, modal, thermal, deformation, fin analysis, recovery loads, buckling, load path, failure map, mass efficiency</li>
+      <li>CalculiX FEM solves with selectable mesh refinement; thin-shell results cross-checked against Roark closed forms</li>
+      <li>Flight-load import with automatic worst-case search (max-Q, max thrust, recovery shock)</li>
+      <li>Four-mode buckling analysis and recovery-deployment load cases</li>
+      <li>3D von Mises contour viewer with peak-stress marker and component isolation</li>
+      <li>Structural safety score out of 100 plus independent physics-consistency checks</li>
+      <li>CFD → FEM pressure mapping and one-click PDF structural report</li>
+    </ul>
+  </div>
+  <figure class="wsd-shot">
+    <img src="assets/structures.png" alt="Structures — von Mises stress contour, safety score 93/100" loading="lazy">
+    <img src="assets/strk2.png" alt="Structures — Max-Q stress profile along the airframe with safety summary" loading="lazy">
+  </figure>
+</section>
+
+<!-- ── 05 DYNAMICS ── -->
+<section class="wsd reveal" id="dynamics">
+  <div class="wsd-text">
+    <span class="wsd-num">05</span>
+    <h2>Dynamics</h2>
+    <p class="wsd-tag">Will the fins flutter before apogee? Answer it before the flight, not after.</p>
+    <p>Aeroelasticity and vibration in one place: the NACA TN-4197 flutter method backed by
+    a p-k solver, a frequency-response view that names each resonance peak and ranks its
+    risk, and a flight envelope that overlays your actual trajectory against the flutter
+    and divergence boundaries.</p>
+    <ul class="wsd-feats">
+      <li>Five views: Flutter Boundary, Frequency Response, Aeroelastic, Mode Shapes, Flight Envelope</li>
+      <li>Fin flutter via NACA TN-4197 + p-k method; divergence speed prediction</li>
+      <li>Resonance identification table with per-mode frequency, magnitude and risk rating</li>
+      <li>Vibration analysis with configurable damping ratio and input PSD</li>
+      <li>Max-Q flight loads pulled from the last simulation — not hand-typed guesses</li>
+      <li>Flight safety score with margin breakdown (flutter, divergence, emergence velocity)</li>
+      <li>Consistency checks plus JSON / CSV / PDF report export</li>
+    </ul>
+  </div>
+  <figure class="wsd-shot">
+    <img src="assets/dynamics.png" alt="Dynamics — frequency response and resonances" loading="lazy">
+    <img src="assets/dynamics-flutter.png" alt="Dynamics — flutter boundary overlaid on the flight profile" loading="lazy">
+  </figure>
+</section>
+
+<!-- ── 06 AVIONICS ── -->
+<section class="wsd wsd-flip reveal" id="avionics">
+  <div class="wsd-text">
+    <span class="wsd-num">06</span>
+    <h2>Avionics</h2>
+    <p class="wsd-tag">A simulated flight computer flying on realistic, noisy sensor data.</p>
+    <p>The avionics workspace runs a full flight-computer state machine against the live
+    simulation — ARMED through BOOST, COAST, DROGUE, MAIN and LANDED — fed by modeled
+    sensors instead of perfect truth. Tune the noise to match your real hardware and watch
+    whether your deployment logic still fires at the right time.</p>
+    <ul class="wsd-feats">
+      <li>Flight-computer state machine: ARMED → BOOST → COAST → DROGUE → MAIN → LANDED</li>
+      <li>Live gauge cluster: altitude, velocity, acceleration, Mach, thrust</li>
+      <li>Three-axis IMU / gyroscope readouts driven by the 6DOF attitude state</li>
+      <li>Sensor presets (e.g. Hobby MPU6050 / BMP280) with per-sensor noise: accelerometer, barometer, gyro, GPS</li>
+      <li>Kalman-filter state estimation fusing the noisy channels</li>
+      <li>Event detection — liftoff, burnout, apogee, deployment — from estimated state, exactly like real avionics</li>
+    </ul>
+  </div>
+  <figure class="wsd-shot"><img src="assets/avionics.png" alt="Avionics — flight computer telemetry gauges" loading="lazy"></figure>
+</section>
+
+<!-- ── 07 SIMULATION ── -->
+<section class="wsd reveal" id="simulation">
+  <div class="wsd-text">
+    <span class="wsd-num">07</span>
+    <h2>Simulation</h2>
+    <p class="wsd-tag">Mission control for the 6DOF engine.</p>
+    <p>Configure the flight, push Run, and watch the full rigid-body simulation unfold in
+    real time (or faster). The physics follows OpenRocket's methodology: quaternion
+    attitude, Reynolds-dependent skin friction, Mach-dependent base and pressure drag,
+    altitude-dependent gravity, adaptive time stepping — integrated with RK4 or adaptive
+    RK45 Dormand–Prince.</p>
+    <ul class="wsd-feats">
+      <li>Full 6DOF state: position, velocity, attitude, body rates and mass, propagated each tick</li>
+      <li>Integrator choice — RK4 or RK45 Dormand–Prince — with configurable dt and sim speed</li>
+      <li>Environment panel: ISA atmosphere, launch-site conditions, launch-rod length and angle</li>
+      <li>Wind with gusts and pink-noise turbulence; multi-level wind profiles</li>
+      <li>Recovery setup: drogue / main CdA, deployment altitudes, dual-deploy sequencing</li>
+      <li>Live flight data and a phase timeline that lights up each mission event as it happens</li>
+      <li>Run in Normal or Cinematic view — the engine feeds every other workspace's flight data</li>
+    </ul>
+  </div>
+  <figure class="wsd-shot">
+    <img src="assets/simulation-1.png" alt="Simulation — controls, environment and wind setup with live flight data" loading="lazy">
+    <img src="assets/simulation-2.png" alt="Simulation — recovery setup and flight phase timeline at touchdown" loading="lazy">
+  </figure>
+</section>
+
+<!-- ── 08 MISSION VISUALIZER ── -->
+<section class="wsd wsd-flip reveal" id="missionviz">
+  <div class="wsd-text">
+    <span class="wsd-num">08</span>
+    <h2>Mission Visualizer</h2>
+    <p class="wsd-tag">The live 3D view of the flight — engineering edition.</p>
+    <p>A real-time 3D scene tracks the vehicle from rod to touchdown with its actual
+    attitude, trail and deployed chutes, while a telemetry sidebar and a five-channel
+    sparkline strip keep the numbers in view. After landing, the flight stays scrubbable:
+    click any event and the replay jumps there.</p>
+    <ul class="wsd-feats">
+      <li>Live 3D trajectory with vehicle attitude, parachute rendering and ground reference</li>
+      <li>Chase camera and selectable trail trait (Mach, velocity…) with quality presets</li>
+      <li>Telemetry panel: mission time, altitude, velocity, acceleration, Mach, mass, thrust, drag, dynamic pressure, stability, phase and recovery status</li>
+      <li>Sparkline strip: altitude, velocity, Mach, acceleration and dynamic pressure vs time</li>
+      <li>Flight Events and Timeline tabs with replay — play / pause / restart, click an event to jump</li>
+      <li>Overlays: altitude planes, flight envelope, force vectors, event flags, HUD, target and recovery radius rings</li>
+    </ul>
+  </div>
+  <figure class="wsd-shot">
+    <img src="assets/mission-visualizer.png" alt="Mission Visualizer — 3D drogue descent with telemetry" loading="lazy">
+    <img src="assets/mission-visualizer-envelope.png" alt="Mission Visualizer — post-flight envelope, drift cone and recovery zone" loading="lazy">
+  </figure>
+</section>
+
+<!-- ── 09 CINEMATIC ── -->
+<section class="wsd reveal" id="cinematic">
+  <div class="wsd-text">
+    <span class="wsd-num">09</span>
+    <h2>Cinematic</h2>
+    <p class="wsd-tag">Your flight, presented like a launch webcast.</p>
+    <p>A three.js render of the same telemetry with a SpaceX-style HUD: big thin
+    SPEED / ALTITUDE / MACH / THRUST readouts, a T+ mission clock, and an event timeline
+    ribbon that fills in as the flight progresses. The follow-cam never loses the rocket;
+    the exhaust plume gets its mach diamonds.</p>
+    <ul class="wsd-feats">
+      <li>Webcast HUD: speed, altitude, Mach, thrust, T+ clock, phase, mini graph strip</li>
+      <li>Timeline ribbon with event nodes — LIFTOFF, MAX-Q, BURNOUT, APOGEE, DROGUE, MAIN, TOUCHDOWN</li>
+      <li>Rigid follow / chase / pad cameras with telescopic zoom (0.25–6×, up to 60× post-flight)</li>
+      <li>Mach-diamond exhaust plume, pad smoke cloud, 3D event markers along the trajectory</li>
+      <li>Full replay system: scrub bar, 0.5–4× playback speeds, LIVE return</li>
+      <li>Post-flight envelope overlay: outcome-colored recovery ring, predicted landing ellipse, wind-drift cone, target-apogee plane</li>
+    </ul>
+  </div>
+  <figure class="wsd-shot">
+    <img src="assets/cinematic.png" alt="Cinematic — liftoff with SpaceX-style HUD" loading="lazy">
+    <img src="assets/cinematic-descent.png" alt="Cinematic — ground descent webcast view with telemetry HUD" loading="lazy">
+  </figure>
+</section>
+
+<!-- ── 10 RESULTS ── -->
+<section class="wsd wsd-flip reveal" id="results">
+  <div class="wsd-text">
+    <span class="wsd-num">10</span>
+    <h2>Results</h2>
+    <p class="wsd-tag">Every recorded sample of the flight, one scrub away.</p>
+    <p>The flight recorder keeps thousands of data points per flight. A summary strip gives
+    the headlines — apogee, max velocity, max Mach, max acceleration, flight time — and a
+    time scrubber lets you drag to any instant and read off the complete vehicle state at
+    that moment.</p>
+    <ul class="wsd-feats">
+      <li>Eight plot tabs: Altitude, Velocity, Acceleration, Forces, Mass, Mach, Stability, Dynamic Pressure</li>
+      <li>Headline summary: apogee, max velocity / Mach / acceleration, flight time, sample count</li>
+      <li>Time scrubber with instant readout — time, altitude, velocity, accel, Mach, thrust, drag, mass, phase, dynamic pressure, stability, Cd</li>
+      <li>Full-history CSV export for external tooling and post-flight comparison</li>
+      <li>Auto-refreshes and comes to front when a flight completes</li>
+    </ul>
+  </div>
+  <figure class="wsd-shot">
+    <img src="assets/results.png" alt="Flight Results — altitude vs time, apogee 1223 m" loading="lazy">
+    <img src="assets/results-dynpressure.png" alt="Flight Results — dynamic pressure vs time with scrubber readout" loading="lazy">
+  </figure>
+</section>
+
+<!-- ── 11 MONTE CARLO ── -->
+<section class="wsd reveal" id="montecarlo">
+  <div class="wsd-text">
+    <span class="wsd-num">11</span>
+    <h2>Monte Carlo</h2>
+    <p class="wsd-tag">One flight is an anecdote. A thousand dispersed flights are a prediction.</p>
+    <p>Define the uncertainty you actually have — wind, mass, drag, motor performance,
+    launch angle — and the batch engine flies the whole population in parallel. Out come
+    distributions, a landing-dispersion ellipse you can hand to your range safety officer,
+    and a tornado chart showing which uncertainty actually drives the outcome.</p>
+    <ul class="wsd-feats">
+      <li>Uncertainty groups: wind, vehicle (mass, CG, Cd), motor (thrust, impulse), launch (angle, direction)</li>
+      <li>Parallel batch runs with configurable simulation count</li>
+      <li>Five result views: apogee distribution, landing dispersion, landing distance, performance box plots, tornado sensitivity</li>
+      <li>Statistics panels: apogee / performance / landing stats with percentiles</li>
+      <li>Failure criteria with mission assessment, failure breakdown and reliability analysis</li>
+      <li>Best-case / worst-case scenario extraction — load either one back as a flight</li>
+    </ul>
+  </div>
+  <figure class="wsd-shot">
+    <img src="assets/montecarlo-1.png" alt="Monte Carlo — apogee distribution with normal fit and percentiles" loading="lazy">
+    <img src="assets/montecarlo-2.png" alt="Monte Carlo — performance box plots and reliability breakdown" loading="lazy">
+  </figure>
+</section>
+
+<!-- ── 12 OPTIMIZATION ── -->
+<section class="wsd wsd-flip reveal" id="optimization">
+  <div class="wsd-text">
+    <span class="wsd-num">12</span>
+    <h2>Optimization</h2>
+    <p class="wsd-tag">Stop guessing fin sizes. State the objective and let the optimizer search.</p>
+    <p>Select which design variables are free, declare objectives and constraints, and pick
+    an algorithm — Differential Evolution, Genetic Algorithm or Particle Swarm. Robust
+    mode optimizes under Monte Carlo uncertainty (mean, worst-case, reliability or p5),
+    and a surrogate model with active learning slashes the number of full simulations
+    needed.</p>
+    <ul class="wsd-feats">
+      <li>Algorithms: Differential Evolution, Genetic Algorithm, Particle Swarm — with parallel evaluation</li>
+      <li>Robust optimization modes over Monte Carlo: mean, std, worst-case, reliability, p5</li>
+      <li>Random Forest surrogate acceleration with active learning</li>
+      <li>Free choice of design variables, objectives and constraints</li>
+      <li>Result views: single- and multi-objective convergence, Pareto front, design space explorer with axis / color mapping</li>
+      <li>DOE studies: Latin Hypercube, Full Factorial, Taguchi — plus response surfaces</li>
+      <li>Sensitivity methods: Sobol indices, PRCC, Morris screening</li>
+      <li>Compare designs side by side; push the best optimized design back into the project</li>
+    </ul>
+  </div>
+  <figure class="wsd-shot">
+    <img src="assets/optimization-1.png" alt="Optimization — Genetic Algorithm fitness convergence with constraints" loading="lazy">
+    <img src="assets/optimization-2.png" alt="Optimization — DOE main effects and response surface" loading="lazy">
+  </figure>
+</section>
+
+</main>
+
+<!-- Lightbox -->
+<div class="lightbox" id="lightbox" role="dialog" aria-label="Screenshot viewer" hidden>
+  <button class="lb-close" id="lbClose" aria-label="Close">&times;</button>
+  <img id="lbImg" src="" alt="">
+  <p id="lbCap"></p>
+</div>
+
+<!-- ───────────────────────── CTA ───────────────────────── -->
+<section class="section dl">
+  <div class="dl-card reveal">
+    <span class="kicker">READY?</span>
+    <h2>All twelve. One download.</h2>
+    <p class="dl-sub">Free and open source under GPL-3.0 — the complete platform, the motor catalog and the validation suite.</p>
+    <div class="dl-actions">
+      <a class="btn btn-primary btn-big" href="https://github.com/kashyapbinu/K2-Software/archive/refs/heads/main.zip">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Download K2 AeroSim (.zip)
+      </a>
+      <a class="btn btn-ghost btn-big" href="index.html#download">Install instructions</a>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── FOOTER ───────────────────────── -->
+<footer class="footer">
+  <div class="footer-inner">
+    <div>
+      <span class="brand-mark">K2</span> <span class="brand-text">AEROSIM</span>
+      <p>Rocket simulation platform · GPL-3.0</p>
+      <p class="footer-credit">Developed by Kashyap Binu · <a href="mailto:kashyap.binu26@gmail.com">kashyap.binu26@gmail.com</a></p>
+    </div>
+    <div class="footer-links">
+      <a href="index.html">Home</a>
+      <a href="https://github.com/kashyapbinu/K2-Software" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/kashyapbinu/K2-Software/blob/main/LICENSE" target="_blank" rel="noopener">License</a>
+    </div>
+  </div>
+  <p class="footer-note">Aerodynamics &amp; drag-table modules ported from OpenRocket (GPL-3.0, © Sampo Niskanen and contributors). K2 is a derivative work distributed under the same terms. Motor data courtesy of ThrustCurve.org.</p>
+</footer>
+
+<script src="script.js"></script>
+</body>
+</html>

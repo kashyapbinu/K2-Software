@@ -14,6 +14,7 @@ k2_crash.log*
 
 # ── Run artifacts / large outputs (255MB+, regenerated) ──
 cfd_run/
+cfd_run_euler/
 fem_run/
 fem_test_run/
 *.msh

@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>K2 AeroSim — Rocket Simulation Platform</title>
+<meta name="description" content="K2 AeroSim: an integrated simulation platform for high-power and experimental rockets. 6DOF flight simulation, CFD, FEM, propulsion, recovery, avionics — free and open source.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>🚀</text></svg>">
+</head>
+<body>
+
+<canvas id="starfield" aria-hidden="true"></canvas>
+
+<!-- ───────────────────────── NAV ───────────────────────── -->
+<nav class="nav">
+  <div class="nav-inner">
+    <a href="#top" class="brand">
+      <span class="brand-mark">K2</span>
+      <span class="brand-text">AEROSIM</span>
+    </a>
+    <div class="nav-links">
+      <a href="#gallery">Workspaces</a>
+      <a href="#capabilities">Capabilities</a>
+      <a href="workspaces.html">Workspace Tour</a>
+      <a href="#validation">Validation</a>
+      <a href="#download" class="nav-cta">Download</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ───────────────────────── HERO ───────────────────────── -->
+<header class="hero" id="top">
+  <div class="hero-content">
+    <div class="hero-badge">OPEN SOURCE &nbsp;·&nbsp; ROCKET SIMULATION &nbsp;·&nbsp; MULTI-PHYSICS</div>
+    <h1>Design it. Fly it.<br><span class="grad">Before you build it.</span></h1>
+    <p class="hero-sub">
+      K2 AeroSim is an integrated <strong>simulation platform</strong> for high-power and
+      experimental rockets — 6DOF flight simulation, CFD, structural FEM, internal
+      ballistics, recovery and avionics, unified in a single desktop platform.
+    </p>
+    <div class="hero-actions">
+      <a href="#download" class="btn btn-primary">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Download K2 — Free
+      </a>
+      <a href="https://github.com/kashyapbinu/K2-Software" class="btn btn-ghost" target="_blank" rel="noopener">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.55v-2.17c-3.2.7-3.87-1.37-3.87-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.19 1.76 1.19 1.03 1.76 2.7 1.25 3.36.96.1-.75.4-1.25.73-1.54-2.55-.29-5.23-1.28-5.23-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11.07 11.07 0 0 1 5.78 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.69 5.39-5.25 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.66.8.55A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5z"/></svg>
+        View Source
+      </a>
+    </div>
+    <div class="hero-terminal">
+      <div class="term-bar"><span></span><span></span><span></span><em>k2 — flight log</em></div>
+      <pre class="term-body" id="termBody"></pre>
+    </div>
+  </div>
+  <div class="scroll-hint" aria-hidden="true"><span></span></div>
+</header>
+
+<!-- ───────────────────────── METRICS ───────────────────────── -->
+<section class="metrics" id="metrics">
+  <div class="metric reveal">
+    <div class="metric-num" data-count="12">0</div>
+    <div class="metric-label">Engineering Workspaces</div>
+  </div>
+  <div class="metric reveal">
+    <div class="metric-num" data-count="1129">0</div>
+    <div class="metric-label">Real Rocket Motors</div>
+  </div>
+  <div class="metric reveal">
+    <div class="metric-num" data-count="10" data-suffix="+">0</div>
+    <div class="metric-label">Physics Domains</div>
+  </div>
+  <div class="metric reveal">
+    <div class="metric-num">6DOF</div>
+    <div class="metric-label">Flight Simulation</div>
+  </div>
+</section>
+
+<!-- ───────────────────────── GALLERY ───────────────────────── -->
+<section class="section" id="gallery">
+  <div class="section-head reveal">
+    <span class="kicker">THE WORKSPACES</span>
+    <h2>One rocket, every workspace.</h2>
+    <p>K2 brings the whole design loop under one roof — airframe design, propulsion, CFD, structures, dynamics, avionics, 6DOF flight and recovery — all sharing a single live rocket model. Every image below is the actual software, showing one rocket designed, analyzed and flown end-to-end. Click any shot to enlarge.</p>
+  </div>
+
+  <figure class="shot shot-featured reveal">
+    <img src="assets/cinematic.png" alt="K2 Cinematic view — webcast-style flight replay" loading="lazy">
+    <figcaption><strong>Cinematic</strong> — a webcast-style replay of your flight with a live HUD and follow camera, rendered in real time.</figcaption>
+  </figure>
+
+  <div class="shot-grid">
+    <figure class="shot reveal">
+      <img src="assets/design.png" alt="K2 Design workspace" loading="lazy">
+      <figcaption><strong>Design</strong> — build the airframe from a component tree with a live 3D preview and instant stability feedback.</figcaption>
+    </figure>
+    <figure class="shot reveal">
+      <img src="assets/propulsion.png" alt="K2 Propulsion workspace" loading="lazy">
+      <figcaption><strong>Propulsion</strong> — pick from the full certified-motor catalog and see real measured thrust curves and motor performance.</figcaption>
+    </figure>
+    <figure class="shot reveal">
+      <img src="assets/cfd-temperature.png" alt="K2 CFD workspace — temperature field" loading="lazy">
+      <figcaption><strong>CFD — flow field</strong> — run SU2 solves straight from your design and explore the 3D temperature, pressure and velocity fields.</figcaption>
+    </figure>
+    <figure class="shot reveal">
+      <img src="assets/cfd-pressure.png" alt="K2 CFD workspace — pressure field" loading="lazy">
+      <figcaption><strong>CFD — drag &amp; pressure</strong> — visualize compression regions and get a full aerodynamic-coefficient and drag breakdown.</figcaption>
+    </figure>
+    <figure class="shot reveal">
+      <img src="assets/mission-visualizer.png" alt="K2 Mission Visualizer workspace" loading="lazy">
+      <figcaption><strong>Mission Visualizer</strong> — watch the flight in live 3D with full telemetry, sparkline graphs and recovery status.</figcaption>
+    </figure>
+    <figure class="shot reveal">
+      <img src="assets/results.png" alt="K2 Flight Results workspace" loading="lazy">
+      <figcaption><strong>Flight Results</strong> — scrub the full flight history across every channel and export the data to CSV.</figcaption>
+    </figure>
+    <figure class="shot reveal">
+      <img src="assets/structures.png" alt="K2 Structures workspace" loading="lazy">
+      <figcaption><strong>Structures</strong> — run FEM stress, buckling and modal analysis on the airframe with a structural safety score.</figcaption>
+    </figure>
+    <figure class="shot reveal">
+      <img src="assets/dynamics.png" alt="K2 Dynamics workspace" loading="lazy">
+      <figcaption><strong>Dynamics</strong> — check fin flutter, resonances and aeroelastic margins against the flight envelope.</figcaption>
+    </figure>
+    <figure class="shot reveal">
+      <img src="assets/avionics.png" alt="K2 Avionics workspace" loading="lazy">
+      <figcaption><strong>Avionics</strong> — test a simulated flight computer with realistic noisy sensors, state estimation and event detection.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- Lightbox -->
+<div class="lightbox" id="lightbox" role="dialog" aria-label="Screenshot viewer" hidden>
+  <button class="lb-close" id="lbClose" aria-label="Close">&times;</button>
+  <img id="lbImg" src="" alt="">
+  <p id="lbCap"></p>
+</div>
+
+<!-- ───────────────────────── NEXT PAGE ───────────────────────── -->
+<section class="section next-page">
+  <a class="next-card reveal" href="workspaces.html">
+    <span class="kicker">NEXT</span>
+    <h2>Take the full workspace tour →</h2>
+    <p>A detailed, workspace-by-workspace walkthrough of all twelve tabs — what each one does, how they share the same live rocket model, and what the screens look like in action.</p>
+    <span class="btn btn-primary btn-big">Explore all 12 workspaces →</span>
+  </a>
+</section>
+
+<!-- ───────────────────────── CAPABILITIES ───────────────────────── -->
+<section class="section" id="capabilities">
+  <div class="section-head reveal">
+    <span class="kicker">CAPABILITIES</span>
+    <h2>One platform. The entire flight envelope.</h2>
+    <p>From the first sketch of the airframe to a validated trajectory, structural margins and recovery sequence — without leaving the app.</p>
+  </div>
+
+  <div class="cap-grid">
+    <article class="cap reveal">
+      <div class="cap-icon">🛰️</div>
+      <h3>6DOF Flight Simulation</h3>
+      <p>Full six-degree-of-freedom rigid-body dynamics with RK4 and adaptive RK45 Dormand–Prince integrators, ISA atmosphere, wind and turbulence models, launch-rod dynamics and stability-margin tracking through the whole flight.</p>
+      <ul>
+        <li>Quaternion attitude propagation</li>
+        <li>Gust and turbulence injection</li>
+        <li>Apogee, max-Q, Mach and stability time histories</li>
+      </ul>
+    </article>
+
+    <article class="cap reveal">
+      <div class="cap-icon">🌬️</div>
+      <h3>CFD — Powered by SU2</h3>
+      <p>Automatic watertight geometry export, gmsh meshing with curvature refinement, and SU2 Euler / RANS solves driven straight from your design. AoA / Mach sweep polars with a hybrid Euler + flat-plate-friction drag mode.</p>
+      <ul>
+        <li>Multithreaded OpenMP solver, concurrent sweep points</li>
+        <li>Surface-pressure drag decomposition</li>
+        <li>Shock detection &amp; boundary-layer analysis</li>
+      </ul>
+    </article>
+
+    <article class="cap reveal">
+      <div class="cap-icon">🏗️</div>
+      <h3>Structures — FEM via CalculiX</h3>
+      <p>Airframe stress, buckling and modal analysis through a bundled CalculiX solver, with CFD surface pressures mapped directly onto the FEM mesh as distributed loads. Thin-shell results cross-checked against Roark closed forms.</p>
+      <ul>
+        <li>CFD → FEM pressure mapping</li>
+        <li>Thermal &amp; pressure-vessel analysis</li>
+        <li>3D stress viewer + automated reports</li>
+      </ul>
+    </article>
+
+    <article class="cap reveal">
+      <div class="cap-icon">🔥</div>
+      <h3>Propulsion &amp; Internal Ballistics</h3>
+      <p>The complete ThrustCurve.org certified-motor catalog — 1,129 motors — searchable by class, diameter and airframe fit, plus internal-ballistics grain simulation for experimental solid motors.</p>
+      <ul>
+        <li>Real measured thrust curves</li>
+        <li>Motor class / diameter / fit-to-body filters</li>
+        <li>Grain regression modelling</li>
+      </ul>
+    </article>
+
+    <article class="cap reveal">
+      <div class="cap-icon">📐</div>
+      <h3>Aerodynamics &amp; Aeroelasticity</h3>
+      <p>An OpenRocket-ported Barrowman implementation for instant CP/CG stability, transonic drag tables, and fin-flutter prediction using the NACA TN-4197 method with a p-k aeroelastic solver.</p>
+      <ul>
+        <li>Barrowman CP matches OpenRocket exactly</li>
+        <li>Fin flutter &amp; divergence speed envelopes</li>
+        <li>Component-level drag build-up</li>
+      </ul>
+    </article>
+
+    <article class="cap reveal">
+      <div class="cap-icon">🎲</div>
+      <h3>Monte Carlo &amp; Optimization</h3>
+      <p>Dispersion analysis over wind, thrust, mass and aero uncertainties; landing-ellipse statistics; design-of-experiments studies; and multi-variable design optimization toward apogee or stability targets.</p>
+      <ul>
+        <li>Parallel batch runs</li>
+        <li>Landing scatter &amp; confidence ellipses</li>
+        <li>DOE parameter studies</li>
+      </ul>
+    </article>
+
+    <article class="cap reveal">
+      <div class="cap-icon">🪂</div>
+      <h3>Recovery</h3>
+      <p>Drogue and main parachute modelling with deployment logic, descent-rate dynamics and dual-deploy event sequencing — wired into the same 6DOF state as the ascent.</p>
+      <ul>
+        <li>Dual-deploy staging logic</li>
+        <li>Descent-rate &amp; drift prediction</li>
+        <li>Opening-shock estimation</li>
+      </ul>
+    </article>
+
+    <article class="cap reveal">
+      <div class="cap-icon">📡</div>
+      <h3>Avionics &amp; State Estimation</h3>
+      <p>A simulated flight computer with sensor models (IMU, barometer, GPS), Kalman-filter state estimation and telemetry — test your flight software logic against realistic noisy data before it ever flies.</p>
+      <ul>
+        <li>Sensor noise &amp; bias models</li>
+        <li>Kalman altitude/velocity fusion</li>
+        <li>Event-detection logic (liftoff, burnout, apogee)</li>
+      </ul>
+    </article>
+
+    <article class="cap reveal">
+      <div class="cap-icon">🎬</div>
+      <h3>Mission Visualization &amp; Cinematic Replay</h3>
+      <p>A live 3D mission visualizer plus a cinematic three.js replay view with a SpaceX-style HUD, flight-envelope overlays and synced mini-graphs — watch the flight you just simulated.</p>
+      <ul>
+        <li>Live 3D trajectory with vehicle attitude</li>
+        <li>Replay scrubbing &amp; HUD telemetry</li>
+        <li>Flight-envelope visual overlays</li>
+      </ul>
+    </article>
+
+    <article class="cap reveal">
+      <div class="cap-icon">🔄</div>
+      <h3>OpenRocket Interop</h3>
+      <p>Import existing <code>.ork</code> designs with exact component positioning and round-trip serialization, or start from K2's own <code>.k2proj</code> format. Your OpenRocket fleet carries straight over.</p>
+      <ul>
+        <li>.ork import with exact CP agreement</li>
+        <li>Round-trip save / load fidelity</li>
+        <li>JSON-based open project format</li>
+      </ul>
+    </article>
+  </div>
+</section>
+
+<!-- ───────────────────────── WORKSPACES ───────────────────────── -->
+<section class="section" id="workspaces">
+  <div class="section-head reveal">
+    <span class="kicker">THE COCKPIT</span>
+    <h2>Twelve workspaces, one state engine.</h2>
+    <p>Every tab reads and writes the same live rocket model — change a fin in Design and the CFD, structures and simulation workspaces see it instantly.</p>
+  </div>
+  <div class="ws-grid reveal">
+    <a class="ws" href="workspaces.html#design"><span class="ws-n">01</span>Design<small>Component builder, mass &amp; CG, 3D preview</small></a>
+    <a class="ws" href="workspaces.html#propulsion"><span class="ws-n">02</span>Propulsion<small>Motor catalog, thrust curves, ballistics</small></a>
+    <a class="ws" href="workspaces.html#cfd"><span class="ws-n">03</span>CFD<small>SU2 solves, meshing, sweep polars</small></a>
+    <a class="ws" href="workspaces.html#structures"><span class="ws-n">04</span>Structures<small>FEM, thermal, pressure mapping</small></a>
+    <a class="ws" href="workspaces.html#dynamics"><span class="ws-n">05</span>Dynamics<small>Flutter, aeroelastic, vibration</small></a>
+    <a class="ws" href="workspaces.html#avionics"><span class="ws-n">06</span>Avionics<small>Sensors, Kalman filter, telemetry</small></a>
+    <a class="ws" href="workspaces.html#simulation"><span class="ws-n">07</span>Simulation<small>6DOF runs, integrator control</small></a>
+    <a class="ws" href="workspaces.html#missionviz"><span class="ws-n">08</span>Mission Visualizer<small>Live 3D flight view</small></a>
+    <a class="ws" href="workspaces.html#cinematic"><span class="ws-n">09</span>Cinematic<small>Replay, HUD, flight envelope</small></a>
+    <a class="ws" href="workspaces.html#results"><span class="ws-n">10</span>Results<small>Plots, summaries, export</small></a>
+    <a class="ws" href="workspaces.html#montecarlo"><span class="ws-n">11</span>Monte Carlo<small>Dispersion &amp; landing ellipses</small></a>
+    <a class="ws" href="workspaces.html#optimization"><span class="ws-n">12</span>Optimization<small>Design search &amp; DOE</small></a>
+  </div>
+</section>
+
+<!-- ───────────────────────── VALIDATION ───────────────────────── -->
+<section class="section" id="validation">
+  <div class="section-head reveal">
+    <span class="kicker">TRUST THE NUMBERS</span>
+    <h2>Validated physics, not vibes.</h2>
+    <p>A dedicated validation suite benchmarks every engine against independent references — exact analytical solutions, established codes and textbook closed forms — gated in CI with pytest.</p>
+  </div>
+  <div class="val-table reveal">
+    <table>
+      <thead>
+        <tr><th>Domain</th><th>Analytical reference</th><th>High-fidelity reference</th><th>Result</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td data-label="Domain"><strong>6DOF Simulation</strong></td>
+          <td data-label="Analytical">Exact ODE solutions — vacuum projectile, terminal-velocity tanh, SHO energy conservation</td>
+          <td data-label="High-fidelity">OpenRocket (headless)</td>
+          <td data-label="Result"><span class="pass">✓ Gated</span></td>
+        </tr>
+        <tr>
+          <td data-label="Domain"><strong>Aerodynamics / CFD</strong></td>
+          <td data-label="Analytical">Taylor–Maccoll exact supersonic cone flow vs NACA-1135 tables</td>
+          <td data-label="High-fidelity">SU2 — cone surface Cp agrees within ~4%</td>
+          <td data-label="Result"><span class="pass">✓ Gated</span></td>
+        </tr>
+        <tr>
+          <td data-label="Domain"><strong>Structures</strong></td>
+          <td data-label="Analytical">Roark thin-shell hoop stress, Euler buckling closed forms</td>
+          <td data-label="High-fidelity">CalculiX — tension, bending, modal decks</td>
+          <td data-label="Result"><span class="pass">✓ Gated</span></td>
+        </tr>
+        <tr>
+          <td data-label="Domain"><strong>Stability</strong></td>
+          <td data-label="Analytical">Barrowman method (OpenRocket port)</td>
+          <td data-label="High-fidelity">Exact CP agreement with OpenRocket on imported .ork designs</td>
+          <td data-label="Result"><span class="pass">✓ Verified</span></td>
+        </tr>
+        <tr>
+          <td data-label="Domain"><strong>Flutter</strong></td>
+          <td data-label="Analytical">NACA TN-4197 method + p-k solver</td>
+          <td data-label="High-fidelity">—</td>
+          <td data-label="Result"><span class="pass">✓ Verified</span></td>
+        </tr>
+        <tr>
+          <td data-label="Domain"><strong>Atmosphere</strong></td>
+          <td data-label="Analytical">ISA standard-atmosphere tables</td>
+          <td data-label="High-fidelity">—</td>
+          <td data-label="Result"><span class="pass">✓ Verified</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="val-note reveal">Run it yourself: <code>pytest tests/validation -q</code> &nbsp;·&nbsp; full credibility report: <code>python -m validation.report --full</code></p>
+</section>
+
+<!-- ───────────────────────── BETA NOTICE ───────────────────────── -->
+<section class="section beta-section">
+  <div class="beta-notice reveal">
+    <div class="beta-head">
+      <span class="beta-icon" aria-hidden="true">⚠️</span>
+      <h2>Beta Notice</h2>
+    </div>
+    <p>K2 AeroSim is an actively developed open-source engineering platform. While every
+    effort has been made to implement and validate the underlying physics and numerical
+    methods, the software may still contain bugs, implementation errors, or inaccuracies.</p>
+    <p>Simulation results should not be considered a substitute for professional engineering
+    analysis, certification, or flight testing. Always independently verify critical
+    calculations and validate designs before manufacturing or launch.</p>
+    <p>If you encounter unexpected behavior, incorrect results, crashes, or have suggestions
+    for improvement, please report them through the project's
+    <a href="https://github.com/kashyapbinu/K2-Software/issues" target="_blank" rel="noopener">GitHub Issues</a>
+    page. Community feedback is invaluable in helping improve the accuracy, reliability, and
+    usability of K2.</p>
+    <p class="beta-thanks">Thank you for helping make K2 AeroSim better.</p>
+  </div>
+</section>
+
+<!-- ───────────────────────── DOWNLOAD ───────────────────────── -->
+<section class="section dl" id="download">
+  <div class="dl-card reveal">
+    <span class="kicker">GET K2</span>
+    <h2>Download the full platform.</h2>
+    <p class="dl-sub">Free and open source under GPL-3.0. Everything included — all twelve workspaces, the motor catalog, the validation suite and the bundled solver interfaces.</p>
+
+    <div class="dl-actions">
+      <a class="btn btn-primary btn-big" href="https://github.com/kashyapbinu/K2-Software/archive/refs/heads/main.zip">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Download K2 AeroSim (.zip)
+      </a>
+      <a class="btn btn-ghost btn-big" href="https://github.com/kashyapbinu/K2-Software" target="_blank" rel="noopener">Browse on GitHub</a>
+    </div>
+    <p class="dl-meta">Latest source · Windows 10/11 · Python 3.10+ required</p>
+
+    <div class="dl-steps">
+      <h3>Up and running in three steps</h3>
+      <ol>
+        <li>
+          <span class="step-n">1</span>
+          <div><strong>Download &amp; extract</strong> the zip — or clone:
+          <pre><code>git clone https://github.com/kashyapbinu/K2-Software.git</code></pre></div>
+        </li>
+        <li>
+          <span class="step-n">2</span>
+          <div><strong>Install dependencies</strong> (Python 3.10+):
+          <pre><code>pip install -r requirements.txt</code></pre></div>
+        </li>
+        <li>
+          <span class="step-n">3</span>
+          <div><strong>Launch</strong> and start designing:
+          <pre><code>python main.py</code></pre></div>
+        </li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── FOOTER ───────────────────────── -->
+<footer class="footer">
+  <div class="footer-inner">
+    <div>
+      <span class="brand-mark">K2</span> <span class="brand-text">AEROSIM</span>
+      <p>Rocket simulation platform · GPL-3.0</p>
+      <p class="footer-credit">Developed by Kashyap Binu · <a href="mailto:kashyap.binu26@gmail.com">kashyap.binu26@gmail.com</a></p>
+    </div>
+    <div class="footer-links">
+      <a href="https://github.com/kashyapbinu/K2-Software" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/kashyapbinu/K2-Software/blob/main/LICENSE" target="_blank" rel="noopener">License</a>
+      <a href="https://openrocket.info" target="_blank" rel="noopener">OpenRocket</a>
+      <a href="https://su2code.github.io" target="_blank" rel="noopener">SU2</a>
+    </div>
+  </div>
+  <p class="footer-note">Aerodynamics &amp; drag-table modules ported from OpenRocket (GPL-3.0, © Sampo Niskanen and contributors). K2 is a derivative work distributed under the same terms. Motor data courtesy of ThrustCurve.org.</p>
+</footer>
+
+<script src="script.js"></script>
+</body>
+</html>
