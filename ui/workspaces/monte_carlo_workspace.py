@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QTextEdit,
 )
 from PyQt6.QtCore import Qt
+from ui.icons import icon
 
 from core.monte_carlo_engine import (
     MonteCarloConfig, MonteCarloEngine, MonteCarloResults,
@@ -286,13 +287,13 @@ class MonteCarloWorkspace(QWidget):
         al = QVBoxLayout()
         al.setSpacing(8)
 
-        self.btn_run = QPushButton("▶  RUN ANALYSIS")
+        self.btn_run = QPushButton(icon("run", color="#fff"), "RUN ANALYSIS")
         self.btn_run.setStyleSheet(_BTN_P)
         self.btn_run.setMinimumHeight(40)
         self.btn_run.clicked.connect(self._on_run)
         al.addWidget(self.btn_run)
 
-        self.btn_cancel = QPushButton("⏹  CANCEL")
+        self.btn_cancel = QPushButton(icon("stop", color="#fff"), "CANCEL")
         self.btn_cancel.setStyleSheet(_BTN_D)
         self.btn_cancel.setMinimumHeight(40)
         self.btn_cancel.setEnabled(False)
@@ -315,7 +316,7 @@ class MonteCarloWorkspace(QWidget):
         self.progress_label.setStyleSheet("color:#8b949e; font-size:11px;")
         al.addWidget(self.progress_label)
 
-        self.btn_export = QPushButton("📥  EXPORT CSV")
+        self.btn_export = QPushButton(icon("export"), "EXPORT CSV")
         self.btn_export.setStyleSheet(_BTN_S)
         self.btn_export.setEnabled(False)
         self.btn_export.clicked.connect(self._on_export)
@@ -389,7 +390,7 @@ class MonteCarloWorkspace(QWidget):
         lay.setContentsMargins(12, 14, 12, 14)
         lay.setSpacing(12)
 
-        t = QLabel("📊  Statistics")
+        t = QLabel("Statistics")
         t.setStyleSheet(
             "color:#58a6ff; font-size:15px; font-weight:700; padding:2px 0 6px 0;"
         )
@@ -807,12 +808,12 @@ class MonteCarloWorkspace(QWidget):
         # Distribution shape indicators
         skew_txt = f"{r.apogee_skewness:+.2f}"
         if abs(r.apogee_skewness) > 1.0:
-            skew_txt += " ⚠ highly skewed"
+            skew_txt += " highly skewed"
         self.lbl_ap_skew.setText(skew_txt)
 
         kurt_txt = f"{r.apogee_kurtosis:+.2f}"
         if r.apogee_kurtosis > 3.0:
-            kurt_txt += " ⚠ heavy-tailed"
+            kurt_txt += " heavy-tailed"
         self.lbl_ap_kurt.setText(kurt_txt)
 
         # Performance
@@ -835,16 +836,6 @@ class MonteCarloWorkspace(QWidget):
 
         # Failure Breakdown
         self._update_failure_breakdown(r)
-
-        # Scenarios (clickable buttons)
-        self.btn_best.setText(
-            f"Best Case: Run #{r.best_run_index} — {r.best_apogee:.1f} m"
-        )
-        self.btn_best.clicked.connect(lambda: self._show_scenario_detail(r.best_run_index))
-        self.btn_worst.setText(
-            f"Worst Case: Run #{r.worst_run_index} — {r.worst_apogee:.1f} m"
-        )
-        self.btn_worst.clicked.connect(lambda: self._show_scenario_detail(r.worst_run_index))
 
         # Reliability Analysis
         self._set_rate_label(self.lbl_r_apogee, r.p_apogee_above_target * 100, " %")
@@ -1114,11 +1105,11 @@ class MonteCarloWorkspace(QWidget):
                         f"{params.get('cg', '')}",
                         f"{params.get('impulse_scale', '')}",
                     ])
-            self.engine.log_message.emit(f"📥 Monte Carlo results exported: {path}")
+            self.engine.log_message.emit(f"Monte Carlo results exported: {path}")
             logger.info(f"Exported {len(self._results.runs)} runs to {path}")
         except Exception as exc:
             logger.error(f"Export failed: {exc}")
-            self.engine.log_message.emit(f"❌ Export failed: {exc}")
+            self.engine.log_message.emit(f"Export failed: {exc}")
 
     # ═════════════════════════════════════════════════════════════════════════
     # State Change

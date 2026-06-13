@@ -1253,6 +1253,7 @@ def inject_cfd_results_into_engine(result: "CFDResult", engine) -> None:
             cfd_force_normal=result.force_normal,
             cfd_mach=result.mach,
             cfd_reynolds=result.reynolds,
+            cfd_surface_vtk=str(result.surface_vtk) if result.surface_vtk else "",
         )
         logger.info(
             f"CFD results injected → Cd={result.cd:.4f}, Cl={result.cl:.4f}, "

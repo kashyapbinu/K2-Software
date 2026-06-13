@@ -90,6 +90,12 @@ class RocketComponent:
              "material": self.material, "comment": self.comment, "color": self.color}
         if self.override_mass is not None:
             d["override_mass"] = self.override_mass
+        # Preserve ORK-import positioning so reload doesn't fall back to auto-stacking
+        if getattr(self, "_ork_pos", None) is not None:
+            d["ork_pos"] = self._ork_pos
+            d["ork_rel"] = getattr(self, "_ork_rel", "top")
+        if getattr(self, "_ork_density", None) is not None:
+            d["ork_density"] = self._ork_density
         d["properties"] = self._props_dict()
         d["children"] = [c.to_dict() for c in self.children]
         return d
@@ -170,7 +176,8 @@ class NoseCone(RocketComponent):
         return {"shape": self.shape, "length": self.length, "diameter": self.diameter,
                 "wall_thickness": self.wall_thickness,
                 "shoulder_length": self.shoulder_length,
-                "shoulder_diameter": self.shoulder_diameter}
+                "shoulder_diameter": self.shoulder_diameter,
+                "shoulder_thickness": self.shoulder_thickness}
 
 
 class BodyTube(RocketComponent):
@@ -860,17 +867,19 @@ class RocketAssembly:
             rel_to = getattr(child, '_ork_rel', getattr(child, '_ork_rel_to', 'top')).lower()
 
             if has_explicit_pos and not (isinstance(child, (BodyTube, NoseCone, Transition, Nozzle)) and ork_pos == 0 and rel_to == "top"):
-                # Explicit ORK position
+                # Explicit ORK position. OpenRocket offsets locate the child's
+                # corresponding edge: bottom = child's aft edge from parent's aft
+                # edge, middle = child's center from parent's center.
                 if rel_to == "bottom":
-                    child._position = start_pos + parent.component_length() + ork_pos
-                    if isinstance(child, TrapezoidalFinSet):
-                        child._position -= child.root_chord # ORK bottom-rel fins are at trailing edge
+                    child._position = (start_pos + parent.component_length()
+                                       + ork_pos - child.component_length())
                 elif rel_to == "top":
                     child._position = start_pos + ork_pos
                 elif rel_to == "middle":
-                    child._position = start_pos + (parent.component_length() / 2.0) + ork_pos
-                    if isinstance(child, TrapezoidalFinSet):
-                        child._position -= (child.root_chord / 2.0)
+                    child._position = (start_pos + ork_pos
+                                       + (parent.component_length() - child.component_length()) / 2.0)
+                elif rel_to == "absolute":
+                    child._position = ork_pos
                 else:
                     child._position = start_pos + ork_pos
             elif isinstance(child, (BodyTube, NoseCone, Transition, Nozzle)):
@@ -1040,8 +1049,20 @@ def _load_children(parent, children_data):
         comp.color = cd.get("color", comp.color)
         if "override_mass" in cd:
             comp.override_mass = cd["override_mass"]
+        if "ork_pos" in cd:
+            comp._ork_pos = cd["ork_pos"]
+            comp._ork_rel = cd.get("ork_rel", "top")
+        if "ork_density" in cd:
+            comp._ork_density = cd["ork_density"]
         props = cd.get("properties", {})
         for k, v in props.items():
+            # Never clobber methods (e.g. BodyTube saves "outer_diameter" but
+            # stores the value in outer_diameter_val — outer_diameter() is a method)
+            if callable(getattr(comp, k, None)):
+                alt = k + "_val"
+                if hasattr(comp, alt) and not callable(getattr(comp, alt)):
+                    setattr(comp, alt, v)
+                continue
             if hasattr(comp, k):
                 setattr(comp, k, v)
         comp.parent = parent

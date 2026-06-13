@@ -330,53 +330,90 @@ def compute_fin_cp(body_length: float, fin_root_chord: float,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def compute_cd(mach: float, alpha: float = 0.0, fineness_ratio: float = 10.0,
-               base_area_ratio: float = 0.1, Re: float = 1e6,
+               base_area_ratio: float = 1.0, Re: float = 1e6,
                nose_type: str = "ogive",
                fin_thickness: float = 0.003, fin_span: float = 0.1,
                fin_mac_length: float = 0.1, fin_area: float = 0.01,
                ref_area: float = 0.005,
                surface_roughness: float = SurfaceFinish.NORMAL,
-               body_length: float = 1.0) -> float:
-    """Total drag coefficient with all OpenRocket drag components."""
+               body_length: float = 1.0,
+               fin_count: int = 4, fin_sweep: float = 0.0,
+               fin_cross_section: str = FinCrossSection.ROUNDED,
+               nose_length: float = 0.0,
+               nose_pressure_interp: "LinearInterpolator" = None) -> float:
+    """Total drag coefficient with all OpenRocket drag components.
+
+    base_area_ratio is base area / reference area — 1.0 for a flat-base
+    airframe with no boattail (matches OpenRocket, which applies the base CD
+    to the full aft base area).
+    """
     mach = max(0.0, mach)
 
     # 1. Skin friction
     Cf = compute_skin_friction_cf(Re, mach)
     Cf_rough = roughness_limited_cf(surface_roughness, body_length, mach)
     Cf = max(Cf, Cf_rough)
-    # Body friction: Cf * wetted_area / ref_area, approximated
-    cd_friction = Cf * (1 + 1.0 / (2 * fineness_ratio)) * 4 * fineness_ratio
+    # Body friction: Cf · (1 + 1/(2·fB)) · wetted_area / ref_area, with
+    # fB = length/maxRadius (OpenRocket). Wetted area ≈ cylinder over the
+    # body section + ~3/4 cylinder over the nose taper.
+    if nose_length > 0 and body_length > nose_length:
+        wet_ratio = 4.0 * fineness_ratio - nose_length / body_length * fineness_ratio
+    else:
+        wet_ratio = 4.0 * fineness_ratio
+    cd_friction = Cf * (1 + 1.0 / (4 * fineness_ratio)) * wet_ratio
 
-    # 2. Fin friction (both sides)
+    # 2. Fin friction (both sides of every fin — OpenRocket FinSetCalc per fin
+    #    × instance count)
     if fin_area > 0 and fin_mac_length > 0 and ref_area > 0:
-        cd_fin_friction = Cf * (1 + 2 * fin_thickness / fin_mac_length) * 2 * fin_area / ref_area
+        cd_fin_friction = (Cf * (1 + 2 * fin_thickness / fin_mac_length)
+                           * 2 * fin_area / ref_area * max(fin_count, 1))
     else:
         cd_fin_friction = 0.0
 
-    # 3. Base drag
+    # 3. Base drag (full aft base area)
     cd_base = base_cd(mach) * base_area_ratio
 
-    # 4. Induced drag from AoA
-    alpha_deg = abs(math.degrees(alpha))
-    cd_induced = 2.0 * math.sin(alpha)**2 if alpha_deg > 1.0 else 0.0
+    # 4. Induced drag from AoA — smooth in alpha (the old 1° on/off gate put a
+    #    step discontinuity in CD that optimizer/sensitivity sweeps tripped on)
+    cd_induced = 2.0 * math.sin(alpha)**2
 
-    # 5. Transonic / supersonic wave + nose-pressure drag.
-    #    Zero subsonic; rises through the transonic drag-divergence region and
-    #    holds a supersonic plateau. Driven by the stagnation-pressure factor
-    #    (captures the M=1 jump) and scaled inversely by slenderness — a longer,
-    #    finer body sheds less wave drag. Referenced to frontal (ref) area.
-    stag = stagnation_cd(mach)          # ~0.85 (M→0) → ~1.5 (supersonic)
-    stag0 = 0.85                        # incompressible reference level
-    fn = max(fineness_ratio, 3.0)
-    if mach <= 0.8:
-        cd_wave = 0.0
-    elif mach < 1.1:
-        t = (mach - 0.8) / 0.3
-        cd_wave = (3 * t * t - 2 * t ** 3) * max(0.0, stag - stag0) / fn
+    # 5. Nose pressure drag (OpenRocket SymmetricComponentCalc): tangent ogive
+    #    contributes ~0; cones and blunter shapes rise through transonic.
+    #    Frontal area = reference area, so the table value applies directly.
+    if nose_pressure_interp is not None:
+        cd_nose = nose_pressure_interp.get_value(mach)
     else:
-        cd_wave = max(0.0, stag - stag0) / fn
+        from physics.drag_tables import build_nose_pressure_interpolator
+        cd_nose = build_nose_pressure_interpolator(
+            nose_type, nose_length or body_length * 0.2,
+            math.sqrt(ref_area / math.pi)).get_value(mach)
 
-    total_cd = cd_friction + cd_fin_friction + cd_base + cd_induced + cd_wave
+    # 6. Fin pressure drag: leading edge by cross-section (OpenRocket
+    #    FinSetCalc), slant-corrected by cos²Γ, on span·thickness frontal area.
+    cd_fin_pressure = 0.0
+    if fin_span > 0 and fin_thickness > 0 and ref_area > 0 and fin_count > 0:
+        if fin_cross_section in (FinCrossSection.ROUNDED, FinCrossSection.AIRFOIL):
+            if mach < 0.9:
+                cd_le = (1 - mach * mach) ** -0.417 - 1
+            elif mach < 1.0:
+                cd_le = 1 - 1.785 * (mach - 0.9)
+            else:
+                cd_le = 1.214 - 0.502 / mach**2 + 0.1095 / mach**4
+        else:  # square
+            cd_le = stagnation_cd(mach)
+        cd_le *= math.cos(fin_sweep) ** 2
+        # Trailing-edge base drag by cross-section
+        if fin_cross_section == FinCrossSection.SQUARE:
+            cd_te = base_cd(mach)
+        elif fin_cross_section == FinCrossSection.ROUNDED:
+            cd_te = base_cd(mach) / 2.0
+        else:  # airfoil
+            cd_te = 0.0
+        cd_fin_pressure = ((cd_le + cd_te) * fin_span * fin_thickness
+                           / ref_area * fin_count)
+
+    total_cd = (cd_friction + cd_fin_friction + cd_base + cd_induced
+                + cd_nose + cd_fin_pressure)
     return min(total_cd, 3.0)  # Cap at 3.0 to prevent divergence
 
 
@@ -490,6 +527,11 @@ class AeroModel:
         self._cn_alpha_nose = compute_nose_cn(nose_type)
         self._cp_nose = compute_nose_cp(nose_length, nose_type)
 
+        # Nose pressure-drag interpolator (Mach → CD on frontal area)
+        from physics.drag_tables import build_nose_pressure_interpolator
+        self._nose_pressure = build_nose_pressure_interpolator(
+            nose_type, nose_length, self.body_radius)
+
         # Damping parameters
         self._roughness = SurfaceFinish.get_roughness(surface_finish)
 
@@ -577,12 +619,16 @@ class AeroModel:
         # restoring-moment spike at transonic Mach.
         cp = max(0.0, min(cp, self.body_length))
 
-        # CD (full model)
+        # CD (full model). base_area_ratio = 1.0: flat aft base, no boattail.
         cd = compute_cd(
-            mach, alpha, self.fineness, 0.1, Re,
+            mach, alpha, self.fineness, 1.0, Re,
             self.nose_type, self.fin_thickness, self.fin_span,
             self.fin_mac_length, self.fin_area, A,
-            self._roughness, self.body_length
+            self._roughness, self.body_length,
+            fin_count=self.fin_count, fin_sweep=self.fin_sweep,
+            fin_cross_section=self.fin_cross_section,
+            nose_length=self.nose_length,
+            nose_pressure_interp=self._nose_pressure,
         )
 
         # CN with stall

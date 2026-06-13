@@ -10,6 +10,8 @@ from PyQt6.QtWidgets import QToolBar, QWidget, QSizePolicy
 from PyQt6.QtGui import QAction, QIcon, QFont
 from PyQt6.QtCore import Qt
 
+from ui.icons import icon
+
 logger = logging.getLogger("K2.Toolbar")
 
 
@@ -31,44 +33,44 @@ class MainToolbar(QToolBar):
     def _create_actions(self):
         """Create all toolbar actions."""
         # ── File actions ──
-        self.action_new = QAction("📄 New", self)
+        self.action_new = QAction(icon("new"), "New", self)
         self.action_new.setToolTip("Create a new rocket project (Ctrl+N)")
         self.action_new.setShortcut("Ctrl+N")
-        
-        self.action_open = QAction("📂 Open", self)
+
+        self.action_open = QAction(icon("open"), "Open", self)
         self.action_open.setToolTip("Open an existing project (Ctrl+O)")
         self.action_open.setShortcut("Ctrl+O")
-        
-        self.action_save = QAction("💾 Save", self)
+
+        self.action_save = QAction(icon("save"), "Save", self)
         self.action_save.setToolTip("Save current project (Ctrl+S)")
         self.action_save.setShortcut("Ctrl+S")
-        
-        self.action_save_as = QAction("📋 Save As", self)
+
+        self.action_save_as = QAction(icon("save_as"), "Save As", self)
         self.action_save_as.setToolTip("Save project to a new file (Ctrl+Shift+S)")
         self.action_save_as.setShortcut("Ctrl+Shift+S")
-        
-        self.action_import_ork = QAction("🔀 Import .ork", self)
+
+        self.action_import_ork = QAction(icon("import"), "Import .ork", self)
         self.action_import_ork.setToolTip("Import an OpenRocket design file (Ctrl+I)")
         self.action_import_ork.setShortcut("Ctrl+I")
-        
+
         # ── Simulation actions ──
-        self.action_run_sim = QAction("▶ Run Sim", self)
+        self.action_run_sim = QAction(icon("run", color="#3fb950"), "Run Sim", self)
         self.action_run_sim.setToolTip("Run flight simulation (F5)")
         self.action_run_sim.setShortcut("F5")
-        
-        self.action_stop_sim = QAction("⏹ Stop", self)
+
+        self.action_stop_sim = QAction(icon("stop", color="#f85149"), "Stop", self)
         self.action_stop_sim.setToolTip("Stop simulation")
         self.action_stop_sim.setEnabled(False)
-        
-        self.action_reset = QAction("🔄 Reset", self)
+
+        self.action_reset = QAction(icon("reset"), "Reset", self)
         self.action_reset.setToolTip("Reset simulation state")
-        
+
         # ── View actions ──
-        self.action_reset_view = QAction("🎯 Reset View", self)
+        self.action_reset_view = QAction(icon("reset_view"), "Reset View", self)
         self.action_reset_view.setToolTip("Reset 3D camera to default view")
-        
+
         # ── Settings ──
-        self.action_settings = QAction("⚙ Settings", self)
+        self.action_settings = QAction(icon("settings"), "Settings", self)
         self.action_settings.setToolTip("Application settings")
     
     def _build_toolbar(self):

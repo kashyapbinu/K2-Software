@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QLabel, QFrame
 )
 from PyQt6.QtCore import Qt
+from ui.icons import icon
 
 logger = logging.getLogger("K2.StressViewer")
 
@@ -294,7 +295,7 @@ class StressViewer(QWidget):
         self.comp_combo.currentTextChanged.connect(self._on_component)
         bl.addWidget(self.comp_combo)
         bl.addStretch()
-        self.btn_reset = QPushButton("⟳ Reset View")
+        self.btn_reset = QPushButton(icon("reset_view"), "Reset View")
         self.btn_reset.setStyleSheet(_CTRL_BTN)
         self.btn_reset.clicked.connect(self.reset_view)
         bl.addWidget(self.btn_reset)
@@ -310,10 +311,12 @@ class StressViewer(QWidget):
 
         self.plotter = QtInteractor(self)
         self.plotter.set_background("#0d1117", top="#161b22")
-        self.plotter.add_axes(interactive=False, line_width=2)
+        # Orientation axes are added only once a result is rendered (see
+        # _render). Showing them in the empty state put a stray gizmo + X/Y/Z
+        # labels in the middle of the "no results" message.
         root.addWidget(self.plotter.interactor, 1)
 
-        self._empty = QLabel("No Results Available\n\nRun an analysis to view the stress field.")
+        self._empty = QLabel("Please run a simulation to view results.")
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty.setStyleSheet("color:#6e7681;font-size:14px;background:transparent;")
         self._empty.setParent(self.plotter.interactor)
@@ -487,6 +490,11 @@ class StressViewer(QWidget):
                                               show_message=False, show_point=False)
         except Exception:
             pass
+        # Orientation axes belong with an actual result, not the empty state.
+        try:
+            self.plotter.add_axes(interactive=False, line_width=2)
+        except Exception:
+            pass
         self._side_view()
         self.plotter.reset_camera()
         self.plotter.render()
@@ -508,5 +516,13 @@ class StressViewer(QWidget):
             self.plotter.render()
 
     def show_empty(self):
+        # Clear any rendered mesh + the orientation gizmo so the empty state is
+        # just the message — no leftover 3D clutter.
+        if _PYVISTA and self.plotter is not None:
+            try:
+                self.plotter.clear()
+                self.plotter.hide_axes()
+            except Exception:
+                pass
         if hasattr(self, "_empty"):
             self._empty.show()

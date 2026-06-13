@@ -446,6 +446,13 @@ def pk_flutter_analysis(span: float, root_chord: float, tip_chord: float,
     prev_g = [None, None]
     min_g_per_mode = [0.0, 0.0]  # track most negative damping
 
+    # Defaults so the extraction below never hits unbound locals when the
+    # very first iteration bails out on a singular mass matrix.
+    lam1 = complex(omega_ratio_sq, 0.0)
+    lam2 = complex(1.0, 0.0)
+    Ae11 = complex(omega_ratio_sq, 0.0); Ae12 = complex(0.0, 0.0)
+    Ae21 = complex(0.0, 0.0); Ae22 = complex(1.0, 0.0)
+
     # Start from small positive velocity to avoid k → ∞
     V_start = max(dV, 1.0)
 
@@ -570,32 +577,20 @@ def pk_flutter_analysis(span: float, root_chord: float, tip_chord: float,
                 A_m_21 = complex(-a * k_sq, 0)
                 A_m_22 = complex((1.0/8.0 + a*a) * k_sq, 0)
 
-                # Total aero contribution: [A_total] = [A_k] + [A_d] + [A_m]
-                # These multiply 1/μ in the eigenvalue equation
-                At11 = A_k_11 + A_d_11 + A_m_11
-                At12 = A_k_12 + A_d_12 + A_m_12
-                At21 = A_k_21 + A_d_21 + A_m_21
-                At22 = A_k_22 + A_d_22 + A_m_22
-
                 # Effective matrix: [K_struct + K_aero/μ] - λ·[M_struct + M_aero/μ]
                 # Rearranging into standard A·q = λ·q:
-                # [M_eff]⁻¹[K_eff]·q = λ·q  with  λ = (ω/ω_α)²
+                # [M_eff]⁻¹[K_eff]·q = λ·q  with  λ = (ω/ω_α)²·(1 + j·g)
                 #
-                # M_eff = [M_struct + apparent_mass_aero/μ]
+                # M_eff = [M_struct + apparent_mass_aero/μ]   (A_m only)
                 # K_eff = [K_struct + aero_stiffness/μ + aero_damping/μ]
-                #
-                # For the p-k method we solve:
-                #   det | K_total - λ·M_total | = 0
-                # where K_total includes aero stiffness + damping (at assumed k)
-                # and M_total includes structural + apparent mass
 
-                Me11 = complex(M11, 0) + At11 * inv_mu
-                Me12 = complex(M12, 0) + At12 * inv_mu
-                Me21 = complex(M21, 0) + At21 * inv_mu
-                Me22 = complex(M22, 0) + At22 * inv_mu
+                Me11 = complex(M11, 0) + A_m_11 * inv_mu
+                Me12 = complex(M12, 0) + A_m_12 * inv_mu
+                Me21 = complex(M21, 0) + A_m_21 * inv_mu
+                Me22 = complex(M22, 0) + A_m_22 * inv_mu
 
                 Ke11 = complex(K11, 0) + (A_k_11 + A_d_11) * inv_mu
-                Ke12 = complex(K12 if 'K12' in dir() else 0.0, 0) + (A_k_12 + A_d_12) * inv_mu
+                Ke12 = complex(0.0, 0) + (A_k_12 + A_d_12) * inv_mu
                 Ke21 = complex(0.0, 0) + (A_k_21 + A_d_21) * inv_mu
                 Ke22 = complex(K22, 0) + (A_k_22 + A_d_22) * inv_mu
 
@@ -619,10 +614,12 @@ def pk_flutter_analysis(span: float, root_chord: float, tip_chord: float,
 
                 lam1, lam2 = _solve_2x2_eigenvalues(Ae11, Ae12, Ae21, Ae22)
 
-                # λ = (ω/ω_α)²  ⇒  ω = ω_α·√λ
-                # Extract ω from eigenvalue
-                sqrt_lam = cmath.sqrt(lam1 if i_mode == 0 else lam2)
-                omega_new = abs(sqrt_lam) * omega_a
+                # λ = (ω/ω_α)²·(1 + j·g)  ⇒  ω = ω_α·√(Re λ)
+                lam_iter = lam1 if i_mode == 0 else lam2
+                re_lam = lam_iter.real
+                if re_lam <= 0:
+                    break
+                omega_new = math.sqrt(re_lam) * omega_a
 
                 if omega_new <= 0:
                     break
@@ -635,15 +632,19 @@ def pk_flutter_analysis(span: float, root_chord: float, tip_chord: float,
                 k_current = 0.7 * k_current + 0.3 * k_new  # relaxation
 
             # ── Extract damping and frequency from converged eigenvalue ──
+            # k-method convention: λ = (ω/ω_α)²·(1 + j·g), so
+            #   ω = ω_α·√(Re λ)   and   g = Im λ / Re λ
+            # (required structural damping; flutter when g crosses 0 upward)
             lam_use = lam1 if i_mode == 0 else lam2
-            p_complex = cmath.sqrt(lam_use) * omega_a  # p = σ + jω
-
-            omega_result = abs(p_complex.imag) if abs(p_complex.imag) > 0 else abs(p_complex)
-            sigma_result = p_complex.real
+            re_lam = lam_use.real
+            if re_lam > 1e-12:
+                omega_result = math.sqrt(re_lam) * omega_a
+                g_damping = lam_use.imag / re_lam
+            else:
+                omega_result = 0.0
+                g_damping = 0.0
 
             freq_hz = omega_result / (2.0 * math.pi) if omega_result > 0 else 0.0
-            g_damping = (2.0 * sigma_result / omega_result
-                         if omega_result > 1e-10 else 0.0)
 
             eigenvalues.append((g_damping, freq_hz, omega_result))
 

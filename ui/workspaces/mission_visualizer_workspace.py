@@ -46,9 +46,17 @@ try:
     from visualization.mission.recovery_visualizer import RecoveryVisualizer
     from visualization.mission.altitude_reference import AltitudeReferenceSystem
     from visualization.mission.flight_envelope import FlightEnvelope, estimate_landing
+    from visualization.mission.flight_effects import (
+        FlightEffects, ForceVectors, EventFlags)
     _OVERLAYS_OK = True
 except Exception:
     _OVERLAYS_OK = False
+
+try:
+    from visualization.mission.rocket_mesh import build_rocket_mesh
+    _ROCKET_MESH_OK = True
+except Exception:
+    _ROCKET_MESH_OK = False
 
 logger = logging.getLogger("K2.MissionViz")
 
@@ -62,6 +70,24 @@ _PHASE_COLORS = {
     "Landed":         "#3fb950",
     "Timeout":        "#f85149",
     "Terminated":     "#f85149",
+}
+
+# Categorical phase coloring for the "Flight Phase" trail mode
+_PHASE_INDEX = {
+    "Pre-Launch": 0, "Ignition": 1, "Boost": 1, "Coast": 2, "Apogee": 3,
+    "Drogue Descent": 4, "Main Descent": 5, "Landed": 6,
+}
+_PHASE_CMAP = ["#58a6ff", "#ffa657", "#7ee787", "#f0883e",
+               "#79c0ff", "#56d364", "#3fb950"]
+
+# Events that get a 3D flag marker on the trajectory
+_FLAG_EVENTS = {
+    "motor_burnout": ("Burnout",  "#ffa657"),
+    "max_q":         ("Max-Q",    "#d29922"),
+    "apogee":        ("Apogee",   "#f0883e"),
+    "drogue_deploy": ("Drogue",   "#79c0ff"),
+    "main_deploy":   ("Main",     "#56d364"),
+    "landing":       ("Landing",  "#3fb950"),
 }
 
 _EVENT_LABELS = {
@@ -132,7 +158,8 @@ class MissionVisualizerWorkspace(QWidget):
     simulation runs, then enters replay mode when the flight finishes.
     """
 
-    _CAMERA_MODES = ["Chase", "Launch Pad", "Side View", "FPV", "Free", "Recovery"]
+    _CAMERA_MODES = ["Chase", "Launch Pad", "Side View", "FPV", "Onboard",
+                     "Orbit", "Free", "Recovery"]
     _TRAIL_MODES  = ["Mach", "Altitude", "Velocity", "Flight Phase"]
 
     # Rocket model drawn this many times real size so it stays visible at altitude
@@ -149,10 +176,15 @@ class MissionVisualizerWorkspace(QWidget):
         self._failure_active  = False
 
         # Trail buffers (capped at 100k points)
-        self._trail_pts  = deque(maxlen=100_000)
-        self._trail_mach = deque(maxlen=100_000)
-        self._trail_alt  = deque(maxlen=100_000)
-        self._trail_vel  = deque(maxlen=100_000)
+        self._trail_pts    = deque(maxlen=100_000)
+        self._trail_mach   = deque(maxlen=100_000)
+        self._trail_alt    = deque(maxlen=100_000)
+        self._trail_vel    = deque(maxlen=100_000)
+        self._trail_pitch  = deque(maxlen=100_000)
+        self._trail_yaw    = deque(maxlen=100_000)
+        self._trail_thrust = deque(maxlen=100_000)
+        self._trail_drag   = deque(maxlen=100_000)
+        self._trail_phase  = deque(maxlen=100_000)   # phase index (ints)
 
         # Downsampled graph data
         self._g_time  = deque(maxlen=5_000)
@@ -185,19 +217,34 @@ class MissionVisualizerWorkspace(QWidget):
         self._replay_mode       = False
         self._replay_index      = 0
         self._replay_is_playing = False
-        self._replay_pts   = []
-        self._replay_mach  = []
-        self._replay_alt   = []
-        self._replay_vel   = []
-        self._replay_times = []
+        self._replay_pts    = []
+        self._replay_mach   = []
+        self._replay_alt    = []
+        self._replay_vel    = []
+        self._replay_times  = []
+        self._replay_pitch  = []
+        self._replay_yaw    = []
+        self._replay_thrust = []
+        self._replay_drag   = []
+        self._replay_phase  = []
 
         # Scene overlays (recovery / altitude reference / flight envelope)
         self._recovery   = None
         self._alt_ref    = None
         self._envelope   = None
+        self._effects    = None
+        self._vectors    = None
+        self._flags      = None
+        self._hud_actor  = None
         self._show_alt_planes = True
         self._show_scalebar   = False
         self._show_envelope   = True
+        self._show_effects    = True
+        self._show_vectors    = False
+        self._show_flags      = True
+        self._show_hud        = True
+        self._orbit_t0        = perf_counter()   # wall-clock base for Orbit cam
+        self._max_thrust_seen = 1.0              # for thrust_frac normalization
 
         # Mission capture (positions/times grabbed live, reused in replay)
         self._apogee_xyz   = None
@@ -560,6 +607,22 @@ class MissionVisualizerWorkspace(QWidget):
         self._chk_envelope.toggled.connect(self._on_toggle_envelope)
         lay.addWidget(self._chk_envelope)
 
+        self._chk_effects = self._styled_check("Effects", True)
+        self._chk_effects.toggled.connect(self._on_toggle_effects)
+        lay.addWidget(self._chk_effects)
+
+        self._chk_vectors = self._styled_check("Vectors", False)
+        self._chk_vectors.toggled.connect(self._on_toggle_vectors)
+        lay.addWidget(self._chk_vectors)
+
+        self._chk_flags = self._styled_check("Flags", True)
+        self._chk_flags.toggled.connect(self._on_toggle_flags)
+        lay.addWidget(self._chk_flags)
+
+        self._chk_hud = self._styled_check("HUD", True)
+        self._chk_hud.toggled.connect(self._on_toggle_hud)
+        lay.addWidget(self._chk_hud)
+
         lay.addWidget(self._styled_label("Target:"))
         self._spin_target = self._styled_spin(0, 50000, 0, " m")
         self._spin_target.editingFinished.connect(self._on_envelope_config_changed)
@@ -728,6 +791,23 @@ class MissionVisualizerWorkspace(QWidget):
             except Exception as exc:
                 logger.warning(f"Overlay init failed: {exc}")
                 self._recovery = self._alt_ref = self._envelope = None
+            try:
+                self._effects = FlightEffects(p, vis_scale=self._VIS_SCALE)
+                self._vectors = ForceVectors(p, vis_scale=self._VIS_SCALE)
+                self._flags   = EventFlags(p)
+                self._vectors.set_visible(self._show_vectors)
+            except Exception as exc:
+                logger.warning(f"Effects init failed: {exc}")
+                self._effects = self._vectors = self._flags = None
+
+        # In-view HUD (alpha / Mach / q) — one text actor, updated at 10 Hz
+        try:
+            self._hud_actor = p.add_text(
+                "", position="upper_left", font_size=9, color="#7ee787",
+                name="hud", font="courier")
+            self._hud_actor.SetVisibility(self._show_hud)
+        except Exception:
+            self._hud_actor = None
 
         try:
             p.enable_anti_aliasing()
@@ -740,7 +820,11 @@ class MissionVisualizerWorkspace(QWidget):
 
     def _ensure_rocket_actor(self):
         """Build the rocket mesh ONCE (real size at origin). Pose set per frame
-        via cheap VTK actor transforms — no geometry regen each frame."""
+        via cheap VTK actor transforms — no geometry regen each frame.
+
+        Uses the actual design geometry (nose shape / tubes / transitions /
+        fins / nozzle, vertex-colored) when an assembly exists on the engine;
+        falls back to the generic cylinder+cone otherwise."""
         if not self._plotter:
             return
         key = (round(self._rocket_length, 4), round(self._rocket_diameter, 4))
@@ -752,6 +836,30 @@ class MissionVisualizerWorkspace(QWidget):
             except Exception:
                 pass
             self._actor_rocket = None
+
+        self._rocket_is_assembly = False
+        asm = getattr(self.engine, "_assembly", None)
+        if _ROCKET_MESH_OK and asm is not None:
+            try:
+                built = build_rocket_mesh(asm)
+            except Exception as exc:
+                logger.debug(f"assembly rocket mesh failed: {exc}")
+                built = None
+            if built is not None:
+                mesh, total_len, _ = built
+                try:
+                    self._actor_rocket = self._plotter.add_mesh(
+                        mesh, scalars="rgb", rgb=True, name="rocket",
+                        smooth_shading=True, ambient=0.35, diffuse=0.65,
+                        show_scalar_bar=False,
+                    )
+                    self._rocket_dims_key = key
+                    self._rocket_is_assembly = True
+                    self._rocket_color = None
+                    return
+                except Exception as exc:
+                    logger.debug(f"assembly rocket actor error: {exc}")
+                    self._actor_rocket = None
 
         L = max(0.5, self._rocket_length)
         D = max(0.05, self._rocket_diameter)
@@ -774,25 +882,33 @@ class MissionVisualizerWorkspace(QWidget):
         except Exception as exc:
             logger.debug(f"Rocket build error: {exc}")
 
-    def _update_rocket_transform(self, x, y, z, pitch):
-        """Cheap per-frame pose update: scale + tilt + position + colour."""
+    def _update_rocket_transform(self, x, y, z, pitch, yaw=0.0):
+        """Cheap per-frame pose update: scale + tilt + yaw + position + colour."""
         self._ensure_rocket_actor()
         a = self._actor_rocket
         if a is None:
             return
         tilt_deg = math.degrees(math.pi / 2.0 - max(0.0, min(math.pi, pitch)))
+        # VTK applies orientation as Rz·Rx·Ry: body tilts about Y (pitch),
+        # then the tilted axis swings about world Z (yaw) — matches the
+        # engine's thrust direction (cosθcosψ, cosθsinψ, sinθ).
+        yaw_deg = math.degrees(yaw)
         try:
             a.SetScale(self._VIS_SCALE)
-            a.SetOrientation(0.0, tilt_deg, 0.0)
+            a.SetOrientation(0.0, tilt_deg, yaw_deg)
             a.SetPosition(x, y, z)
-            color = (0.973, 0.318, 0.286) if self._failure_active else (0.345, 0.651, 1.0)
-            if color != getattr(self, "_rocket_color", None):
-                a.GetProperty().SetColor(*color)
-                self._rocket_color = color
+            # Vertex-colored assembly mesh ignores the actor property color
+            # (failure is still indicated by the red failure sphere).
+            if not getattr(self, "_rocket_is_assembly", False):
+                color = (0.973, 0.318, 0.286) if self._failure_active else (0.345, 0.651, 1.0)
+                if color != getattr(self, "_rocket_color", None):
+                    a.GetProperty().SetColor(*color)
+                    self._rocket_color = color
         except Exception as exc:
             logger.debug(f"Rocket transform error: {exc}")
 
-    def _rebuild_trail_actor(self, pts, mach_arr, alt_arr, vel_arr):
+    def _rebuild_trail_actor(self, pts, mach_arr, alt_arr, vel_arr,
+                             phase_arr=None):
         if not self._plotter or len(pts) < 2:
             return
         if self._actor_trail is not None:
@@ -806,6 +922,10 @@ class MissionVisualizerWorkspace(QWidget):
         mach_arr = np.asarray(mach_arr, dtype=float)
         alt_arr  = np.asarray(alt_arr, dtype=float)
         vel_arr  = np.asarray(vel_arr, dtype=float)
+        if phase_arr is not None and len(phase_arr) == len(pts):
+            phase_np = np.asarray(phase_arr, dtype=float)
+        else:
+            phase_np = None
         n = len(pts_arr)
 
         # Decimate to the quality-mode point cap for rendering
@@ -816,6 +936,8 @@ class MissionVisualizerWorkspace(QWidget):
             mach_arr = mach_arr[::step]
             alt_arr  = alt_arr[::step]
             vel_arr  = vel_arr[::step]
+            if phase_np is not None:
+                phase_np = phase_np[::step]
             n = len(pts_arr)
 
         if n < 2:
@@ -837,6 +959,10 @@ class MissionVisualizerWorkspace(QWidget):
         elif mode == "Velocity":
             scalars = vel_arr
             cmap, clim = "hot", [0.0, float(vel_arr.max()) + 1.0]
+        elif mode == "Flight Phase" and phase_np is not None:
+            # Categorical: one distinct color per flight phase
+            scalars = phase_np
+            cmap, clim = _PHASE_CMAP, [-0.5, len(_PHASE_CMAP) - 0.5]
         elif mode == "Flight Phase":
             scalars = mach_arr
             cmap, clim = "cool", [0.0, 2.0]
@@ -887,7 +1013,7 @@ class MissionVisualizerWorkspace(QWidget):
         except Exception:
             pass
 
-    def _apply_camera(self, x, y, z, pitch):
+    def _apply_camera(self, x, y, z, pitch, yaw=0.0):
         """Compute the camera *target* pose. Actual camera eases toward it in
         _ease_camera so motion is cinematic rather than snapping each frame."""
         mode = self._camera_mode
@@ -913,6 +1039,22 @@ class MissionVisualizerWorkspace(QWidget):
             d = rsize * 0.6
             pos = (x - math.cos(pitch) * d, y, z - math.sin(pitch) * d)
             foc = (x + math.cos(pitch) * 300, y, z + math.sin(pitch) * 300)
+        elif mode == "Onboard":
+            # Ride just behind the nose, looking out along the body axis
+            cp = math.cos(pitch)
+            ax = (cp * math.cos(yaw), cp * math.sin(yaw), math.sin(pitch))
+            nose = rsize * 1.05
+            back = rsize * 0.9
+            pos = (x + ax[0] * nose - back * 0.35,
+                   y + ax[1] * nose - back * 0.35,
+                   z + ax[2] * nose + back * 0.25)
+            foc = (x + ax[0] * 2000, y + ax[1] * 2000, z + ax[2] * 2000)
+        elif mode == "Orbit":
+            # Slow cinematic orbit around the rocket (wall-clock driven)
+            ang = (perf_counter() - self._orbit_t0) * 0.25
+            d = rsize * 4.5
+            pos = (x + d * math.cos(ang), y + d * math.sin(ang), z + d * 0.3)
+            foc = (x, y, z)
         elif mode == "Recovery":
             d = rsize * 4.0
             pos = (x + d * 0.3, y + d * 0.3, z + d)
@@ -965,6 +1107,11 @@ class MissionVisualizerWorkspace(QWidget):
             else:
                 self._render_live_scene()
 
+        # Orbit camera moves on wall-clock even when the scene is static
+        if self._camera_mode == "Orbit" and getattr(self, "_last_pose", None):
+            px, py, pz, ppitch, pyaw = self._last_pose
+            self._apply_camera(px, py, pz, ppitch, pyaw)
+
         cam_moved = self._ease_camera()
 
         if dirty or cam_moved:
@@ -989,8 +1136,11 @@ class MissionVisualizerWorkspace(QWidget):
         if s is None:
             return
         pitch = getattr(s, 'pitch', math.pi / 2)
+        yaw   = getattr(s, 'yaw', 0.0)
+        x, y, z = s.x_position, s.y_position, s.altitude
+        self._last_pose = (x, y, z, pitch, yaw)
 
-        self._update_rocket_transform(s.x_position, s.y_position, s.altitude, pitch)
+        self._update_rocket_transform(x, y, z, pitch, yaw)
 
         # Trail: rebuild throttled (every ~1s of render ticks, or while short)
         self._trail_rebuild_counter += 1
@@ -1000,18 +1150,36 @@ class MissionVisualizerWorkspace(QWidget):
                 self._rebuild_trail_actor(
                     list(self._trail_pts), list(self._trail_mach),
                     list(self._trail_alt), list(self._trail_vel),
+                    list(self._trail_phase),
                 )
 
         if self._camera_mode != "Free":
-            self._apply_camera(s.x_position, s.y_position, s.altitude, pitch)
+            self._apply_camera(x, y, z, pitch, yaw)
 
         if s.sim_phase in ("Landed", "Terminated") and self._actor_landing is None:
-            self._show_landing_marker(s.x_position, s.y_position)
+            self._show_landing_marker(x, y)
 
         descent = abs(s.velocity) if s.velocity < 0 else 0.0
-        self._update_recovery(s.x_position, s.y_position, s.altitude,
-                              s.sim_time, descent)
-        self._ensure_alt_reference(s.altitude)
+        self._update_recovery(x, y, z, s.sim_time, descent)
+        self._ensure_alt_reference(z)
+
+        # Flight effects (flame / smoke / Mach cone / dust)
+        if self._effects and self._show_effects:
+            thrust_frac = s.thrust / self._max_thrust_seen \
+                if self._max_thrust_seen > 0 else 0.0
+            self._effects.update(
+                x, y, z, pitch, yaw, thrust_frac, s.mach_number, s.sim_time,
+                self._rocket_length, self._rocket_diameter,
+                landed=(s.sim_phase == "Landed"),
+            )
+
+        # Force vectors (thrust / velocity / drag)
+        if self._vectors and self._show_vectors:
+            vel_vec = (getattr(s, 'velocity_x', 0.0),
+                       getattr(s, 'velocity_y', 0.0),
+                       getattr(s, 'velocity_z', 0.0))
+            self._vectors.update(x, y, z, pitch, yaw, vel_vec,
+                                 s.thrust, s.drag, self._rocket_length)
 
     def _record_frame_timing(self, t0):
         now = perf_counter()
@@ -1089,6 +1257,13 @@ class MissionVisualizerWorkspace(QWidget):
         self._trail_mach.append(s.mach_number)
         self._trail_alt.append(s.altitude)
         self._trail_vel.append(abs(s.velocity))
+        self._trail_pitch.append(getattr(s, 'pitch', math.pi / 2))
+        self._trail_yaw.append(getattr(s, 'yaw', 0.0))
+        self._trail_thrust.append(s.thrust)
+        self._trail_drag.append(s.drag)
+        self._trail_phase.append(_PHASE_INDEX.get(s.sim_phase, 0))
+        if s.thrust > self._max_thrust_seen:
+            self._max_thrust_seen = s.thrust
 
         # Downsample graph data (every 5 ticks)
         if self._tick_counter % 5 == 0:
@@ -1146,6 +1321,27 @@ class MissionVisualizerWorkspace(QWidget):
         else:
             self._rd_recovery.set_value(str(s.flight_computer_state))
 
+        # In-view HUD (10 Hz, single text actor — SetInput, never re-add)
+        if self._hud_actor is not None and self._show_hud:
+            vx = getattr(s, 'velocity_x', 0.0)
+            vy = getattr(s, 'velocity_y', 0.0)
+            vz = getattr(s, 'velocity_z', 0.0)
+            hspeed = math.hypot(vx, vy)
+            speed = math.sqrt(vx * vx + vy * vy + vz * vz)
+            if speed > 1.0:
+                aoa = math.degrees(
+                    getattr(s, 'pitch', math.pi / 2) - math.atan2(vz, hspeed))
+            else:
+                aoa = 0.0
+            hud = (f"T+{s.sim_time:7.2f} s   {s.sim_phase}\n"
+                   f"ALT {s.altitude:8.1f} m    VEL {abs(s.velocity):7.1f} m/s\n"
+                   f"MACH {s.mach_number:5.2f}      AoA {aoa:+6.2f} deg\n"
+                   f"Q   {s.dynamic_pressure:8.0f} Pa   THR {s.thrust:7.0f} N")
+            try:
+                self._hud_actor.SetInput(hud)
+            except Exception:
+                pass
+
         self._panel_ms = (perf_counter() - t0) * 1000.0
         if self._show_stats:
             self._update_stats_label()
@@ -1187,9 +1383,23 @@ class MissionVisualizerWorkspace(QWidget):
 
         # Clear buffers
         for buf in (self._trail_pts, self._trail_mach, self._trail_alt, self._trail_vel,
+                    self._trail_pitch, self._trail_yaw, self._trail_thrust,
+                    self._trail_drag,
+                    self._trail_phase,
                     self._g_time, self._g_alt, self._g_vel, self._g_mach,
                     self._g_accel, self._g_dynq):
             buf.clear()
+
+        # Reset effects / flags / vectors + thrust normalization
+        self._max_thrust_seen = 1.0
+        self._orbit_t0 = perf_counter()
+        self._last_pose = None
+        if self._effects:
+            self._effects.reset()
+        if self._flags:
+            self._flags.clear()
+        if self._vectors:
+            self._vectors.reset()
 
         self._events_list.clear()
         self._timeline_list.clear()
@@ -1298,6 +1508,13 @@ class MissionVisualizerWorkspace(QWidget):
             if self._recovery:
                 self._recovery.on_landing(t)
 
+        # 3D flag marker on the trajectory at the event position
+        if (self._flags and self._show_flags and s is not None
+                and event_name in _FLAG_EVENTS):
+            flbl, fcol = _FLAG_EVENTS[event_name]
+            self._flags.add(event_name, flbl, fcol,
+                            (s.x_position, s.y_position, s.altitude))
+
         label_color = _EVENT_LABELS.get(event_name)
         if not label_color:
             return
@@ -1385,6 +1602,37 @@ class MissionVisualizerWorkspace(QWidget):
         self._show_envelope = on
         if self._envelope:
             self._envelope.set_visible(on)
+        self._safe_render()
+
+    def _on_toggle_effects(self, on):
+        self._show_effects = on
+        if self._effects:
+            self._effects.set_visible(on)
+        self._needs_3d_update = True
+        self._safe_render()
+
+    def _on_toggle_vectors(self, on):
+        self._show_vectors = on
+        if self._vectors:
+            self._vectors.set_visible(on)
+        self._needs_3d_update = True
+        self._safe_render()
+
+    def _on_toggle_flags(self, on):
+        self._show_flags = on
+        if self._flags:
+            self._flags.set_visible(on)
+        self._safe_render()
+
+    def _on_toggle_hud(self, on):
+        self._show_hud = on
+        if self._hud_actor is not None:
+            try:
+                self._hud_actor.SetVisibility(on)
+                if not on:
+                    self._hud_actor.SetInput("")
+            except Exception:
+                pass
         self._safe_render()
 
     def _apply_quality(self, mode):
@@ -1613,10 +1861,15 @@ class MissionVisualizerWorkspace(QWidget):
     def _enter_replay_mode(self):
         if not self._trail_pts:
             return
-        self._replay_pts  = list(self._trail_pts)
-        self._replay_mach = list(self._trail_mach)
-        self._replay_alt  = list(self._trail_alt)
-        self._replay_vel  = list(self._trail_vel)
+        self._replay_pts    = list(self._trail_pts)
+        self._replay_mach   = list(self._trail_mach)
+        self._replay_alt    = list(self._trail_alt)
+        self._replay_vel    = list(self._trail_vel)
+        self._replay_pitch  = list(self._trail_pitch)
+        self._replay_yaw    = list(self._trail_yaw)
+        self._replay_thrust = list(self._trail_thrust)
+        self._replay_drag   = list(self._trail_drag)
+        self._replay_phase  = list(self._trail_phase)
 
         try:
             self._replay_times = self.sim_engine.history.get_values("time") or []
@@ -1634,6 +1887,7 @@ class MissionVisualizerWorkspace(QWidget):
             self._rebuild_trail_actor(
                 self._replay_pts, self._replay_mach,
                 self._replay_alt, self._replay_vel,
+                self._replay_phase,
             )
 
         self._replay_slider.setRange(0, n - 1)
@@ -1656,14 +1910,17 @@ class MissionVisualizerWorkspace(QWidget):
 
         idx = max(0, min(self._replay_index, len(self._replay_pts) - 1))
         x, y, z = self._replay_pts[idx]
+        pitch = self._replay_pitch[idx] if idx < len(self._replay_pitch) else math.pi / 2
+        yaw   = self._replay_yaw[idx]   if idx < len(self._replay_yaw)   else 0.0
+        self._last_pose = (x, y, z, pitch, yaw)
 
-        self._update_rocket_transform(x, y, z, math.pi / 2)
+        self._update_rocket_transform(x, y, z, pitch, yaw)
 
         # Follow the rocket only while actively playing. When paused/seeking the
         # camera is released so the user can freely orbit + zoom out to inspect
         # the full envelope and altitude scale.
         if self._camera_mode != "Free" and self._replay_is_playing:
-            self._apply_camera(x, y, z, math.pi / 2)
+            self._apply_camera(x, y, z, pitch, yaw)
 
         # Time label + recovery animation synced to the replay frame
         frame_t = 0.0
@@ -1672,6 +1929,32 @@ class MissionVisualizerWorkspace(QWidget):
         self._replay_time_lbl.setText(f"T+{frame_t:.2f}s")
         descent = self._replay_vel[idx] if idx < len(self._replay_vel) else 0.0
         self._update_recovery(x, y, z, frame_t, descent)
+
+        # Flame + Mach cone track the replay frame (smoke/dust live-only)
+        if self._effects and self._show_effects:
+            thr = self._replay_thrust[idx] if idx < len(self._replay_thrust) else 0.0
+            mach = self._replay_mach[idx] if idx < len(self._replay_mach) else 0.0
+            thrust_frac = thr / self._max_thrust_seen if self._max_thrust_seen > 0 else 0.0
+            self._effects.update(x, y, z, pitch, yaw, thrust_frac, mach,
+                                 frame_t, self._rocket_length,
+                                 self._rocket_diameter, landed=False)
+
+        # Force vectors from the replay frame (velocity by finite difference)
+        if self._vectors and self._show_vectors:
+            j = min(idx + 1, len(self._replay_pts) - 1)
+            i0 = max(0, idx - 1) if j == idx else idx
+            dt = ((self._replay_times[j] - self._replay_times[i0])
+                  if (self._replay_times and j < len(self._replay_times)
+                      and j > i0) else 0.0)
+            if dt > 1e-6:
+                p1, p0 = self._replay_pts[j], self._replay_pts[i0]
+                vel_vec = tuple((p1[k] - p0[k]) / dt for k in range(3))
+            else:
+                vel_vec = (0.0, 0.0, 0.0)
+            thr = self._replay_thrust[idx] if idx < len(self._replay_thrust) else 0.0
+            drg = self._replay_drag[idx] if idx < len(self._replay_drag) else 0.0
+            self._vectors.update(x, y, z, pitch, yaw, vel_vec, thr, drg,
+                                 self._rocket_length)
 
         self._replay_slider.blockSignals(True)
         self._replay_slider.setValue(idx)

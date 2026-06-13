@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>K2 Cinematic View</title>
+<style>
+  html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden;
+               background:#05070d;
+               font-family:'Bahnschrift','D-DIN','Segoe UI',system-ui,sans-serif;
+               user-select:none; touch-action:none; }
+  #scene { position:absolute; inset:0; }
+
+  .hud { position:absolute; color:#fff; pointer-events:none; z-index:10; }
+
+  /* ── Camera switcher (top-right, minimal) ───────────────────── */
+  #cams { top:16px; right:20px; display:flex; gap:18px; pointer-events:auto; }
+  #cams button {
+    background:none; border:none; padding:4px 0; cursor:pointer;
+    color:rgba(255,255,255,0.45); font-family:inherit;
+    font-size:11px; font-weight:600; letter-spacing:2.5px;
+    border-bottom:2px solid transparent; transition:all 150ms ease; }
+  #cams button:hover  { color:rgba(255,255,255,0.85); }
+  #cams button.active { color:#fff; border-bottom-color:#fff; }
+
+  /* ── Event banner ───────────────────────────────────────────── */
+  #banner { top:42%; left:50%; transform:translate(-50%,-50%);
+            font-size:34px; font-weight:300; letter-spacing:14px;
+            color:#fff; opacity:0; transition:opacity 400ms ease;
+            text-transform:uppercase; pointer-events:none; }
+
+  #vignette { position:absolute; inset:0; pointer-events:none; z-index:5;
+              background:radial-gradient(ellipse at center,
+                         transparent 65%, rgba(0,0,0,0.32) 100%); }
+
+  /* ── Bottom assembly: timeline + telemetry bar ──────────────── */
+  #bottombar { left:0; right:0; bottom:0;
+               background:linear-gradient(to top, rgba(2,4,8,0.88) 0%,
+                          rgba(2,4,8,0.62) 70%, transparent 100%);
+               padding-top:34px; }
+
+  /* Mission timeline ribbon */
+  #timeline { position:relative; height:30px; margin:0 6%; }
+  #timeline .tl-line { position:absolute; top:7px; left:0; right:0; height:1px;
+                       background:rgba(255,255,255,0.22); }
+  .tl-node { position:absolute; top:0; transform:translateX(-50%);
+             text-align:center; }
+  .tl-node i { display:block; width:9px; height:9px; margin:3px auto 5px;
+               border-radius:50%; border:1.5px solid rgba(255,255,255,0.45);
+               background:transparent; box-sizing:border-box;
+               transition:all 250ms ease; }
+  .tl-node span { font-size:9px; font-weight:600; letter-spacing:1.6px;
+                  color:rgba(255,255,255,0.40); white-space:nowrap; }
+  .tl-node.done i { background:#fff; border-color:#fff; }
+  .tl-node.done span { color:rgba(255,255,255,0.92); }
+
+  /* Telemetry bar */
+  #bar { display:flex; align-items:center; justify-content:space-between;
+         padding:10px 3% 16px; gap:24px; }
+
+  #readouts { display:flex; align-items:flex-end; gap:38px; }
+  .ro { min-width:120px; }
+  .ro-label { font-size:10px; font-weight:600; letter-spacing:2.5px;
+              color:rgba(255,255,255,0.45); margin-bottom:1px; }
+  .ro-value { font-size:40px; font-weight:300; line-height:1.05; color:#fff;
+              font-variant-numeric:tabular-nums; }
+  .ro-unit  { font-size:12px; font-weight:400; letter-spacing:1px;
+              color:rgba(255,255,255,0.45); margin-left:6px; }
+  .ro.small .ro-value { font-size:26px; }
+  .ro.small { min-width:88px; }
+  .ro .bar { height:2px; margin-top:6px; background:rgba(255,255,255,0.14); }
+  .ro .bar > div { height:100%; width:0%; background:#fff;
+                   transition:width 120ms linear; }
+
+  #clockphase { text-align:center; flex:0 0 auto; }
+  #met { font-size:38px; font-weight:300; letter-spacing:2px;
+         font-variant-numeric:tabular-nums; color:#fff; }
+  #phase { margin-top:2px; font-size:11px; font-weight:600; letter-spacing:3px;
+           text-transform:uppercase; color:rgba(255,255,255,0.55); }
+  #phase.boost  { color:#ffb86b; }
+  #phase.chute  { color:#9fe8a8; }
+  #phase.landed { color:#7ee787; }
+
+  #graphs { display:flex; gap:10px; }
+  #graphs canvas { width:108px; height:54px; display:block; }
+
+  /* ── Replay controls ────────────────────────────────────────── */
+  #replay { display:none; align-items:center; gap:16px; margin:2px 6% 8px;
+            pointer-events:auto; }
+  #replay.visible { display:flex; }
+  #replay button {
+    background:none; border:none; padding:2px 0; cursor:pointer;
+    color:rgba(255,255,255,0.55); font-family:inherit;
+    font-size:11px; font-weight:600; letter-spacing:2px;
+    transition:color 150ms ease; white-space:nowrap; }
+  #replay button:hover { color:#fff; }
+  #rp-speeds { display:flex; gap:10px; }
+  #rp-speeds button.active { color:#fff; border-bottom:1.5px solid #fff; }
+  #rp-time { font-size:11px; font-weight:400; letter-spacing:1px;
+             color:rgba(255,255,255,0.55); font-variant-numeric:tabular-nums;
+             white-space:nowrap; }
+  #rp-scrub { flex:1; height:16px; position:relative; cursor:pointer; }
+  #rp-scrub::before { content:''; position:absolute; left:0; right:0; top:7px;
+                      height:2px; background:rgba(255,255,255,0.18); }
+  #rp-fill { position:absolute; left:0; top:7px; height:2px; width:0%;
+             background:#fff; }
+  #rp-dot { position:absolute; top:3px; left:0%; width:10px; height:10px;
+            margin-left:-5px; border-radius:50%; background:#fff; }
+  #rp-live { color:rgba(255,255,255,0.55); }
+  #rp-live::before { content:''; display:inline-block; width:7px; height:7px;
+                     border-radius:50%; background:#f85149; margin-right:6px;
+                     vertical-align:1px; }
+</style>
+</head>
+<body>
+  <div id="scene"></div>
+  <div id="vignette"></div>
+
+  <div id="cams" class="hud">
+    <button data-cam="chase" class="active">CHASE</button>
+    <button data-cam="pad">PAD</button>
+    <button data-cam="side">SIDE</button>
+    <button data-cam="orbit">ORBIT</button>
+    <button data-cam="onboard">ONBOARD</button>
+    <button id="env-btn" class="active" style="margin-left:14px;">ENV</button>
+  </div>
+
+  <div id="banner" class="hud"></div>
+
+  <div id="bottombar" class="hud">
+    <div id="replay">
+      <button id="rp-play">&#9654; REPLAY</button>
+      <div id="rp-scrub"><div id="rp-fill"></div><div id="rp-dot"></div></div>
+      <span id="rp-time">00:00 / 00:00</span>
+      <div id="rp-speeds">
+        <button data-spd="0.5">0.5&times;</button>
+        <button data-spd="1" class="active">1&times;</button>
+        <button data-spd="2">2&times;</button>
+        <button data-spd="4">4&times;</button>
+      </div>
+      <button id="rp-live">LIVE</button>
+    </div>
+    <div id="timeline">
+      <div class="tl-line"></div>
+      <div class="tl-node" id="tl-LIFTOFF"   style="left:4%"><i></i><span>LIFTOFF</span></div>
+      <div class="tl-node" id="tl-MAX-Q"     style="left:20%"><i></i><span>MAX-Q</span></div>
+      <div class="tl-node" id="tl-BURNOUT"   style="left:36%"><i></i><span>BURNOUT</span></div>
+      <div class="tl-node" id="tl-APOGEE"    style="left:52%"><i></i><span>APOGEE</span></div>
+      <div class="tl-node" id="tl-DROGUE"    style="left:68%"><i></i><span>DROGUE</span></div>
+      <div class="tl-node" id="tl-MAIN"      style="left:84%"><i></i><span>MAIN</span></div>
+      <div class="tl-node" id="tl-TOUCHDOWN" style="left:97%"><i></i><span>TOUCHDOWN</span></div>
+    </div>
+    <div id="bar">
+      <div id="readouts">
+        <div class="ro"><div class="ro-label">SPEED</div>
+          <div class="ro-value"><span id="v-vel">0</span><span class="ro-unit">M/S</span></div>
+          <div class="bar"><div id="b-vel"></div></div></div>
+        <div class="ro"><div class="ro-label">ALTITUDE</div>
+          <div class="ro-value"><span id="v-alt">0</span><span class="ro-unit">M</span></div>
+          <div class="bar"><div id="b-alt"></div></div></div>
+        <div class="ro small"><div class="ro-label">MACH</div>
+          <div class="ro-value"><span id="v-mach">0.00</span></div>
+          <div class="bar"><div id="b-mach"></div></div></div>
+        <div class="ro small"><div class="ro-label">THRUST</div>
+          <div class="ro-value"><span id="v-thrust">0</span><span class="ro-unit">N</span></div>
+          <div class="bar"><div id="b-thrust"></div></div></div>
+      </div>
+      <div id="clockphase">
+        <div id="met">T+ 00:00:00</div>
+        <div><span id="phase">Pre-Launch</span></div>
+      </div>
+      <div id="graphs">
+        <canvas id="g-alt"></canvas>
+        <canvas id="g-vel"></canvas>
+        <canvas id="g-mach"></canvas>
+        <canvas id="g-acc"></canvas>
+        <canvas id="g-q"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <script type="importmap">
+  { "imports": {
+      "three": "./vendor/three.module.js",
+      "three/addons/": "./vendor/jsm/"
+  } }
+  </script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -129,6 +129,11 @@ def extract_cfd_geometry(assembly) -> dict:
                 body_L += comp.length
                 z_cursor -= comp.length
 
+    # Nose-only / pure-cone geometry has no body tube, so body_r is still the
+    # fallback — use the nose base radius so the CFD reference area is correct.
+    if body_L <= 0:
+        body_r = nose_r
+
     # Pick the largest fin set (most aerodynamically significant)
     fin_data = max(fins, key=lambda f: f["height"]) if fins else {
         "count": 4, "height": body_r * 0.8,
@@ -151,6 +156,11 @@ def extract_cfd_geometry(assembly) -> dict:
 
     return {
         "length":       total_L,
+        # Body (max) diameter drives the CFD reference area. Provide it
+        # explicitly so SU2 normalises forces by the true body frontal area
+        # instead of guessing from the STL bounding box — which wrongly picks up
+        # the fin span on a finned rocket and inflates the reference area ~10×.
+        "max_diameter": 2.0 * body_r,
         "body_radius":  body_r,
         "nose_radius":  body_r,
         "nose_length":  nose_L,
@@ -169,49 +179,66 @@ def export_assembly_to_stl(assembly, output_path: Path) -> Path:
     """
     Build a watertight 3D surface of a K2 RocketAssembly and export to STL.
     Returns the path to the exported STL file.
+
+    The axisymmetric stack (nose + body tubes + transitions) is built as ONE
+    capped surface of revolution — closed at the nose apex and the aft base — so
+    it is watertight by construction. Previously each component was a separate
+    primitive (an *open* nose shell merged with a capped body cylinder), which
+    left the nose base ring as ~64 open boundary edges that ``fill_holes`` could
+    not close because the body cap sat inside it. Fins are added as closed solids
+    and boolean-unioned into the body.
     """
-    meshes = []
     total_len = assembly.total_length()
     if total_len <= 0:
         raise ValueError("Assembly has zero total length — cannot export geometry.")
 
-    z_cursor = total_len
-    last_r = 0.03
+    zs, rs = _assembly_profile(assembly)
+    if len(zs) < 2:
+        raise ValueError("No renderable axisymmetric geometry found in assembly.")
+    combined = _revolve_watertight(zs, rs)
 
+    # Fins: closed solids, unioned into the body so the result stays watertight.
+    fin_meshes: list = []
+    z_cursor = total_len
     for stage in assembly.stages:
         for comp in stage.children:
-            z_cursor, last_r = _component_to_mesh(comp, z_cursor, last_r, meshes)
+            if isinstance(comp, BodyTube):
+                z_base = z_cursor - comp.length
+                for child in comp.children:
+                    if isinstance(child, TrapezoidalFinSet):
+                        _fin_set_to_meshes(child, z_base, comp.outer_diameter_val / 2,
+                                           fin_meshes)
+            if isinstance(comp, TrapezoidalFinSet):
+                _fin_set_to_meshes(comp, z_cursor, _profile_radius_at(zs, rs, z_cursor),
+                                   fin_meshes)
+            z_cursor -= _component_axial_length(comp)
 
-    if not meshes:
-        raise ValueError("No renderable geometry found in assembly.")
+    # Fins are appended as individual closed solids. A boolean union with the
+    # body is unreliable here — the fin root lies exactly on the body surface
+    # (no volumetric overlap), which makes VTK's boolean collapse the mesh — so
+    # we merge instead. Each solid is closed (no open boundary), so the surface
+    # stays hole-free; the only artefact is coincident faces at the fin root,
+    # which the analytic gmsh path (geometry_dict) fuses properly anyway.
+    for fin in fin_meshes:
+        combined = combined.merge(fin.triangulate().clean())
+    combined = combined.clean(tolerance=1e-6).triangulate()
 
-    # Merge all sub-meshes
-    combined = meshes[0].triangulate().clean()
-    for m in meshes[1:]:
-        combined = combined.merge(m.triangulate().clean())
-
-    # Heal the mesh:
-    # 1. Clean duplicate points/faces
-    combined = combined.clean(tolerance=1e-6)
-    # 2. Fill any holes from open edges at component junctions
-    try:
-        combined = combined.fill_holes(hole_size=0.5)
-    except Exception:
-        pass
-    # 3. Re-clean after filling
-    combined = combined.clean(tolerance=1e-6)
-    combined = combined.triangulate()
-
-    # Check result
-    edges = combined.extract_feature_edges(
-        boundary_edges=True, non_manifold_edges=True,
-        feature_edges=False, manifold_edges=False
+    boundary = combined.extract_feature_edges(
+        boundary_edges=True, non_manifold_edges=False,
+        feature_edges=False, manifold_edges=False,
     )
-    if edges.n_cells > 0:
+    nonmanifold = combined.extract_feature_edges(
+        boundary_edges=False, non_manifold_edges=True,
+        feature_edges=False, manifold_edges=False,
+    )
+    if boundary.n_cells > 0:
         logger.warning(
-            f"STL has {edges.n_cells} open/non-manifold edges after healing. "
-            f"Mesh may not be perfectly watertight but will proceed."
-        )
+            f"STL has {boundary.n_cells} open boundary edges (holes) — not "
+            f"watertight.")
+    elif nonmanifold.n_cells > 0:
+        logger.info(
+            f"STL is hole-free; {nonmanifold.n_cells} non-manifold edges at "
+            f"fin/body joints (coincident faces) — fused analytically for CFD.")
     else:
         logger.info("STL is watertight.")
 
@@ -220,6 +247,113 @@ def export_assembly_to_stl(assembly, output_path: Path) -> Path:
     combined.save(str(output_path), binary=False)
     logger.info(f"Assembly exported to STL: {output_path}  ({output_path.stat().st_size:,} bytes)")
     return output_path
+
+
+def _component_axial_length(comp) -> float:
+    """Axial length a component consumes along the body axis."""
+    if isinstance(comp, NoseCone):
+        return comp.length + getattr(comp, "shoulder_length", 0.0)
+    if isinstance(comp, (BodyTube, Transition)):
+        return comp.length
+    return 0.0
+
+
+def _assembly_profile(assembly):
+    """Walk the stack nose→tail and return (zs, rs) of the outer mold line.
+
+    z runs from the nose tip (z = total_length) down to the base (z = 0). The
+    nose contributes a tip point at r=0 so the revolution closes to an apex.
+    """
+    z = assembly.total_length()
+    zs: list = []
+    rs: list = []
+    for stage in assembly.stages:
+        for comp in stage.children:
+            if isinstance(comp, NoseCone):
+                r = comp.diameter / 2
+                pz, pr = _ogive_profile(comp.length, r)   # pz: 0(base,r=R)→L(tip,r≈0)
+                for zz, rr in zip(pz[::-1], pr[::-1]):    # tip first so z descends
+                    zs.append(z - (comp.length - zz))
+                    rs.append(float(rr))
+                z -= comp.length
+                L_sh = getattr(comp, "shoulder_length", 0.0)
+                if L_sh > 0:                                # internal shoulder
+                    z -= L_sh
+            elif isinstance(comp, BodyTube):
+                r = comp.outer_diameter_val / 2
+                zs.append(z);            rs.append(r)
+                zs.append(z - comp.length); rs.append(r)
+                z -= comp.length
+            elif isinstance(comp, Transition):
+                zs.append(z);            rs.append(comp.fore_diameter / 2)
+                zs.append(z - comp.length); rs.append(comp.aft_diameter / 2)
+                z -= comp.length
+    return zs, rs
+
+
+def _profile_radius_at(zs, rs, z_query: float) -> float:
+    """Nearest profile radius at an axial station (for top-level fin roots)."""
+    if not zs:
+        return 0.03
+    return rs[min(range(len(zs)), key=lambda i: abs(zs[i] - z_query))]
+
+
+def _revolve_watertight(zs, rs, n_theta: int = 96) -> "pv.PolyData":
+    """Closed surface of revolution about Z for profile (zs, rs).
+
+    A profile point with r≈0 collapses to a single axis vertex (apex), so a
+    nose tip closes naturally; the first/last rings with r>0 are capped with a
+    centre-fan so open ends (e.g. the aft base) are sealed.
+    """
+    pts: list = []
+    rings: list = []          # (kind, base_index) per profile station
+    for z, r in zip(zs, rs):
+        if r <= 1e-9:
+            pts.append([0.0, 0.0, z])
+            rings.append(("point", len(pts) - 1))
+        else:
+            start = len(pts)
+            for j in range(n_theta):
+                t = 2.0 * math.pi * j / n_theta
+                pts.append([r * math.cos(t), r * math.sin(t), z])
+            rings.append(("ring", start))
+
+    faces: list = []
+
+    def ridx(i, j):
+        return rings[i][1] + (j % n_theta)
+
+    for i in range(len(zs) - 1):
+        ka, kb = rings[i][0], rings[i + 1][0]
+        if ka == "ring" and kb == "ring":
+            for j in range(n_theta):
+                faces += [4, ridx(i, j), ridx(i, j + 1), ridx(i + 1, j + 1), ridx(i + 1, j)]
+        elif ka == "point" and kb == "ring":
+            ap = rings[i][1]
+            for j in range(n_theta):
+                faces += [3, ap, ridx(i + 1, j), ridx(i + 1, j + 1)]
+        elif ka == "ring" and kb == "point":
+            bp = rings[i + 1][1]
+            for j in range(n_theta):
+                faces += [3, bp, ridx(i, j + 1), ridx(i, j)]
+        # point→point: degenerate axis segment, no surface
+
+    def cap(i, flip):
+        if rings[i][0] != "ring":
+            return
+        c = len(pts)
+        pts.append([0.0, 0.0, zs[i]])
+        for j in range(n_theta):
+            if flip:
+                faces.extend([3, c, ridx(i, j + 1), ridx(i, j)])
+            else:
+                faces.extend([3, c, ridx(i, j), ridx(i, j + 1)])
+
+    cap(0, True)                 # forward end (truncated nose, if any)
+    cap(len(zs) - 1, False)      # aft base
+
+    mesh = pv.PolyData(np.asarray(pts, dtype=float), np.asarray(faces))
+    return mesh.clean(tolerance=1e-9).triangulate()
 
 
 def _component_to_mesh(comp, z_top, parent_r, meshes):

@@ -31,7 +31,7 @@ from environment.atmosphere_model import Atmosphere
 from core.flight_phases import FlightPhase, PhaseManager
 from core.integrators import get_integrator
 from physics.aerodynamics import AeroModel
-from environment.wind_model import WindModel
+from environment.wind_model import WindModel, MultiLevelWindModel
 
 logger = logging.getLogger("K2.BatchSim")
 
@@ -63,6 +63,7 @@ class BatchSimConfig:
     # ── Mass ──────────────────────────────────────────────────────
     dry_mass: float = 0.0
     propellant_mass: float = 0.0
+    motor_dry_mass: float = 0.0
 
     # ── Stability / CG / CP ───────────────────────────────────────
     cg: float = 0.0
@@ -70,6 +71,7 @@ class BatchSimConfig:
     cp: float = 0.0
     cd: float = 0.45
     motor_position: float = 0.0
+    motor_length: float = 0.0
 
     # ── Motor ─────────────────────────────────────────────────────
     motor_designation: str = "None"
@@ -85,6 +87,8 @@ class BatchSimConfig:
     wind_speed: float = 0.0
     wind_direction: float = 0.0
     wind_gust_intensity: float = 0.0
+    wind_mode: str = "average"            # "average" | "multi_level"
+    wind_layers: list = field(default_factory=list)  # [(alt_m, speed_m_s, dir_deg)]
 
     # ── Recovery ──────────────────────────────────────────────────
     drogue_deploy_delay: float = 1.0
@@ -124,12 +128,14 @@ class BatchSimConfig:
             dry_mass=state.dry_mass,
             propellant_mass=getattr(state, "propellant_mass_initial",
                                     getattr(state, "propellant_mass", 0.0)),
+            motor_dry_mass=getattr(state, "motor_dry_mass", 0.0),
             # Stability
             cg=state.cg,
             dry_cg=getattr(state, "dry_cg", 0.0),
             cp=state.cp,
             cd=getattr(state, "cd", 0.45),
             motor_position=getattr(state, "motor_position", 0.0),
+            motor_length=getattr(state, "motor_length", 0.0),
             # Motor
             motor_designation=getattr(state, "motor_designation", "None"),
             motor_avg_thrust=getattr(state, "motor_avg_thrust", 0.0),
@@ -143,6 +149,8 @@ class BatchSimConfig:
             wind_speed=getattr(state, "wind_speed", 0.0),
             wind_direction=getattr(state, "wind_direction", 0.0),
             wind_gust_intensity=getattr(state, "wind_gust_intensity", 0.0),
+            wind_mode=getattr(state, "wind_mode", "average"),
+            wind_layers=[tuple(l) for l in getattr(state, "wind_layers", [])],
             # Recovery
             drogue_deploy_delay=getattr(state, "drogue_deploy_delay", 1.0),
             main_deploy_altitude=getattr(state, "main_deploy_altitude", 300.0),
@@ -199,11 +207,27 @@ def _build_thrust_curve(cfg: BatchSimConfig) -> List[tuple]:
     if bt <= 0:
         return []
 
-    ramp = bt * 0.1
+    # Rated impulse the curve must integrate to (so apogee isn't biased high).
+    total_impulse = cfg.motor_total_impulse if cfg.motor_total_impulse > 0 else avg_t * bt
+
+    # Trapezoid (0 → peak → plateau → 0) with 10% ramp/tail. Solve the plateau
+    # so the area equals total_impulse exactly:
+    #   area = 0.5·(1-ramp_frac)·bt·(max_t + plateau) = total_impulse
+    # The old code hard-coded plateau = avg_t, which over-delivered ~3.5%.
+    ramp_frac = 0.1
+    ramp = bt * ramp_frac
+    plateau = 2.0 * total_impulse / ((1.0 - ramp_frac) * bt) - max_t
+
+    if plateau < 0.0:
+        # Peak alone exceeds the impulse budget — fall back to a triangle whose
+        # area (0.5·max·bt) matches the rated impulse.
+        max_t = 2.0 * total_impulse / bt
+        return [(0.0, 0.0), (ramp, max_t), (bt, 0.0)]
+
     return [
         (0.0, 0.0),
         (ramp, max_t),
-        (bt - ramp, avg_t),
+        (bt - ramp, plateau),
         (bt, 0.0),
     ]
 
@@ -315,19 +339,26 @@ def run_batch_simulation(
 
     # ── Wind (proper pink-noise model, seeded for reproducibility) ─
     wind_seed = int(rng.integers(0, 2**31)) if seed is not None else None
-    wind_model = WindModel(
-        base_speed=config.wind_speed,
-        direction=config.wind_direction,
-        gust_intensity=config.wind_gust_intensity,
-        seed=wind_seed,
-    )
+    if config.wind_mode == "multi_level" and config.wind_layers:
+        wind_model = MultiLevelWindModel(
+            config.wind_layers,
+            turbulence_intensity=config.wind_gust_intensity,
+            seed=wind_seed,
+        )
+    else:
+        wind_model = WindModel(
+            base_speed=config.wind_speed,
+            direction=config.wind_direction,
+            gust_intensity=config.wind_gust_intensity,
+            seed=wind_seed,
+        )
 
     # ── Thrust curve ──────────────────────────────────────────────
     thrust_curve = _build_thrust_curve(config)
 
     # ── Initial 6DOF state vector ─────────────────────────────────
     launch_pitch = math.radians(config.launch_angle)
-    total_mass = config.dry_mass + config.propellant_mass
+    total_mass = config.dry_mass + config.motor_dry_mass + config.propellant_mass
 
     # [x, y, z, vx, vy, vz, pitch, yaw, roll,
     #  pitch_rate, yaw_rate, roll_rate, mass]
@@ -354,7 +385,10 @@ def run_batch_simulation(
     prev_dt = config.sim_dt
     initial_prop_mass = config.propellant_mass
     rail_exit_detected = False
-    _last_force_accel = 0.0  # Force-based acceleration (F/m, excluding gravity)
+    # Peak force-based acceleration (F/m, excluding gravity). Tracked as a
+    # running max across ALL derivative evaluations — RK4 calls _derivatives
+    # 4× per step, so capturing only the last stage missed the true peak.
+    _peak_force_accel = 0.0
 
     result = BatchSimResult()
 
@@ -363,15 +397,17 @@ def run_batch_simulation(
     diameter = config.diameter
     body_length = config.length
     dry_mass = config.dry_mass
+    burnout_mass = config.dry_mass + config.motor_dry_mass
     ref_area = math.pi * (diameter / 2.0) ** 2
 
     # ── Dynamic CG helper (mirrors RocketStateEngine._recompute_derived) ──
 
     def _compute_cg(current_mass: float) -> float:
-        """Recompute CG as propellant burns away."""
-        prop = max(0.0, current_mass - dry_mass)
+        """Recompute CG as propellant burns away (motor case + prop act at motor CG)."""
+        motor_m = max(0.0, current_mass - dry_mass)
+        motor_cg = max(0.0, config.motor_position - 0.5 * config.motor_length)
         if current_mass > 0:
-            return (dry_mass * config.dry_cg + prop * config.motor_position) / current_mass
+            return (dry_mass * config.dry_cg + motor_m * motor_cg) / current_mass
         return config.cg
 
     # ── Derivatives function (closed over local state) ────────────
@@ -499,12 +535,15 @@ def run_batch_simulation(
         ay = max(-MAX_ACCEL, min(MAX_ACCEL, ay))
         az = max(-MAX_ACCEL, min(MAX_ACCEL, az))
 
-        # Store force-based acceleration for tracking (excludes gravity)
-        nonlocal _last_force_accel
+        # Track peak force-based acceleration (excludes gravity). Running max
+        # over every stage evaluation, not just the last RK4 stage.
+        nonlocal _peak_force_accel
         force_ax = (tx + drag_x + normal_x) / mass
         force_ay = (ty + drag_y + normal_y) / mass
         force_az = (tz + drag_z + normal_z) / mass
-        _last_force_accel = math.sqrt(force_ax**2 + force_ay**2 + force_az**2)
+        fa = math.sqrt(force_ax**2 + force_ay**2 + force_az**2)
+        if fa > _peak_force_accel:
+            _peak_force_accel = fa
 
         # Rotational dynamics
         if on_rail:
@@ -527,7 +566,7 @@ def run_batch_simulation(
         if isp <= 0:
             if config.motor_total_impulse > 0 and config.propellant_mass > 0:
                 isp = config.motor_total_impulse / (config.propellant_mass * g)
-        if thrust > 0 and (mass - dry_mass) > 1e-3:
+        if thrust > 0 and (mass - burnout_mass) > 1e-3:
             if isp > 10:
                 dm_dt = -thrust / (isp * g)
             elif config.motor_burn_time > 0:
@@ -590,8 +629,8 @@ def run_batch_simulation(
                 if new_vec[5] < 0.0:
                     new_vec[5] = 0.0
 
-            # Enforce mass floor
-            new_vec[12] = max(dry_mass, new_vec[12])
+            # Enforce mass floor (structure + spent motor casing)
+            new_vec[12] = max(burnout_mass, new_vec[12])
 
             state_vec = new_vec
             t += adaptive_dt
@@ -615,8 +654,8 @@ def run_batch_simulation(
 
             thrust_now = _get_thrust(t, thrust_curve)
 
-            # Force-based acceleration (F/m, excludes gravity weight)
-            cur_accel = _last_force_accel
+            # Force-based acceleration (F/m, excludes gravity weight) — peak so far
+            cur_accel = _peak_force_accel
 
             # ── Track maxima ──────────────────────────────────────
             if cur_z > result.apogee:
@@ -656,6 +695,7 @@ def run_batch_simulation(
             phase = phase_mgr.evaluate(
                 phase, t, cur_z, signed_vel,
                 thrust_now, config.main_deploy_altitude,
+                drogue_delay=config.drogue_deploy_delay,
             )
 
             # ── Recovery deployment ───────────────────────────────

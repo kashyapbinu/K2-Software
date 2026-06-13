@@ -127,8 +127,8 @@ class RK45Integrator(IntegratorBase):
         return "RK45"
 
     def step(self, state_vec, t, dt, derivatives_fn):
-        """Standard fixed-step interface (uses RK4 weights internally)."""
-        new_state, _ = self._rk45_core(state_vec, t, dt, derivatives_fn)
+        """Standard fixed-step interface (propagates the 5th-order solution)."""
+        _, new_state = self._rk45_core(state_vec, t, dt, derivatives_fn)
         return new_state
 
     def step_adaptive(self, state_vec, t, dt_max, derivatives_fn):
@@ -153,17 +153,19 @@ class RK45Integrator(IntegratorBase):
             )
 
             if err <= 1.0:
-                # Step accepted
+                # Step accepted — propagate the 5th-order solution (local
+                # extrapolation, standard Dormand-Prince practice); y5-y4 is
+                # only the error estimate.
                 factor = min(5.0, 0.9 * (1.0 / max(err, 1e-10)) ** 0.2)
                 self._dt_next = min(dt * factor, self.dt_max)
-                return y4, dt, self._dt_next
+                return y5, dt, self._dt_next
             else:
                 # Reduce step
                 factor = max(0.1, 0.9 * (1.0 / err) ** 0.25)
                 dt = max(dt * factor, self.dt_min)
 
         # If we get here, use the last attempt anyway
-        return y4, dt, self.dt_min
+        return y5, dt, self.dt_min
 
     def _rk45_core(self, state_vec, t, dt, fn):
         """Compute the 7 stage values and return (4th-order, 5th-order) estimates."""

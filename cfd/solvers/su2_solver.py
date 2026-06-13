@@ -81,7 +81,8 @@ _TURB_MODEL_MAP = {
     "Laminar": {"solver": "NAVIER_STOKES",  "turb": None,  "turb_line": ""},
     "SA":      {"solver": "RANS",           "turb": "SA",  "turb_line": "KIND_TURB_MODEL= SA"},
     "SST":     {"solver": "RANS",           "turb": "SST", "turb_line": "KIND_TURB_MODEL= SST\nSST_OPTIONS= VORTICITY"},
-    "KE":      {"solver": "RANS",           "turb": "KE",  "turb_line": "KIND_TURB_MODEL= KE"},
+    # NOTE: no "KE" entry — SU2 has no k-epsilon model (SA/SST only).
+    # Unknown keys fall back to SST in generate_case().
 }
 
 _SU2_CONFIG_TEMPLATE = """\
@@ -110,7 +111,9 @@ FREESTREAM_TURBULENCEINTENSITY= 0.001
 FREESTREAM_TURB2LAMVISCRATIO= 10.0
 
 % ── Reference values ─────────────────────────────────────
-% Moment origin = nose tip so Cm is nose-tip moment; CP = nose_x - (Cm/CN)*L
+% Moment origin = nose tip (x=0 in the mesh frame; see cfd/meshing.py).
+% Pitch moment for an AoA run is CMy (SU2 rotates the freestream about Y),
+% so CP-from-nose = -(CMy/CN)*L.
 REF_ORIGIN_MOMENT_X= {moment_x}
 REF_ORIGIN_MOMENT_Y= 0.0
 REF_ORIGIN_MOMENT_Z= 0.0
@@ -165,7 +168,10 @@ SOLUTION_FILENAME= solution_flow.dat
 RESTART_FILENAME= restart_flow.dat
 TABULAR_FORMAT= CSV
 
-HISTORY_OUTPUT= ITER, RMS_DENSITY, RMS_ENERGY, {turb_hist_fields} LIFT, DRAG, DRAG_PRESSURE, DRAG_VISCOUS, MOMENT_Z, FORCE_X, FORCE_Y, FORCE_Z
+% NOTE: DRAG_PRESSURE / DRAG_VISCOUS are not valid SU2 history fields (they
+% never appear in history.csv) — the pressure/friction split is integrated
+% from surface_flow.vtu in parse_results() instead.
+HISTORY_OUTPUT= ITER, RMS_DENSITY, RMS_ENERGY, {turb_hist_fields} LIFT, DRAG, MOMENT_Y, FORCE_X, FORCE_Y, FORCE_Z
 CONV_FILENAME= history
 
 VOLUME_FILENAME= flow
@@ -180,6 +186,70 @@ VOLUME_OUTPUT= COORDINATES, SOLUTION, PRIMITIVE, PRESSURE_COEFFICIENT, MACH, VOR
 % SURFACE_OUTPUT= COORDINATES, SOLUTION, PRESSURE_COEFFICIENT, SKIN_FRICTION, Y_PLUS
 """
 
+
+
+def _integrate_surface_forces(
+    surf_vtk: Path,
+    p_inf: float,
+    q_inf: float,
+    ref_area: float,
+    aoa_deg: float,
+) -> Optional[dict]:
+    """Integrate wall pressure and skin friction from SU2's surface VTK.
+
+    Returns the real pressure/friction drag split (wind-axis) plus the mean
+    wall y+, or None if the file/fields are unavailable. SU2 has no valid
+    history fields for the split, so this integration is the only honest
+    source — verified to reproduce SU2's own CFx/CFz/CMy to 4 decimals.
+    Skin_Friction_Coefficient is stored dimensionless (τ = Cf·q∞).
+    """
+    try:
+        import numpy as np
+        import pyvista as pv
+        if not Path(surf_vtk).is_file():
+            return None
+        mesh = pv.read(str(surf_vtk))
+        try:
+            surf = mesh.extract_surface(algorithm=None)
+        except TypeError:
+            surf = mesh.extract_surface()
+        if "Pressure" not in surf.point_data:
+            return None
+        surf = surf.compute_normals(
+            cell_normals=True, point_normals=False, consistent_normals=False
+        )
+        cell = surf.point_data_to_cell_data()
+        area = np.asarray(surf.compute_cell_sizes()["Area"], dtype=float)
+        normals = np.asarray(surf.cell_data["Normals"], dtype=float)
+
+        # Wind-axis drag direction (AoA rotates the freestream in x-z).
+        a = math.radians(aoa_deg)
+        drag_dir = np.array([math.cos(a), 0.0, math.sin(a)])
+
+        # Pressure force on the body: dF = -(p - p_inf) * n_outward * dA
+        p = np.asarray(cell["Pressure"], dtype=float)
+        f_pressure = (-(p - p_inf)[:, None] * normals * area[:, None]).sum(axis=0)
+
+        out = {
+            "cd_pressure": float(f_pressure @ drag_dir) / (q_inf * ref_area),
+            "cd_friction": 0.0,
+            "yplus_mean": 0.0,
+        }
+
+        if "Skin_Friction_Coefficient" in cell.array_names:
+            cf = np.asarray(cell["Skin_Friction_Coefficient"], dtype=float)
+            if cf.ndim == 2 and cf.shape[1] >= 3:
+                f_friction = (cf * q_inf * area[:, None]).sum(axis=0)
+                out["cd_friction"] = float(f_friction @ drag_dir) / (q_inf * ref_area)
+        if "Y_Plus" in cell.array_names:
+            yp = np.asarray(cell["Y_Plus"], dtype=float)
+            yp = yp[np.isfinite(yp) & (yp > 0)]
+            if yp.size:
+                out["yplus_mean"] = float(yp.mean())
+        return out
+    except Exception as e:
+        logger.warning(f"Surface force integration failed: {e}")
+        return None
 
 
 class SU2Solver(CFDSolver):
@@ -222,6 +292,8 @@ class SU2Solver(CFDSolver):
             bl_layers=cfg.boundary_layer_layers,
             bl_growth=cfg.boundary_layer_growth,
             geometry_dict=cfg.geometry_dict,   # exact dims if available
+            custom_wall_size=cfg.custom_wall_size,
+            target_element_count=cfg.target_element_count,
         )
         self._mesh_path = out_mesh
         logger.info(f"Mesh written to {out_mesh}")
@@ -284,9 +356,12 @@ class SU2Solver(CFDSolver):
         restart_sol = "YES" if self.warm_start else "NO"
         conv_startiter = 10 if self.warm_start else 50
 
-        # Moment origin at nose tip (x=0 in rocket-body frame; nose points forward)
-        # With SU2 mesh: x increases from nozzle (0) to nose (ref_length)
-        moment_x = ref_length   # nose tip location in CFD x-axis
+        # Moment origin at the nose tip. Mesh frame (cfd/meshing.py): nose tip
+        # at x=0, nozzle at x=total_L, flow along +X — so the nose is at x=0,
+        # NOT at x=ref_length. Verified against SU2 v8.5: with origin at x=0
+        # the pitch moment CMy gives CP-from-nose = -(CMy/CN)*L at a plausible
+        # station (0.63L for a finned test rocket); CMz is ~15x smaller noise.
+        moment_x = 0.0   # nose tip location in CFD x-axis
 
         # Store flow metadata for results
         self._flow_meta = {
@@ -302,7 +377,11 @@ class SU2Solver(CFDSolver):
         is_viscous = turb_cfg["solver"] != "EULER"
         is_rans = turb_cfg["solver"] == "RANS"
 
-        # Wall BC: Euler uses slip wall, viscous uses no-slip heatflux
+        # Wall BC: Euler uses slip wall, viscous uses no-slip heatflux.
+        # NOTE: no wall functions — SU2's STANDARD_WALL_FUNCTION diverges
+        # (T_Wall < 0 → NaN) from a freestream cold start on this tet-only
+        # mesh with strongly varying y+. Without a wall model, skin
+        # friction is under-resolved at y+ >> 1 (known accuracy limit).
         if is_viscous:
             wall_bc = "MARKER_HEATFLUX= ( rocket_wall, 0.0 )"
         else:
@@ -392,7 +471,7 @@ class SU2Solver(CFDSolver):
                     f"Re-running serial."
                 )
                 self._emit_log(
-                    f"⚠ MPI probe failed: SU2 is a serial build (launched "
+                    f"MPI probe failed: SU2 is a serial build (launched "
                     f"{self._exec_banner_count} copies). Multi-core unavailable — "
                     f"re-running on 1 core. Results valid."
                 )
@@ -562,15 +641,72 @@ class SU2Solver(CFDSolver):
                             return 0.0
                 return 0.0
 
-            # Core coefficients
-            result.cd = abs(_get("CD"))
-            result.cl = _get("CL")
-            result.cm = _get("CMz")
-            result.iterations = len(rows)
+            # Tail window for coefficient averaging. On this tet-only mesh the
+            # density residual limit-cycles (unsteady base flow under steady
+            # RANS) while the force coefficients plateau — so the last row can
+            # land anywhere in the cycle. Averaging the tail gives the
+            # cycle-mean force; the window spread doubles as a force-convergence
+            # check independent of the (never-satisfied) residual floor.
+            tail_n = min(50, len(rows))
 
-            # Drag decomposition
-            result.cd_pressure = abs(_get("CD_Pressure") or _get("DRAG_PRESSURE"))
-            result.cd_friction = abs(_get("CD_Viscous") or _get("DRAG_VISCOUS"))
+            def _get_tail(key):
+                """Mean of a column over the last tail_n rows (case-insensitive)."""
+                key_lower = key.lower()
+                col = None
+                for k in rows[-1].keys():
+                    if k.lower().strip() == key_lower:
+                        col = k
+                        break
+                if col is None:
+                    return 0.0, 0.0, 0.0
+                vals = []
+                for row in rows[-tail_n:]:
+                    try:
+                        vals.append(float(row[col]))
+                    except (ValueError, TypeError, KeyError):
+                        pass
+                if not vals:
+                    return 0.0, 0.0, 0.0
+                mean = sum(vals) / len(vals)
+                return mean, min(vals), max(vals)
+
+            # Core coefficients. Pitch moment is CMy: SU2 applies AoA as a
+            # rotation about the Y axis (freestream tilts in the x-z plane),
+            # so the AoA-induced normal force is along Z and its moment is
+            # about Y. CMz is the (near-zero) yaw component — do not use it.
+            cd_mean, cd_min, cd_max = _get_tail("CD")
+            result.cd = abs(cd_mean)
+            result.cl = _get_tail("CL")[0]
+            result.cm = _get_tail("CMy")[0]
+            result.iterations = len(rows)
+            # Forces stationary ⇔ CD spread over the tail window is small
+            # relative to its mean. Used below to grant convergence when the
+            # residual limit-cycles above the floor.
+            forces_stationary = (
+                len(rows) > tail_n
+                and abs(cd_mean) > 1e-6
+                and (cd_max - cd_min) / abs(cd_mean) < 0.005
+            )
+
+            # Drag decomposition — integrate the real pressure/friction split
+            # from the surface VTK (SU2 writes no valid history fields for it;
+            # the old DRAG_PRESSURE/DRAG_VISCOUS lookups always returned 0 and
+            # the split silently fell back to a fixed 55/30/15 guess).
+            _meta = getattr(self, '_flow_meta', {})
+            split = _integrate_surface_forces(
+                surf_vtk,
+                p_inf=_meta.get("P", 101325.0),
+                q_inf=_meta.get("dynamic_pressure", 1.0),
+                ref_area=_meta.get("ref_area", 0.1),
+                aoa_deg=self.config.angle_of_attack_deg,
+            )
+            if split is not None:
+                result.cd_pressure = abs(split["cd_pressure"])
+                result.cd_friction = abs(split["cd_friction"])
+                result.yplus_mean = split["yplus_mean"]
+            else:
+                result.cd_pressure = 0.0
+                result.cd_friction = 0.0
             # Estimate base drag and wave drag from total
             if result.cd > 0 and result.cd_pressure + result.cd_friction > 0:
                 accounted = result.cd_pressure + result.cd_friction
@@ -610,13 +746,17 @@ class SU2Solver(CFDSolver):
             result.solver_name = "SU2"
 
             # CP location — recovered per point from the integrated surface forces.
-            # SU2's LIFT/MOMENT_Z are the integrated pressure+shear loads, so the CP
+            # SU2's LIFT/MOMENT_Y are the integrated pressure+shear loads, so the CP
             # derived from them IS a pressure-integration CP (not a fitted curve).
-            # Cm is taken about REF_ORIGIN_MOMENT_X = nose tip (x = ref_length):
-            #     Cm = -CN * (x_cp - x_moment) / ref_length
-            #  => x_cp = x_moment - (Cm / CN) * ref_length     (CFD x-axis, from nozzle)
-            _CN = result.cl   # normal force coeff ≈ CL for slender body at small AoA
-            _mx = getattr(self, '_flow_meta', {}).get('moment_x', result.ref_length)
+            # Mesh frame: nose tip at x=0, nozzle at x=total_L (cfd/meshing.py).
+            # Cm (= CMy) is taken about REF_ORIGIN_MOMENT_X = 0 (the nose tip):
+            #     My = -(x_cp - 0) * N   ⇒   Cm = -CN * x_cp / ref_length
+            #  => x_cp_from_nose = -(Cm / CN) * ref_length
+            # Verified against SU2 v8.5 (finned 1 m test rocket, AoA 4°):
+            # CMy=-0.54 → x_cp=0.626 m from nose; CMz was 15x smaller (noise).
+            aoa_rad = math.radians(self.config.angle_of_attack_deg)
+            # Normal force coefficient from wind-frame CL/CD (exact, matters >5° AoA)
+            _CN = result.cl * math.cos(aoa_rad) + result.cd * math.sin(aoa_rad)
             # True rocket length for clamping — prefer geometry_dict (exact)
             # over ref_length (which may include fin span from STL bbox)
             _true_len = result.ref_length
@@ -625,30 +765,35 @@ class SU2Solver(CFDSolver):
             # Threshold scales with the swept normal force so a single near-zero-AoA
             # point is excluded (CN→0 makes Cm/CN indeterminate) but every genuinely
             # loaded point is kept and computed independently.
+            # Body-frame normal force (what the airframe actually bends under) —
+            # more correct than the wind-frame CL set above, especially >5° AoA.
+            result.force_normal = abs(_CN) * _q * _A
             if abs(_CN) > 0.003:  # meaningful normal force present
-                _xcp = _mx - (result.cm / _CN) * result.ref_length
+                _xcp_nose = -(result.cm / _CN) * result.ref_length
                 # Clamp to the physical body range [0, true_length]; warn (don't
                 # silently saturate) if the raw value lands outside so a flat-line
                 # artefact is visible in the log rather than hidden.
-                result.cp_location_m = max(0.0, min(_xcp, _true_len))
-                if not (0.0 <= _xcp <= _true_len):
-                    logger.warning(f"CP raw x_cp={_xcp:.4f} m outside body [0,{_true_len:.3f}] "
-                                   f"— clamped (Cm={result.cm:.5f}, CN={_CN:.5f})")
-                result.cp_from_nose_m = max(0.0, _true_len - result.cp_location_m)
+                cp_nose = max(0.0, min(_xcp_nose, _true_len))
+                if not (0.0 <= _xcp_nose <= _true_len):
+                    logger.warning(f"CP raw x_cp={_xcp_nose:.4f} m from nose outside "
+                                   f"body [0,{_true_len:.3f}] — clamped "
+                                   f"(Cm={result.cm:.5f}, CN={_CN:.5f})")
+                result.cp_from_nose_m = cp_nose
+                result.cp_location_m = _true_len - cp_nose   # from nozzle/tail
 
                 # ── Static-stability moment about the CG ─────────────────────
-                # Transfer the integrated nose-tip moment to the CG:
-                #     Cm_cg = CN * (x_cp - x_cg) / ref_length      (CFD x-axis)
-                # CP behind CG (x_cp < x_cg) ⇒ Cm_cg slope < 0 ⇒ statically stable.
-                # This is exactly M = (CP - CG) × F reduced to coefficient form;
-                # no fitted equation is used.
+                # Transfer the integrated nose-tip moment to the CG (both
+                # stations measured from the nose):
+                #     Cm_cg = CN * (x_cg - x_cp) / ref_length
+                # CP aft of CG (x_cp > x_cg) ⇒ Cm_cg < 0 at positive AoA
+                # ⇒ restoring ⇒ statically stable. This is exactly
+                # M = (CG - CP) × F reduced to coefficient form.
                 _cg_nose = self.config.cg_from_nose_m
                 if _cg_nose is not None:
-                    x_cg = result.ref_length - _cg_nose   # nose-frame → CFD x-axis
-                    result.x_cg_m = x_cg
-                    result.cm_cg = _CN * (result.cp_location_m - x_cg) / result.ref_length
-                logger.info(f"CP = {result.cp_location_m:.4f} m from nozzle "
-                            f"({result.cp_from_nose_m:.4f} from nose) "
+                    result.x_cg_m = _cg_nose   # from nose (CFD x-axis)
+                    result.cm_cg = _CN * (_cg_nose - cp_nose) / result.ref_length
+                logger.info(f"CP = {result.cp_from_nose_m:.4f} m from nose "
+                            f"({result.cp_location_m:.4f} from nozzle) "
                             f"(Cm_nose={result.cm:.5f}, Cm_cg={result.cm_cg:.5f}, "
                             f"CN={_CN:.5f}, ref_L={result.ref_length:.3f})")
             else:
@@ -658,13 +803,24 @@ class SU2Solver(CFDSolver):
                 result.cp_location_m = 0.0
                 result.cm_cg = 0.0   # zero normal force ⇒ zero stability moment
 
-            # Converged if residual dropped below -6 order of magnitude
+            # Converged if the residual hit the configured floor, OR SU2
+            # stopped early (a convergence criterion — residual or Cauchy —
+            # fired before the iteration cap), OR the force coefficients are
+            # stationary over the tail window. The last case covers residual
+            # limit cycles (unsteady base flow under steady RANS) where the
+            # density residual orbits above the floor forever while CD/CL/CMy
+            # are flat to <0.5% — the forces, which are what the polar reports,
+            # ARE converged there.
             try:
                 last_rho = _get("rms[Rho]")
-                result.converged = (last_rho < -6.0) or (len(rows) >= self.config.max_iterations)
+                conv_floor = math.log10(self.config.convergence_tolerance)  # e.g. -6
+                stopped_early = len(rows) < self.config.max_iterations
+                result.converged = (
+                    (last_rho <= conv_floor) or stopped_early or forces_stationary
+                )
                 result.final_residual = last_rho
             except Exception:
-                result.converged = len(rows) >= 100
+                result.converged = False
 
             # Build residual history for the convergence plot
             for row in rows:

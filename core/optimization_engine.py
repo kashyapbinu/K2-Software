@@ -224,7 +224,7 @@ def get_default_objectives() -> list:
         ObjectiveFunction("max_apogee", "Max Apogee", "maximize", 1.0, True),
         ObjectiveFunction("max_rail_exit_velocity", "Max Rail Exit Vel", "maximize", 1.0, False),
         ObjectiveFunction("max_velocity", "Max Velocity", "maximize", 1.0, False),
-        ObjectiveFunction("max_payload_fraction", "Max Payload Fraction", "maximize", 1.0, False),
+        ObjectiveFunction("max_payload_fraction", "Max Inert Mass Frac", "maximize", 1.0, False),
         ObjectiveFunction("max_stability_margin", "Max Stability Margin", "maximize", 1.0, False),
         ObjectiveFunction("min_landing_distance", "Min Landing Distance", "minimize", 1.0, False),
         ObjectiveFunction("max_prob_target", "Max P(Target Alt)", "maximize", 1.0, False),
@@ -344,6 +344,17 @@ def build_candidate_config(base_config: BatchSimConfig,
     if cfg.motor_avg_thrust > 0:
         cfg.motor_max_thrust = max(cfg.motor_max_thrust, cfg.motor_avg_thrust * 1.3)
 
+    # Couple propellant mass to total impulse: I = m_prop · Isp · g0. When the
+    # optimizer varies motor_total_impulse but NOT propellant_mass directly, the
+    # propellant must scale with impulse — otherwise impulse is bought for free
+    # (fixed 0.18 kg delivering 5000 N·s ⇒ Isp ~2800 s) and apogees run away to
+    # tens of km. Skipped when propellant_mass is itself an optimized variable.
+    prop_optimized = any(dv.enabled and dv.name == "propellant_mass" for dv in design_vars)
+    impulse_optimized = any(dv.enabled and dv.name == "motor_total_impulse" for dv in design_vars)
+    if impulse_optimized and not prop_optimized and cfg.motor_total_impulse > 0:
+        isp = cfg.motor_isp if cfg.motor_isp > 10 else 200.0
+        cfg.propellant_mass = cfg.motor_total_impulse / (isp * 9.80665)
+
     return cfg
 
 
@@ -448,18 +459,23 @@ def evaluate_candidate(base_config: BatchSimConfig,
         mc_configs = [cfg] * max(mc_sims, 1)
 
     apogees, machs, accels, stabs, landings = [], [], [], [], []
-    rail_exits, successes = [], []
+    rail_exits, successes, velocities = [], [], []
 
     for i, mc_cfg in enumerate(mc_configs):
         try:
             res = run_batch_simulation(mc_cfg, seed=seed + i * 7)
-            apogees.append(res.apogee)
+            # A diverged/failed run (e.g. the >2000 m/s guard truncated a
+            # too-fast trajectory) reports a meaningless truncated apogee.
+            # Don't let it score as a real altitude — zero it so the optimizer
+            # neither rewards nor selects numerically fragile designs.
+            apogees.append(res.apogee if res.success else 0.0)
             machs.append(res.max_mach)
             accels.append(res.max_acceleration)
             stabs.append(res.min_stability_margin)
             landings.append(res.landing_distance)
             rail_exits.append(res.rail_exit_velocity)
             successes.append(1.0 if res.success else 0.0)
+            velocities.append(res.max_velocity)
         except Exception:
             apogees.append(0.0)
             machs.append(0.0)
@@ -468,6 +484,7 @@ def evaluate_candidate(base_config: BatchSimConfig,
             landings.append(9999.0)
             rail_exits.append(0.0)
             successes.append(0.0)
+            velocities.append(0.0)
 
     arr_apogee = np.array(apogees)
     arr_mach = np.array(machs)
@@ -551,7 +568,7 @@ def evaluate_candidate(base_config: BatchSimConfig,
     obj_vals = {
         "max_apogee": mean_apogee,
         "max_rail_exit_velocity": float(np.mean(arr_rail)),
-        "max_velocity": float(np.mean(arr_mach)) * 340.0,
+        "max_velocity": float(np.mean(velocities)) if velocities else 0.0,
         "max_payload_fraction": 0.0,
         "max_stability_margin": aero_stability,
         "min_landing_distance": float(np.mean(arr_landing)),
@@ -568,7 +585,8 @@ def evaluate_candidate(base_config: BatchSimConfig,
         "rail_exit_velocity": float(np.mean(arr_rail)),
     }
 
-    # Payload fraction
+    # Inert (structure + payload) mass fraction = 1 - propellant/total. Not the
+    # true payload fraction (payload mass isn't a design variable here).
     total_mass = variables.get("dry_mass", cfg.dry_mass) + cfg.propellant_mass
     if total_mass > 0:
         obj_vals["max_payload_fraction"] = 1.0 - (cfg.propellant_mass / total_mass)
@@ -595,6 +613,10 @@ def evaluate_candidate(base_config: BatchSimConfig,
         fitness = _robust_fitness(obj_vals, mc_stats, objectives, constraints, cons_eval)
     else:
         fitness = _standard_fitness(obj_vals, objectives, constraints, cons_eval)
+
+    # Expose scalar fitness as an objective so NSGA-II domination can track it
+    # in mission mode (otherwise NSGA-II sorts on raw apogee and ignores target).
+    obj_vals["fitness"] = fitness
 
     return CandidateDesign(
         variables=dict(variables),
@@ -690,13 +712,20 @@ def _mission_fitness(obj_vals, mc_stats, target, objectives, constraints, cons_e
     success = mc_stats.get("success_rate", 0.0)
     mean_apogee = mc_stats.get("mean_apogee", 0.0)
 
-    # Primary: P(target) × success_rate
-    fitness = 1000.0 * p_target * success
-
-    # Penalise deviation from target
+    # Primary: smooth proximity to target × success. A continuous proximity term
+    # (1 at target, 0 at ≥100% error) replaces the old binary 1000·p_target,
+    # which had a 1000-point cliff at the ±10% tolerance boundary that stalled
+    # gradient-following — especially at low mc_sims where p_target is just 0/1.
     if target > 0 and mean_apogee > 0:
         relative_error = abs(mean_apogee - target) / target
-        fitness -= 200.0 * relative_error
+    else:
+        relative_error = 1.0
+    proximity = max(0.0, 1.0 - relative_error)
+    fitness = 1000.0 * success * proximity
+
+    # Reliability bonus: still reward the fraction of MC runs inside tolerance,
+    # but as a secondary term so it can't dominate the smooth proximity signal.
+    fitness += 200.0 * p_target * success
 
     # Secondary objectives
     for o in objectives:
@@ -810,6 +839,33 @@ def _random_individual(design_vars: list, rng: np.random.Generator) -> dict:
         else:
             ind[dv.name] = float(rng.uniform(dv.min_val, dv.max_val))
     return ind
+
+
+def _valid_individual(design_vars: list, enabled_dvs: list,
+                      rng: np.random.Generator, tries: int = 10) -> dict:
+    """Random individual that passes physical validation, resampling up to
+    *tries* times. Returns the last attempt if none validate (bounds still
+    clamped, sim is robust to it)."""
+    ind = _random_individual(design_vars, rng)
+    for _ in range(tries):
+        valid, _ = validate_candidate(ind, enabled_dvs)
+        if valid:
+            break
+        ind = _random_individual(design_vars, rng)
+    return ind
+
+
+def _valid_vector(pop_vec: np.ndarray, idx: int, enabled_dvs: list,
+                  all_dvs: list, lo: np.ndarray, hi: np.ndarray,
+                  rng: np.random.Generator, tries: int = 10) -> None:
+    """Resample row *idx* of *pop_vec* in place until it validates (or tries
+    exhausted). Used by DE/PSO whose populations are numpy vectors."""
+    for _ in range(tries):
+        d = _vec_to_dict(pop_vec[idx], enabled_dvs, all_dvs)
+        valid, _ = validate_candidate(d, enabled_dvs)
+        if valid:
+            return
+        pop_vec[idx] = rng.uniform(lo, hi)
 
 
 def _sbx_crossover(p1: dict, p2: dict, design_vars: list,
@@ -943,6 +999,22 @@ def _fast_non_dominated_sort(pop: list, objectives: list) -> list:
     return [f for f in fronts if f]
 
 
+def _pareto_from_population(population: list, objectives: list, best) -> list:
+    """Non-dominated set of a final population.
+
+    Lets the single-objective drivers (GA / DE / PSO) still produce a real
+    Pareto front whenever >=2 objectives are enabled — otherwise their front
+    is just ``[best]`` and the UI shows the empty-front placeholder. Falls
+    back to ``[best]`` for the genuine single-objective case.
+    """
+    enabled = [o for o in objectives if getattr(o, "enabled", True)]
+    if len(enabled) >= 2 and population:
+        fronts = _fast_non_dominated_sort(population, objectives)
+        if fronts and fronts[0]:
+            return [population[i] for i in fronts[0]]
+    return [best] if best is not None else []
+
+
 def _crowding_distance(pop: list, front: list, objectives: list):
     """Assign crowding distance to individuals in a front."""
     n = len(front)
@@ -990,13 +1062,8 @@ def _run_genetic_algorithm(config: OptimizationConfig,
     executor = _make_executor(config)
     try:
         # Initialise population — build all candidates, evaluate as one batch
-        init_dicts = []
-        for _ in range(pop_size):
-            ind = _random_individual(config.design_variables, rng)
-            valid, _ = validate_candidate(ind, dvs)
-            if not valid:
-                ind = _random_individual(config.design_variables, rng)
-            init_dicts.append(ind)
+        init_dicts = [_valid_individual(config.design_variables, dvs, rng)
+                      for _ in range(pop_size)]
         init_seeds = [i * 13 for i in range(pop_size)]
 
         done = [0]
@@ -1112,7 +1179,7 @@ def _run_genetic_algorithm(config: OptimizationConfig,
 
         return OptimizationResult(
             best_design=best,
-            pareto_front=[best],
+            pareto_front=_pareto_from_population(population, config.objectives, best),
             all_designs=population,
             generation_history=gen_history,
             total_evaluations=total_evals,
@@ -1134,10 +1201,19 @@ def _run_nsga2(config: OptimizationConfig,
     dvs = [dv for dv in config.design_variables if dv.enabled]
     pop_size = config.population_size
     total_evals = 0
+
+    # Mission mode is single-objective (hit target). Drive NSGA-II domination
+    # by the scalar mission fitness, otherwise it sorts on raw apogee and
+    # blows past the target. Multi-objective runs keep the user's objectives.
+    if config.mission_mode and config.target_apogee > 0:
+        sort_objs = [ObjectiveFunction("fitness", "Mission Fitness", "maximize", 1.0, True)]
+    else:
+        sort_objs = config.objectives
+
     executor = _make_executor(config)
     try:
         # Initialise — batch-evaluate the random population
-        init_dicts = [_random_individual(config.design_variables, rng)
+        init_dicts = [_valid_individual(config.design_variables, dvs, rng)
                       for _ in range(pop_size)]
         init_seeds = [i * 17 for i in range(pop_size)]
         population = _parallel_eval(executor, base_config, init_dicts, config,
@@ -1152,9 +1228,9 @@ def _run_nsga2(config: OptimizationConfig,
                 break
 
             # Non-dominated sort + crowding
-            fronts = _fast_non_dominated_sort(population, config.objectives)
+            fronts = _fast_non_dominated_sort(population, sort_objs)
             for front in fronts:
-                _crowding_distance(population, front, config.objectives)
+                _crowding_distance(population, front, sort_objs)
 
             # Record
             fitnesses = [c.fitness for c in population]
@@ -1209,10 +1285,10 @@ def _run_nsga2(config: OptimizationConfig,
 
             # Combine parent + offspring, select best pop_size
             combined = population + offspring
-            fronts = _fast_non_dominated_sort(combined, config.objectives)
+            fronts = _fast_non_dominated_sort(combined, sort_objs)
             new_pop = []
             for front in fronts:
-                _crowding_distance(combined, front, config.objectives)
+                _crowding_distance(combined, front, sort_objs)
                 if len(new_pop) + len(front) <= pop_size:
                     new_pop.extend([combined[i] for i in front])
                 else:
@@ -1225,10 +1301,17 @@ def _run_nsga2(config: OptimizationConfig,
             population = new_pop
 
         # Extract Pareto front (rank 0)
-        fronts = _fast_non_dominated_sort(population, config.objectives)
+        fronts = _fast_non_dominated_sort(population, sort_objs)
         pareto = [population[i] for i in fronts[0]] if fronts else []
 
-        best = max(population, key=lambda c: c.fitness) if population else CandidateDesign()
+        # "Best" single design must come from the non-dominated front — a high
+        # scalar fitness elsewhere can still be Pareto-dominated.
+        if pareto:
+            best = max(pareto, key=lambda c: c.fitness)
+        elif population:
+            best = max(population, key=lambda c: c.fitness)
+        else:
+            best = CandidateDesign()
 
         return OptimizationResult(
             best_design=best,
@@ -1266,6 +1349,8 @@ def _run_differential_evolution(config: OptimizationConfig,
     try:
         # Initialise — batch-evaluate random population
         pop_vec = rng.uniform(lo, hi, size=(pop_size, len(dvs)))
+        for i in range(pop_size):
+            _valid_vector(pop_vec, i, dvs, config.design_variables, lo, hi, rng)
         init_dicts = [_vec_to_dict(pop_vec[i], dvs, config.design_variables)
                       for i in range(pop_size)]
         init_seeds = [i * 19 for i in range(pop_size)]
@@ -1341,7 +1426,7 @@ def _run_differential_evolution(config: OptimizationConfig,
         best = max(population, key=lambda c: c.fitness)
         return OptimizationResult(
             best_design=best,
-            pareto_front=[best],
+            pareto_front=_pareto_from_population(population, config.objectives, best),
             all_designs=population,
             generation_history=gen_history,
             total_evaluations=total_evals,
@@ -1375,6 +1460,8 @@ def _run_particle_swarm(config: OptimizationConfig,
     try:
         # Initialise
         positions = rng.uniform(lo, hi, size=(pop_size, n))
+        for i in range(pop_size):
+            _valid_vector(positions, i, dvs, config.design_variables, lo, hi, rng)
         velocities = rng.uniform(-v_max, v_max, size=(pop_size, n))
         p_best_pos = positions.copy()
         p_best_fit = np.full(pop_size, -np.inf)
@@ -1466,7 +1553,7 @@ def _run_particle_swarm(config: OptimizationConfig,
         best = max(population, key=lambda c: c.fitness)
         return OptimizationResult(
             best_design=best,
-            pareto_front=[best],
+            pareto_front=_pareto_from_population(population, config.objectives, best),
             all_designs=population,
             generation_history=gen_history,
             total_evaluations=total_evals,

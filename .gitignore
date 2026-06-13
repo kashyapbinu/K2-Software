@@ -12,8 +12,15 @@ env/
 crash.log
 k2_crash.log*
 
+# ── PyInstaller / installer build outputs (regenerated, huge) ──
+build/
+dist/
+installer_output/
+build_pyinstaller.log
+
 # ── Run artifacts / large outputs (255MB+, regenerated) ──
 cfd_run/
+cfd_run_euler/
 fem_run/
 fem_test_run/
 *.msh
@@ -37,3 +44,4 @@ scratch/openMotor_repo/
 
 # ── Scratch experiments ──
 scratch/
+data/thrust_curves/

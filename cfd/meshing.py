@@ -1,26 +1,24 @@
 """
 K2 Aerospace — CFD Meshing (Gmsh)
 ====================================
-Generates a proper 3D volumetric SU2 mesh for RANS simulation with
-anisotropic prism boundary-layer inflation.
+Generates a 3D volumetric SU2 mesh for RANS simulation.
 
 Approach:
   1. Reconstruct rocket OCC geometry (cone nose + cylinder body + fins)
   2. Boolean subtract from wind-tunnel domain → watertight fluid volume
   3. Classify surfaces (rocket_wall vs farfield)
-  4. Apply curvature-based refinement fields
-  5. Generate 2D surface mesh
-  6. Extrude prism boundary layers from rocket walls (geo.extrudeBL)
-  7. Fill remaining volume with tetrahedra
-  8. Run quality checks and export SU2
+  4. Apply curvature-based + tiered distance refinement fields
+  5. Generate 2D surface mesh, then 3D tetrahedra
+  6. Run quality checks and export SU2
 
 Boundary Layer Strategy:
-  gmsh.model.occ does NOT have extrudeBoundaryLayer.
-  gmsh.model.geo.extrudeBoundaryLayer is the ONLY Gmsh API that
-  extrudes along mesh normals to create 3D prisms.
-  After occ.synchronize(), entities are visible to geo — this hybrid
-  workflow is safe when sync ordering is respected:
-    occ.synchronize() → generate(2) → geo.extrudeBL → geo.synchronize() → generate(3)
+  Tet-only with aggressive near-wall refinement. Prism extrusion via
+  gmsh.model.geo.extrudeBoundaryLayer is INCOMPATIBLE with OCC boolean-cut
+  domains (corrupts topology, generate(3) crashes), so near-wall y+
+  resolution comes from the tiered distance fields + SU2 wall functions.
+
+Coordinate convention (CFD frame): +X = freestream flow direction,
+nose tip at x=0, nozzle at x=total_L.
 
 Requires: pip install gmsh
 """
@@ -70,111 +68,6 @@ def _estimate_sizes_from_count(
         f"lc_avg={lc_avg:.5f}  wall={lc_wall:.5f}  far={lc_far:.4f}"
     )
     return lc_wall, lc_far
-
-
-# ── Boundary Layer Helpers ────────────────────────────────────────────────────
-
-def _compute_first_layer_height(
-    mach: float,
-    body_r: float,
-    ref_length: float,
-    altitude_m: float = 0.0,
-    target_yplus: float = 1.0,
-) -> float:
-    """
-    Estimate first prism layer height for target y+.
-
-    Uses Schlichting flat-plate turbulent skin friction:
-        Cf ≈ 0.058 · Re_L^(-0.2)
-        τ_w = 0.5 · ρ · V² · Cf
-        u_τ = √(τ_w / ρ)
-        y₁ = y⁺ · μ / (ρ · u_τ)
-
-    Returns h1 in metres, clamped to physically reasonable bounds.
-    """
-    from cfd.solvers.base import isa_conditions
-
-    P, T, rho = isa_conditions(altitude_m)
-    a = math.sqrt(1.4 * 287.05 * T)
-    V = max(mach * a, 10.0)  # clamp to avoid division by zero
-    mu = 1.716e-5 * (T / 273.15) ** 1.5 * (273.15 + 110.4) / (T + 110.4)
-
-    Re_L = rho * V * ref_length / mu
-    Re_L = max(Re_L, 1e3)  # safety floor
-
-    # Schlichting flat-plate friction
-    Cf = 0.058 * Re_L ** (-0.2)
-    tau_w = 0.5 * rho * V ** 2 * Cf
-    u_tau = math.sqrt(max(tau_w / rho, 1e-12))
-
-    h1 = target_yplus * mu / (rho * u_tau)
-
-    # ── Clamp to physically reasonable bounds ─────────────────────────────
-    # Too thin -> extreme aspect ratio -> SU2 divergence from poor conditioning
-    h1_min = body_r * 8e-4       # absolute floor: 0.08% of body radius for stability
-    # Too thick -> poor y+ resolution
-    h1_max = body_r * 5e-3       # ceiling: 0.5% of body radius
-
-    h1_clamped = max(h1_min, min(h1, h1_max))
-
-    if h1 != h1_clamped:
-        logger.info(
-            f"First layer height clamped: {h1:.6f} -> {h1_clamped:.6f} m  "
-            f"(bounds [{h1_min:.6f}, {h1_max:.6f}])"
-        )
-
-    logger.info(
-        f"BL first layer: h1={h1_clamped:.6f} m  (target y+={target_yplus}, "
-        f"Re_L={Re_L:.2e}, Cf={Cf:.6f}, u_tau={u_tau:.3f} m/s)"
-    )
-    return h1_clamped
-
-
-def _cumulative_geometric_heights(h1: float, ratio: float, n: int) -> list[float]:
-    """
-    Build cumulative height list for geometric-growth boundary layer.
-    Returns [h1, h1+h1·r, h1+h1·r+h1·r², ...] — n entries.
-    """
-    heights = []
-    cumulative = 0.0
-    for i in range(n):
-        cumulative += h1 * ratio ** i
-        heights.append(cumulative)
-    return heights
-
-
-def _safe_bl_thickness(
-    total_bl: float,
-    body_r: float,
-    rocket: dict,
-) -> float:
-    """
-    Clamp total BL thickness to prevent prism overlap at tight features.
-
-    Critical zones:
-      - Fin root gap:  BL < 0.4 × fin thickness
-      - Body radius:   BL < 0.10 × body_r  (prevents self-intersection
-                        on cylinder surface and at nose-body junction)
-      - Fin tip:       BL < 0.3 × fin height
-    """
-    limits = [body_r * 0.10]   # 10% of body radius (tighter for nose-body safety)
-
-    fin_t = rocket.get("fin_thick", 0.003)
-    if fin_t > 0:
-        limits.append(fin_t * 0.25)  # 25% of fin thickness (conservative for thin fins)
-
-    fin_h = rocket.get("fin_height", body_r)
-    if fin_h > 0:
-        limits.append(fin_h * 0.3)
-
-    safe_max = min(limits)
-    if total_bl > safe_max:
-        logger.warning(
-            f"BL thickness {total_bl:.5f} m exceeds safe limit {safe_max:.5f} m "
-            f"(body_r={body_r:.4f}, fin_t={fin_t:.4f}) - clamping"
-        )
-        return safe_max
-    return total_bl
 
 
 # ── Main Entry Point ──────────────────────────────────────────────────────────
@@ -266,9 +159,13 @@ def build_wind_tunnel_mesh(
     tun_len    = rocket["length"] * domain_length_scale
     tun_radius = body_r * max(domain_radius_scale, 20.0)
 
-    # Safety: clear any stale Gmsh session
+    # Safety: clear any stale Gmsh session. Guard with isInitialized() — calling
+    # finalize() on a fresh session makes Gmsh's C++ logger print
+    # "Error : Gmsh has not been initialized" before raising (the exception is
+    # swallowed, but the stderr line still leaks).
     try:
-        gmsh.finalize()
+        if gmsh.isInitialized():
+            gmsh.finalize()
     except Exception:
         pass
 
@@ -327,9 +224,14 @@ def _build_mesh(
     )
     rocket_parts.append((3, nose_tag))
 
-    # Body tube: from x=nose_L to x=total_L
-    body_tag = occ.addCylinder(nose_L, 0, 0, body_L, 0, 0, body_r)
-    rocket_parts.append((3, body_tag))
+    # Body tube: from x=nose_L to x=total_L. Skip a degenerate (≈0-length) body
+    # so a nose-only / pure-cone geometry meshes instead of crashing in
+    # addCylinder ("Cannot build cylinder of zero height").
+    if body_L > 1e-6:
+        body_tag = occ.addCylinder(nose_L, 0, 0, body_L, 0, 0, body_r)
+        rocket_parts.append((3, body_tag))
+    else:
+        logger.info("Body length ≈ 0 — building nose-only (cone) geometry.")
 
     # Fins at the aft end
     fin_parts = _add_fins(occ, rocket, total_L)
@@ -472,10 +374,14 @@ def _build_mesh(
     gmsh.model.mesh.field.setNumber(f_nose, "VOut",   lc_far)
 
     # ── 5c. Fin-region refinement ─────────────────────────────────────────────
+    # Centre the box on the actual fin axial station (fins sit at
+    # x_TE = total_L - fin_z_base_k2 in the CFD frame; 0 = tail-mounted).
+    fin_x_te = total_L - rocket.get("fin_z_base_k2", 0.0)
+    fin_x_te = min(total_L, max(fin_Cr, fin_x_te))
     lc_fin = lc_rocket * 0.7
     f_fin = gmsh.model.mesh.field.add("Box")
-    gmsh.model.mesh.field.setNumber(f_fin, "XMin",  total_L - fin_Cr * 1.2)
-    gmsh.model.mesh.field.setNumber(f_fin, "XMax",  total_L + body_r)
+    gmsh.model.mesh.field.setNumber(f_fin, "XMin",  fin_x_te - fin_Cr * 1.2)
+    gmsh.model.mesh.field.setNumber(f_fin, "XMax",  fin_x_te + body_r)
     gmsh.model.mesh.field.setNumber(f_fin, "YMin", -fin_span * 1.5)
     gmsh.model.mesh.field.setNumber(f_fin, "YMax",  fin_span * 1.5)
     gmsh.model.mesh.field.setNumber(f_fin, "ZMin", -fin_span * 1.5)
@@ -599,96 +505,6 @@ def _build_mesh(
     gmsh.write(str(su2_path))
 
 
-def _extrude_boundary_layer(
-    gmsh, rocket, rocket_wall_surfs, farfield_surfs,
-    bl_layers, bl_growth, body_r,
-):
-    """
-    Extrude prism boundary layers from rocket wall surfaces.
-
-    Uses gmsh.model.geo.extrudeBoundaryLayer() — the ONLY Gmsh API
-    that extrudes along mesh normals for 3D prism generation.
-
-    Returns the number of BL entities created (0 on failure).
-    """
-    # ── Compute first layer height (y+ ≈ 1) ──────────────────────────────────
-    h1 = _compute_first_layer_height(
-        mach=rocket.get("_mach", 0.8),
-        body_r=body_r,
-        ref_length=rocket["length"],
-        altitude_m=rocket.get("_altitude", 0.0),
-    )
-
-    # ── Build cumulative heights ──────────────────────────────────────────────
-    raw_heights = _cumulative_geometric_heights(h1, bl_growth, bl_layers)
-    total_bl = raw_heights[-1]
-
-    # ── Safety: clamp total BL thickness ──────────────────────────────────────
-    safe_total = _safe_bl_thickness(total_bl, body_r, rocket)
-    if safe_total < total_bl:
-        # Recompute with reduced layer count to fit within safe thickness
-        while bl_layers > 3:
-            raw_heights = _cumulative_geometric_heights(h1, bl_growth, bl_layers)
-            if raw_heights[-1] <= safe_total:
-                break
-            bl_layers -= 1
-        total_bl = raw_heights[-1]
-        logger.info(f"BL reduced to {bl_layers} layers, total={total_bl:.5f} m")
-
-    logger.info(
-        f"BL inflation: {bl_layers} layers, h1={h1:.6f} m, "
-        f"growth={bl_growth}, total={total_bl:.5f} m  "
-        f"(safe limit={safe_total:.5f} m)"
-    )
-
-    # ── Normal direction check ────────────────────────────────────────────────
-    # Verify that extrusion direction is OUTWARD (into the flow) not inward.
-    # After boolean cut, rocket wall normals should point into the fluid.
-    # We check by comparing the centroid of a wall surface to the volume
-    # centroid — the normal should point AWAY from the rocket body axis.
-    occ = gmsh.model.occ
-    for stag in rocket_wall_surfs[:3]:  # spot-check first 3
-        cx, cy, cz = occ.getCenterOfMass(2, stag)
-        # For an external flow domain (fluid = tunnel - rocket),
-        # surface normals point into the fluid (outward from rocket)
-        # which is the correct direction for BL extrusion.
-        r_wall = math.sqrt(cy**2 + cz**2)
-        if r_wall < 0.01:
-            # Surface is on the body axis — normal direction is ambiguous
-            # but unlikely to cause issues for axis-aligned surfaces
-            continue
-        logger.debug(
-            f"Wall surface {stag}: centroid ({cx:.3f}, {cy:.3f}, {cz:.3f}), "
-            f"r={r_wall:.4f} - normal points outward [OK]"
-        )
-
-    # ── Extrude ───────────────────────────────────────────────────────────────
-    wall_dimtags = [(2, s) for s in rocket_wall_surfs]
-    gmsh.option.setNumber("Geometry.ExtrudeReturnLateralEntities", 0)
-
-    # Reverse normals so prisms extrude OUTWARD into the fluid, not INWARD into the rocket
-    gmsh.model.mesh.reverse(wall_dimtags)
-
-    out = gmsh.model.geo.extrudeBoundaryLayer(
-        wall_dimtags,
-        numElements=[1] * bl_layers,
-        heights=raw_heights,
-        recombine=True,   # prisms (hex-wedge), not tets
-    )
-
-    # ── CRITICAL: geo.synchronize() after extrudeBL ───────────────────────────
-    # This merges the new BL entities into the model topology.
-    # Without this, the 3D mesher won't see the extruded volumes.
-    gmsh.model.geo.synchronize()
-
-    n_bl_entities = len(out)
-    logger.info(
-        f"BL extrusion complete: {n_bl_entities} entities created, "
-        f"{bl_layers} prism layers, total thickness={total_bl:.5f} m"
-    )
-    return n_bl_entities
-
-
 # ── Mesh Quality Checks ──────────────────────────────────────────────────────
 
 def _check_mesh_quality(gmsh, body_r: float, n_bl_entities: int):
@@ -756,7 +572,7 @@ def _check_mesh_quality(gmsh, body_r: float, n_bl_entities: int):
             )
             if n_negative > 0:
                 logger.warning(
-                    f"  ⚠ {n_negative} elements have negative Jacobians — "
+                    f"  {n_negative} elements have negative Jacobians — "
                     f"SU2 may produce poor convergence"
                 )
     except Exception:
@@ -781,8 +597,14 @@ def _add_fins(occ, rocket: dict, total_L: float) -> list:
 
     sweep_offset = fin_h * math.tan(sweep)
 
-    x_root_LE = total_L - fin_Cr
-    x_root_TE = total_L
+    # Axial placement: fin_z_base_k2 is the K2-frame z of the fin root
+    # trailing edge (distance from the rocket base; 0 = at the nozzle).
+    # CFD frame measures from the nose, so x_TE = total_L - z_base_k2.
+    # Default 0 keeps the legacy tail-mounted behaviour for STL-estimated
+    # geometry that carries no fin position.
+    z_base_k2 = rocket.get("fin_z_base_k2", 0.0)
+    x_root_TE = min(total_L, max(fin_Cr, total_L - z_base_k2))
+    x_root_LE = x_root_TE - fin_Cr
     x_tip_LE  = x_root_LE + sweep_offset
     x_tip_TE  = x_tip_LE  + fin_Ct
 

@@ -32,8 +32,10 @@ from core.flight_phases import FlightPhase, PhaseManager
 from core.integrators import get_integrator
 from core.event_manager import EventManager, SimEvent
 from core.history_manager import HistoryManager
-from physics.aerodynamics import AeroModel, compute_drag_coefficient, compute_drag_force
-from environment.wind_model import WindModel
+from physics.aerodynamics import (AeroModel, compute_drag_coefficient,
+                                  compute_drag_force,
+                                  compute_pitching_moment_coefficient)
+from environment.wind_model import WindModel, MultiLevelWindModel
 from vehicle.builder import build_vehicle
 from vehicle.motor import Motor
 
@@ -93,7 +95,17 @@ class SimulationEngine(QObject):
 
         if s.motor_designation == "None":
             logger.warning("No motor selected — cannot simulate")
-            self.engine.log_message.emit("⚠ No motor selected. Please select a motor in the Design tab.")
+            self.engine.log_message.emit("No motor selected. Please select a motor in the Design tab.")
+            return
+
+        # Degenerate geometry guard: zero diameter/length means zero drag
+        # reference area — the flight would be ballistic nonsense (happens when
+        # state was reset and geometry never re-synced from the design).
+        if s.diameter <= 0.0 or s.length <= 0.0:
+            logger.warning(f"Invalid geometry (L={s.length}, D={s.diameter}) — cannot simulate")
+            self.engine.log_message.emit(
+                "Rocket geometry is empty (diameter/length = 0). "
+                "Open the Design tab so the airframe is loaded, then run again.")
             return
 
         # Select integrator
@@ -127,7 +139,7 @@ class SimulationEngine(QObject):
         if self.vehicle and self.vehicle.stages:
             sim_motor = Motor(
                 s.motor_designation,
-                empty_mass=s.dry_mass * 0.08,
+                empty_mass=s.motor_dry_mass if s.motor_dry_mass > 0 else s.dry_mass * 0.08,
                 propellant_mass=s.propellant_mass_initial,
                 length=0.3, diameter=0.03
             )
@@ -145,7 +157,19 @@ class SimulationEngine(QObject):
         wind_speed = getattr(s, 'wind_speed', 0.0)
         wind_dir   = getattr(s, 'wind_direction', 0.0)
         wind_gust  = getattr(s, 'wind_gust_intensity', 0.0)
-        self.wind_model = WindModel(wind_speed, wind_dir, wind_gust)
+        wind_mode  = getattr(s, 'wind_mode', 'average')
+        wind_layers = getattr(s, 'wind_layers', [])
+        if wind_mode == 'multi_level' and wind_layers:
+            self.wind_model = MultiLevelWindModel(
+                wind_layers, turbulence_intensity=wind_gust)
+            logger.info(f"Wind: multi-level, {len(wind_layers)} layers, "
+                        f"TI={wind_gust:.2f}")
+        else:
+            self.wind_model = WindModel(wind_speed, wind_dir, wind_gust)
+
+        # Launch-site temperature → ISA+ΔT atmosphere offset
+        self.atmosphere.temperature_offset = (
+            getattr(s, 'ground_temperature', 288.15) - 288.15)
 
         # Reset modules
         self.phase_mgr.reset()
@@ -179,7 +203,7 @@ class SimulationEngine(QObject):
 
         self.sim_started.emit()
         logger.info(f"Simulation started (dt={s.sim_dt}s, speed={s.sim_speed}x, integrator={self.integrator.name})")
-        self.engine.log_message.emit(f"🚀 Simulation started — Motor: {s.motor_designation} | Integrator: {self.integrator.name}")
+        self.engine.log_message.emit(f"Simulation started — Motor: {s.motor_designation} | Integrator: {self.integrator.name}")
 
     def pause(self):
         if self._running and not self._paused:
@@ -246,12 +270,24 @@ class SimulationEngine(QObject):
             return
 
         ramp = bt * 0.1
-        self._thrust_curve = [
+        curve = [
             (0.0, 0.0),
             (ramp, max_t),
             (bt - ramp, avg_t),
             (bt, 0.0),
         ]
+        # Normalize so the curve integrates to the motor's true total impulse
+        # (avg_thrust × burn_time). The raw trapezoid overshoots by ~8% when
+        # max_t = 1.4·avg_t, which inflated every burn's delivered impulse.
+        impulse = sum(
+            0.5 * (curve[i][1] + curve[i + 1][1]) * (curve[i + 1][0] - curve[i][0])
+            for i in range(len(curve) - 1)
+        )
+        target = avg_t * bt
+        if impulse > 0 and target > 0:
+            scale = target / impulse
+            curve = [(t, f * scale) for t, f in curve]
+        self._thrust_curve = curve
 
     def _get_thrust(self, t: float) -> float:
         """Interpolate thrust at time t."""
@@ -287,8 +323,9 @@ class SimulationEngine(QObject):
         mass = max(0.01, mass)
         s = self.engine.state
 
-        # Rail constraint
-        on_rail = z < s.length
+        # Rail constraint — guided until the rocket clears the launch rod/rail
+        rod_len = getattr(s, 'launch_rod_length', 1.0) or 1.0
+        on_rail = z < rod_len
         if on_rail or self._phase == FlightPhase.PRELAUNCH:
             launch_pitch = math.radians(getattr(s, 'launch_angle', 90.0))
             pitch = launch_pitch
@@ -321,9 +358,15 @@ class SimulationEngine(QObject):
         alpha = pitch - vel_angle
         alpha = max(-math.radians(45), min(math.radians(45), alpha))
 
-        # Sideslip (yaw plane)
+        # Sideslip (yaw plane): effective sideslip is the angle between the
+        # body axis and the relative wind in the yaw plane — body yaw minus
+        # the lateral flow angle — mirroring alpha = pitch - vel_angle. Using
+        # the flow angle alone left the yaw attitude itself unrestored: a
+        # yawed rocket felt no correcting moment until its velocity drifted.
         if v_rel > 0.5:
-            beta_angle = math.atan2(vrel_y, math.sqrt(vrel_x**2 + vrel_z**2))
+            flow_beta = math.atan2(vrel_y, math.sqrt(vrel_x**2 + vrel_z**2))
+            beta_angle = yaw - flow_beta
+            beta_angle = max(-math.radians(45), min(math.radians(45), beta_angle))
         else:
             beta_angle = 0.0
 
@@ -343,8 +386,13 @@ class SimulationEngine(QObject):
             stab_margin = aero["stability_margin"]
             # Yaw moment (symmetric to pitch for axisymmetric rocket) + yaw
             # damping mirroring the pitch-damping fix (else yaw weathercock is
-            # undamped and tumbles in crosswind just like pitch did).
-            M_yaw = -aero.get("cm", 0) * q_dyn * ref_area * s.diameter * math.sin(beta_angle)
+            # undamped and tumbles in crosswind just like pitch did). Built
+            # from CNα and the effective sideslip directly — the pitch cm
+            # already contains sin(α), so scaling it by sin(β) made yaw
+            # stiffness vanish whenever the pitch AoA was near zero.
+            cm_yaw = compute_pitching_moment_coefficient(
+                aero.get("cn_total", 2.0), cp, cg, s.diameter, beta_angle)
+            M_yaw = cm_yaw * q_dyn * ref_area * s.diameter
             M_yaw += self.aero_model._damping_moment(
                 aero.get("cmq", -1.0), yaw_rate, v_rel, q_dyn,
                 ref_area, s.diameter, aero.get("cn_total", 2.0))
@@ -410,13 +458,14 @@ class SimulationEngine(QObject):
             normal_x = normal_z = 0.0
         # Lateral (yaw-plane) normal force from sideslip — mirrors the pitch-plane
         # term so a crosswind produces side translation, not just a yaw moment.
-        # Same CNα·sin(β) form with the 20° stall clamp; acts to oppose sideslip.
+        # Same CNα·sin(β) form with the 20° stall clamp; acts toward the side
+        # the nose points relative to the flow (lift), like the pitch term.
         _deployed = self._drogue_deployed or self._main_deployed
         if v_rel > 0.5 and abs(beta_angle) > 1e-6 and not _deployed:
             cn_total_now = aero.get("cn_total", 2.0) if self.aero_model is not None else 0.0
             eff_beta = min(abs(beta_angle), math.radians(20))
             F_normal_y = q_dyn * ref_area * cn_total_now * math.sin(eff_beta)
-            normal_y = -math.copysign(F_normal_y, beta_angle)
+            normal_y = math.copysign(F_normal_y, beta_angle)
         else:
             normal_y = 0.0
 
@@ -454,16 +503,16 @@ class SimulationEngine(QObject):
             yaw_accel = max(-MAX_ROT, min(MAX_ROT, yaw_accel))
             roll_accel = max(-MAX_ROT, min(MAX_ROT, roll_accel))
 
-        # Mass flow
+        # Mass flow — Isp is defined against standard g0, not local gravity
         isp = getattr(s, 'motor_isp', 0.0)
         if isp <= 0:
             total_impulse = getattr(s, 'motor_total_impulse', 0.0)
             prop_mass = getattr(s, 'propellant_mass_initial', 0.0)
             if total_impulse > 0 and prop_mass > 0:
-                isp = total_impulse / (prop_mass * g)
-        if thrust > 0 and (mass - s.dry_mass) > 1e-3:
+                isp = total_impulse / (prop_mass * G_EARTH)
+        if thrust > 0 and (mass - (s.dry_mass + s.motor_dry_mass)) > 1e-3:
             if isp > 10:
-                dm_dt = -thrust / (isp * g)
+                dm_dt = -thrust / (isp * G_EARTH)
             elif s.motor_burn_time > 0:
                 dm_dt = -self._initial_prop_mass / s.motor_burn_time
             else:
@@ -578,7 +627,7 @@ class SimulationEngine(QObject):
         except Exception as e:
             logger.error(f"Integration error at t={t:.3f}s: {e}")
             self.stop()
-            self.engine.log_message.emit(f"❌ Simulation error at T+{t:.2f}s: {e}")
+            self.engine.log_message.emit(f"Simulation error at T+{t:.2f}s: {e}")
             return
 
         # ── Clamp at ground ──
@@ -613,8 +662,9 @@ class SimulationEngine(QObject):
         new_pitch_rate = new_vec[9]
         new_yaw_rate   = new_vec[10]
         new_roll_rate  = new_vec[11]
-        new_mass       = max(s.dry_mass, new_vec[12])
-        new_prop_mass  = max(0.0, new_mass - s.dry_mass)
+        burnout_mass   = s.dry_mass + s.motor_dry_mass
+        new_mass       = max(burnout_mass, new_vec[12])
+        new_prop_mass  = max(0.0, new_mass - burnout_mass)
 
         # Update canonical vehicle propellant consumption
         if self.vehicle is not None:
@@ -655,7 +705,8 @@ class SimulationEngine(QObject):
         prev_phase = self._phase
         self._phase = self.phase_mgr.evaluate(
             self._phase, t + adaptive_dt, new_altitude, new_velocity,
-            thrust, getattr(s, 'main_deploy_altitude', 300.0)
+            thrust, getattr(s, 'main_deploy_altitude', 300.0),
+            drogue_delay=getattr(s, 'drogue_deploy_delay', 1.0),
         )
 
         # ── Events ──
@@ -839,7 +890,17 @@ class SimulationEngine(QObject):
             mass=new_mass,
             cg=s.cg,
             cp=aero.get('cp', s.cp),
-            stability_margin=aero.get('stab_margin', s.stability_margin),
+            # Static margin is meaningless past apogee: at near-zero airspeed
+            # the AoA pegs at the 45° clamp and drags CP to a garbage position
+            # (margin collapses toward zero), and under a canopy the attitude
+            # is frozen entirely. Record NaN from apogee onward so plots show
+            # a clean gap instead of an artificial collapse.
+            stability_margin=(float('nan')
+                              if (self._drogue_deployed or self._main_deployed
+                                  or self._phase not in (FlightPhase.PRELAUNCH,
+                                                         FlightPhase.BOOST,
+                                                         FlightPhase.COAST))
+                              else aero.get('stab_margin', s.stability_margin)),
             phase=self._phase.value,
             cd=cd,
             atm_temperature=atm_temp,
@@ -882,7 +943,7 @@ class SimulationEngine(QObject):
                 f"Max Mach: {s.max_mach:.3f}"
             )
             self.engine.log_message.emit(
-                f"✅ Flight complete — Apogee: {s.max_altitude:.1f}m | "
+                f"Flight complete — Apogee: {s.max_altitude:.1f}m | "
                 f"Max Velocity: {s.max_velocity:.1f}m/s | "
                 f"Max Mach: {s.max_mach:.3f} | "
                 f"Flight Time: {t+dt:.2f}s | "

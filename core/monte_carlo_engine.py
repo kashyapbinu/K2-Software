@@ -434,14 +434,30 @@ class MonteCarloEngine(QObject):
         cfg = copy.deepcopy(base)
         params: dict = {}
 
-        # Wind speed: σ = base * pct / 100
-        ws_sigma = max(base.wind_speed * mc.wind_speed_uncertainty_pct / 100.0, 0.01)
-        cfg.wind_speed = max(0.0, base.wind_speed + _cg(rng, ws_sigma))
-        params["wind_speed"] = cfg.wind_speed
+        if base.wind_mode == "multi_level" and base.wind_layers:
+            # Multi-level wind: perturb the whole profile coherently — one
+            # speed scale factor and one direction offset applied to every
+            # layer (forecast uncertainty shifts the profile as a unit;
+            # per-layer independent noise would create unphysical shear).
+            speed_scale = max(0.0, 1.0 + _cg(
+                rng, mc.wind_speed_uncertainty_pct / 100.0))
+            dir_offset = _cg(rng, mc.wind_direction_uncertainty_deg)
+            cfg.wind_layers = [
+                (alt, spd * speed_scale, (drn + dir_offset) % 360.0)
+                for alt, spd, drn in base.wind_layers
+            ]
+            # Log ground-layer values so correlation/scatter plots stay meaningful
+            params["wind_speed"] = cfg.wind_layers[0][1]
+            params["wind_direction"] = cfg.wind_layers[0][2]
+        else:
+            # Wind speed: σ = base * pct / 100
+            ws_sigma = max(base.wind_speed * mc.wind_speed_uncertainty_pct / 100.0, 0.01)
+            cfg.wind_speed = max(0.0, base.wind_speed + _cg(rng, ws_sigma))
+            params["wind_speed"] = cfg.wind_speed
 
-        # Wind direction: σ = deg
-        cfg.wind_direction = base.wind_direction + _cg(rng, mc.wind_direction_uncertainty_deg)
-        params["wind_direction"] = cfg.wind_direction
+            # Wind direction: σ = deg
+            cfg.wind_direction = base.wind_direction + _cg(rng, mc.wind_direction_uncertainty_deg)
+            params["wind_direction"] = cfg.wind_direction
 
         # Dry mass: σ = base * pct / 100
         dm_sigma = max(base.dry_mass * mc.dry_mass_uncertainty_pct / 100.0, 0.001)

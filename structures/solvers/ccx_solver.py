@@ -139,6 +139,10 @@ class CalculiXSolver(FEMSolver):
         # Prevent rigid body rotation at nose
         f.write("NFWD, 2, 3, 0.0\n")
 
+        # *INITIAL CONDITIONS must appear BEFORE *STEP (CCX requirement)
+        if lc.delta_T != 0:
+            f.write("*INITIAL CONDITIONS, TYPE=TEMPERATURE\nNALL, 293.15\n")
+
         f.write("*STEP\n*STATIC\n")
         # Loads
         if lc.axial_force != 0:
@@ -149,8 +153,10 @@ class CalculiXSolver(FEMSolver):
             f.write(f"*DLOAD\nEALL, P, {-lc.internal_pressure:.4f}\n")
         if lc.delta_T != 0:
             f.write(f"** Thermal load: dT = {lc.delta_T:.1f} K\n")
-            f.write(f"*INITIAL CONDITIONS, TYPE=TEMPERATURE\nNALL, 293.15\n")
             f.write(f"*TEMPERATURE\nNALL, {293.15 + lc.delta_T:.2f}\n")
+
+        # Mapped CFD surface-pressure field (per-element *DLOAD P)
+        self._write_cfd_pressure(f, cfg)
 
         # Output requests
         f.write("*NODE FILE\nU\n")
@@ -222,6 +228,104 @@ class CalculiXSolver(FEMSolver):
         f.write(f"*TEMPERATURE\nNALL, {lc.wall_temp_K:.2f}\n")
         f.write("*NODE FILE\nNT\n")
         f.write("*END STEP\n")
+
+    # ── CFD surface-pressure mapping ──────────────────────────────────────────
+
+    def _build_fem_stations(self):
+        """Parse the structural mesh into per-element stations for pressure
+        mapping: ``(elem_id, axial, area_m2, outward_axial_normal)``.
+
+        The body axis is Z in the mesh, but ``pressure_mapping``'s IDW metric
+        treats the *second* tuple slot as the axis ('x'), so the axial (z)
+        coordinate is placed there. Returns ``[]`` if the mesh is unavailable.
+        """
+        import numpy as np
+        mesh = getattr(self, "_mesh_path", None)
+        if not mesh or not mesh.is_file():
+            return []
+        nodes, elements = {}, []
+        in_nodes = in_elems = False
+        for line in mesh.read_text(encoding="ascii", errors="replace").splitlines():
+            s = line.strip()
+            if s.startswith("*NODE"):
+                in_nodes, in_elems = True, False; continue
+            if s.startswith("*ELEMENT"):
+                in_elems, in_nodes = True, False; continue
+            if s.startswith("*"):
+                in_nodes = in_elems = False; continue
+            parts = [p for p in s.split(",") if p.strip() != ""]
+            if in_nodes and len(parts) >= 4:
+                nodes[int(parts[0])] = (float(parts[1]), float(parts[2]), float(parts[3]))
+            elif in_elems and len(parts) >= 5:
+                elements.append((int(parts[0]), [int(p) for p in parts[1:5]]))
+        if not nodes or not elements:
+            return []
+        stations = []
+        for eid, en in elements:
+            try:
+                p = [np.asarray(nodes[n], dtype=float) for n in en]
+            except KeyError:
+                continue
+            # Newell normal (magnitude = 2·area) + centroid
+            nrm = np.zeros(3)
+            for i in range(len(p)):
+                a, b = p[i], p[(i + 1) % len(p)]
+                nrm[0] += (a[1] - b[1]) * (a[2] + b[2])
+                nrm[1] += (a[2] - b[2]) * (a[0] + b[0])
+                nrm[2] += (a[0] - b[0]) * (a[1] + b[1])
+            mag = float(np.linalg.norm(nrm))
+            area = 0.5 * mag
+            centroid = sum(p) / len(p)
+            if mag > 1e-15:
+                unit = nrm / mag
+                # Outward = away from the Z body axis (radial in x,y)
+                if float(unit[0] * centroid[0] + unit[1] * centroid[1]) < 0.0:
+                    unit = -unit
+                n_axial = float(unit[2])
+            else:
+                n_axial = 0.0
+            stations.append((eid, float(centroid[2]), area, n_axial))
+        return stations
+
+    def _write_cfd_pressure(self, f, cfg: FEMConfig):
+        """Map a CFD surface-pressure field onto the mesh and emit per-element
+        ``*DLOAD ... P`` cards. No-op when no VTK is configured or parsing
+        yields nothing — the solve falls back to lumped/analytic loads.
+        """
+        vtk = getattr(cfg, "cfd_surface_vtk", None)
+        if not vtk:
+            return
+        from pathlib import Path
+        vtk = Path(vtk)
+        if not vtk.is_file():
+            logger.warning("CFD surface VTK not found: %s — skipping pressure map", vtk)
+            return
+        try:
+            from structures.pressure_mapping import (
+                _parse_vtu_points_and_pressure, map_pressures_idw,
+                generate_dload_cards)
+            cfd_pts, cfd_pres = _parse_vtu_points_and_pressure(vtk)
+            if not cfd_pts or not cfd_pres:
+                logger.warning("CFD VTK has no usable pressure data — skipping map")
+                return
+            # Remap body axis (z) into the x slot to match the IDW metric.
+            cfd_pts = [(z, x, y) for (x, y, z) in cfd_pts]
+            stations = self._build_fem_stations()
+            if not stations:
+                logger.warning("No FEM stations built — skipping CFD pressure map")
+                return
+            result = map_pressures_idw(cfd_pts, cfd_pres, stations)
+            if not result.element_pressures:
+                logger.warning("CFD pressure map produced no element loads")
+                return
+            f.write("**\n** Mapped CFD surface pressure (IDW)\n")
+            f.write(generate_dload_cards(result))
+            self._cfd_mapping = result
+            ps = [p for _, p in result.element_pressures]
+            logger.info("CFD pressure mapped onto %d elements (%.0f..%.0f Pa)",
+                        result.num_fem_elements, min(ps), max(ps))
+        except Exception as exc:
+            logger.error("CFD pressure mapping failed: %s", exc)
 
     # ── Run ──────────────────────────────────────────────────────────────────
 
@@ -529,6 +633,10 @@ class CalculiXSolver(FEMSolver):
             n_fins = 3
             F_fins_normal = q_dyn * 4.0 * aoa_rad * A_fin_plan * n_fins
             F_normal_total = F_body_normal + F_fins_normal
+            # CFD-derived lateral force (LoadCase.lateral_force) overrides the
+            # estimate when larger — conservative, mirrors the axial handling.
+            if lc.lateral_force > 0:
+                F_normal_total = max(F_normal_total, lc.lateral_force)
 
             # Bending moment at critical section
             M_bend = F_normal_total * total_L * 0.35
@@ -1196,20 +1304,14 @@ class CalculiXSolver(FEMSolver):
         r = d / 2
         wt = 0.002
 
-        from core.components import BodyTube, TrapezoidalFinSet
+        from core.components import BodyTube
         fin_info = None
         for stage in assembly.stages:
             for comp in stage.children:
                 if isinstance(comp, BodyTube):
                     wt = (comp.outer_diameter_val - comp.inner_diameter) / 2
-                if isinstance(comp, TrapezoidalFinSet) and fin_info is None:
-                    fin_info = {
-                        "count": getattr(comp, 'fin_count', 3),
-                        "span": getattr(comp, 'height', d * 0.8),
-                        "root_chord": getattr(comp, 'root_chord', L * 0.12),
-                        "tip_chord": getattr(comp, 'tip_chord', L * 0.04),
-                        "thickness": getattr(comp, 'thickness', 0.003),
-                    }
+                if fin_info is None:
+                    fin_info = _find_fin_info(comp, L, d)
 
         r_o, r_i = r + wt / 2, r - wt / 2
         A = math.pi * (r_o**2 - r_i**2)
@@ -1389,11 +1491,11 @@ class CalculiXSolver(FEMSolver):
         for i, freq in enumerate(result.frequencies_hz):
             desc = result.descriptions[i] if i < len(result.descriptions) else f"Mode {i+1}"
             if motor_1p > 0 and abs(freq - motor_1p) / motor_1p < 0.15:
-                warnings.append(f"⚠ {desc} ({freq:.0f} Hz) within 15% of motor 1P ({motor_1p:.0f} Hz)")
+                warnings.append(f"{desc} ({freq:.0f} Hz) within 15% of motor 1P ({motor_1p:.0f} Hz)")
             if motor_2p > 0 and abs(freq - motor_2p) / motor_2p < 0.15:
-                warnings.append(f"⚠ {desc} ({freq:.0f} Hz) within 15% of motor 2P ({motor_2p:.0f} Hz)")
+                warnings.append(f"{desc} ({freq:.0f} Hz) within 15% of motor 2P ({motor_2p:.0f} Hz)")
             if f_buff_low <= freq <= f_buff_high:
-                warnings.append(f"⚠ {desc} ({freq:.0f} Hz) inside aero buffet band ({f_buff_low:.0f}–{f_buff_high:.0f} Hz)")
+                warnings.append(f"{desc} ({freq:.0f} Hz) inside aero buffet band ({f_buff_low:.0f}–{f_buff_high:.0f} Hz)")
         result.resonance_warnings = warnings
 
         # ── Flutter ─────────────────────────────────────────────────
@@ -1402,19 +1504,22 @@ class CalculiXSolver(FEMSolver):
             span, t_fin = fin_info["span"], fin_info["thickness"]
             AR_fin = span**2 / (0.5 * (cr + ct) * span) if (cr + ct) > 0 else 2.0
             tc_ratio = t_fin / (0.5 * (cr + ct)) if (cr + ct) > 0 else 0.05
+            lam = ct / cr if cr > 0 else 0.5
             try:
                 P_atm, _, _ = isa_conditions(lc.altitude_m if lc.altitude_m > 0 else 3000)
             except Exception:
                 P_atm = 70000.0
-            denom = 1.337 * AR_fin**3 * P_atm / max(tc_ratio, 0.01)**3
+            # Full NACA TN-4197 form incl. taper term (matches workstation.py)
+            denom = (1.337 * AR_fin**3 * P_atm * (lam + 1)) / \
+                    (2 * (AR_fin + 2) * max(tc_ratio, 0.01)**3)
             V_flutter = a_sound * math.sqrt(G / denom) if denom > 0 and G > 0 else 9999.0
             flutter_margin = V_flutter / max(V_flight, 1.0)
             if flutter_margin >= 2.0:
                 verdict = "✓ SAFE (margin ≥ 2.0)"
             elif flutter_margin >= 1.25:
-                verdict = "⚡ ADEQUATE (margin 1.25–2.0)"
+                verdict = "ADEQUATE (margin 1.25–2.0)"
             elif flutter_margin >= 1.0:
-                verdict = "⚠ MARGINAL (margin < 1.25)"
+                verdict = "MARGINAL (margin < 1.25)"
             else:
                 verdict = "✕ FLUTTER RISK (V_flight > V_flutter)"
             result.flutter_assessment = {
@@ -1446,20 +1551,14 @@ class CalculiXSolver(FEMSolver):
         d = assembly.get_reference_diameter()
         r = d / 2
         wt = 0.002
-        from core.components import BodyTube, NoseCone, TrapezoidalFinSet
+        from core.components import BodyTube
         fin_info = None
         for stage in assembly.stages:
             for comp in stage.children:
                 if isinstance(comp, BodyTube):
                     wt = (comp.outer_diameter_val - comp.inner_diameter) / 2
-                if isinstance(comp, TrapezoidalFinSet) and fin_info is None:
-                    fin_info = {
-                        "count": getattr(comp, 'fin_count', 3),
-                        "span": getattr(comp, 'height', d * 0.8),
-                        "root_chord": getattr(comp, 'root_chord', L * 0.12),
-                        "tip_chord": getattr(comp, 'tip_chord', L * 0.04),
-                        "thickness": getattr(comp, 'thickness', 0.003),
-                    }
+                if fin_info is None:
+                    fin_info = _find_fin_info(comp, L, d)
 
         r_o, r_i = r + wt / 2, r - wt / 2
         I = math.pi / 4 * (r_o**4 - r_i**4)
@@ -1677,16 +1776,16 @@ class CalculiXSolver(FEMSolver):
             # Motor resonance check (within ±15%)
             if motor_1p > 0 and abs(freq - motor_1p) / motor_1p < 0.15:
                 warnings.append(
-                    f"⚠ {desc} ({freq:.0f} Hz) within 15% of motor 1P acoustic ({motor_1p:.0f} Hz)"
+                    f"{desc} ({freq:.0f} Hz) within 15% of motor 1P acoustic ({motor_1p:.0f} Hz)"
                 )
             if motor_2p > 0 and abs(freq - motor_2p) / motor_2p < 0.15:
                 warnings.append(
-                    f"⚠ {desc} ({freq:.0f} Hz) within 15% of motor 2P harmonic ({motor_2p:.0f} Hz)"
+                    f"{desc} ({freq:.0f} Hz) within 15% of motor 2P harmonic ({motor_2p:.0f} Hz)"
                 )
             # Aero buffeting check
             if f_buff_low <= freq <= f_buff_high:
                 warnings.append(
-                    f"⚠ {desc} ({freq:.0f} Hz) inside aero buffet band "
+                    f"{desc} ({freq:.0f} Hz) inside aero buffet band "
                     f"({f_buff_low:.0f}–{f_buff_high:.0f} Hz, St≈0.2)"
                 )
         result.resonance_warnings = warnings
@@ -1702,6 +1801,7 @@ class CalculiXSolver(FEMSolver):
 
             AR_fin = span**2 / (0.5 * (cr + ct) * span) if (cr + ct) > 0 else 2.0
             tc_ratio = t_fin / (0.5 * (cr + ct)) if (cr + ct) > 0 else 0.05
+            lam = ct / cr if cr > 0 else 0.5
             G_panel = G  # use airframe shear modulus as proxy
 
             try:
@@ -1709,8 +1809,10 @@ class CalculiXSolver(FEMSolver):
             except Exception:
                 P_atm = 70000.0
 
-            # NACA flutter parameter
-            denom = 1.337 * AR_fin**3 * P_atm / max(tc_ratio, 0.01)**3
+            # NACA flutter parameter — full TN-4197 form incl. taper term
+            # (matches workstation.py fin_analysis)
+            denom = (1.337 * AR_fin**3 * P_atm * (lam + 1)) / \
+                    (2 * (AR_fin + 2) * max(tc_ratio, 0.01)**3)
             if denom > 0 and G_panel > 0:
                 V_flutter = a_sound * math.sqrt(G_panel / denom)
             else:
@@ -1720,9 +1822,9 @@ class CalculiXSolver(FEMSolver):
             if flutter_margin >= 2.0:
                 verdict = "✓ SAFE (margin ≥ 2.0)"
             elif flutter_margin >= 1.25:
-                verdict = "⚡ ADEQUATE (margin 1.25–2.0)"
+                verdict = "ADEQUATE (margin 1.25–2.0)"
             elif flutter_margin >= 1.0:
-                verdict = "⚠ MARGINAL (margin < 1.25)"
+                verdict = "MARGINAL (margin < 1.25)"
             else:
                 verdict = "✕ FLUTTER RISK (V_flight > V_flutter)"
 
@@ -1742,6 +1844,25 @@ class CalculiXSolver(FEMSolver):
             f"(mod={freq_modifier:.3f}), {len(warnings)} resonance warnings"
         )
         return result
+
+
+def _find_fin_info(comp, L: float, d: float) -> Optional[dict]:
+    """Find the first TrapezoidalFinSet on *comp* or its children (fins are
+    normally nested under a BodyTube, not directly on the stage)."""
+    from core.components import TrapezoidalFinSet
+    if isinstance(comp, TrapezoidalFinSet):
+        return {
+            "count": getattr(comp, 'fin_count', 3),
+            "span": getattr(comp, 'height', d * 0.8),
+            "root_chord": getattr(comp, 'root_chord', L * 0.12),
+            "tip_chord": getattr(comp, 'tip_chord', L * 0.04),
+            "thickness": getattr(comp, 'thickness', 0.003),
+        }
+    for child in getattr(comp, 'children', []):
+        info = _find_fin_info(child, L, d)
+        if info is not None:
+            return info
+    return None
 
 
 def _ordinal(n: int) -> str:

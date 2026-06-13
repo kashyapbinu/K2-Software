@@ -8,15 +8,16 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem,
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QBrush, QFont
 from core.components import RocketComponent, Stage
+from ui.icons import icon as app_icon
 
 logger = logging.getLogger("K2.CompTree")
 
 ICONS = {
-    "Stage": "📦", "Nose Cone": "▲", "Body Tube": "▬", "Transition": "◇",
+    "Stage": "⬢", "Nose Cone": "▲", "Body Tube": "▬", "Transition": "◇",
     "Trapezoidal Fins": "✦", "Inner Tube": "◎", "Centering Ring": "◉",
-    "Bulkhead": "▣", "Engine Block": "▪", "Parachute": "🪂",
+    "Bulkhead": "▣", "Engine Block": "▪", "Parachute": "☂",
     "Shock Cord": "〰", "Mass Component": "●", "Launch Lug": "▫", "Rail Button": "▪",
-    "Nozzle": "🔥",
+    "Nozzle": "▽",
 }
 
 
@@ -66,26 +67,28 @@ class ComponentTree(QWidget):
         bl.setContentsMargins(0, 0, 0, 0)
         bl.setSpacing(4)
 
-        self.btn_up = QPushButton("▲")
-        self.btn_up.setToolTip("Move Up")
+        # Crisp qtawesome icons + descriptive hover tooltips (the old ▲▼⧉✕
+        # glyphs rendered inconsistently and read as random characters).
+        self.btn_up = QPushButton(app_icon("move_up", color="#c9d1d9"), "")
+        self.btn_up.setToolTip("Move component up")
         self.btn_up.setFixedSize(36, 30)
         self.btn_up.clicked.connect(self._move_up)
         bl.addWidget(self.btn_up)
 
-        self.btn_down = QPushButton("▼")
-        self.btn_down.setToolTip("Move Down")
+        self.btn_down = QPushButton(app_icon("move_down", color="#c9d1d9"), "")
+        self.btn_down.setToolTip("Move component down")
         self.btn_down.setFixedSize(36, 30)
         self.btn_down.clicked.connect(self._move_down)
         bl.addWidget(self.btn_down)
 
-        self.btn_dup = QPushButton("⧉")
-        self.btn_dup.setToolTip("Duplicate")
+        self.btn_dup = QPushButton(app_icon("duplicate", color="#58a6ff"), "")
+        self.btn_dup.setToolTip("Duplicate component")
         self.btn_dup.setFixedSize(36, 30)
         self.btn_dup.clicked.connect(self._duplicate)
         bl.addWidget(self.btn_dup)
 
-        self.btn_del = QPushButton("✕")
-        self.btn_del.setToolTip("Delete")
+        self.btn_del = QPushButton(app_icon("delete", color="#f85149"), "")
+        self.btn_del.setToolTip("Delete component")
         self.btn_del.setFixedSize(36, 30)
         self.btn_del.setProperty("danger", True)
         self.btn_del.clicked.connect(self._delete)
@@ -98,7 +101,7 @@ class ComponentTree(QWidget):
         self._updating = True
         self.tree.clear()
 
-        root = QTreeWidgetItem(self.tree, ["🚀 " + self.assembly.name])
+        root = QTreeWidgetItem(self.tree, ["⬢ " + self.assembly.name])
         root.setData(0, Qt.ItemDataRole.UserRole, None)
         f = root.font(0)
         f.setBold(True)
@@ -210,6 +213,6 @@ class ComponentTree(QWidget):
         menu.addAction("▲ Move Up", lambda: QTimer.singleShot(0, self._move_up))
         menu.addAction("▼ Move Down", lambda: QTimer.singleShot(0, self._move_down))
         menu.addSeparator()
-        menu.addAction("📋 Duplicate", lambda: QTimer.singleShot(0, self._duplicate))
-        menu.addAction("❌ Delete", lambda: QTimer.singleShot(0, self._delete))
+        menu.addAction("Duplicate", lambda: QTimer.singleShot(0, self._duplicate))
+        menu.addAction("Delete", lambda: QTimer.singleShot(0, self._delete))
         menu.exec(self.tree.viewport().mapToGlobal(pos))

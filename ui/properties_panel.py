@@ -56,15 +56,15 @@ class StabilityIndicator(QWidget):
         self.bar.setValue(min(max(progress, 0), 100))
 
         if margin < 0:
-            status, color = "⚠ UNSTABLE", "#f85149"
+            status, color = "UNSTABLE", "#f85149"
         elif margin < 0.5:
-            status, color = "⚠ MARGINAL–", "#d29922"
+            status, color = "MARGINAL–", "#d29922"
         elif margin < 1.0:
-            status, color = "⚡ MARGINAL", "#d29922"
+            status, color = "MARGINAL", "#d29922"
         elif margin <= 2.5:
             status, color = "✓ STABLE", "#7ee787"
         else:
-            status, color = "⚠ OVERSTABLE", "#d29922"
+            status, color = "OVERSTABLE", "#d29922"
 
         self.status_label.setText(status)
         self.status_label.setStyleSheet(f"font-size: 11px; color: {color}; font-weight: 600;")

@@ -1,6 +1,15 @@
 PyQt6>=6.5
+# Cinematic flight view (three.js in QWebEngineView). The Qt6 runtime wheels
+# must version-match the PyQt6 wheels (keep both on the same 6.x line).
+PyQt6-WebEngine>=6.5
 pyvista>=0.43
 pyvistaqt>=0.11
 numpy>=1.24
 scipy>=1.10
 scikit-learn>=1.3
+matplotlib>=3.7
+qtawesome>=1.3
+reportlab>=4.0
+
+# Validation suite (tests/validation, validation/) — physics benchmarking
+pytest>=7.4

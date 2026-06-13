@@ -209,6 +209,78 @@ def build_ogive_nose_interpolator(shape_param: float, sinphi: float) -> LinearIn
     return interp
 
 
+# ── Nose pressure drag (OpenRocket SymmetricComponentCalc port) ──────────────
+
+def _add_subsonic_tail(interp: LinearInterpolator, sinphi: float) -> None:
+    """Fill M=0..min with Cd = a·M^b + Cd(M=0), per OpenRocket.
+
+    Only applied when the transonic curve starts at a non-zero value
+    (e.g. a cone); smooth shapes keep zero subsonic pressure drag.
+    """
+    if not interp.x_points:
+        return
+    m_min = interp.x_points[0]
+    min_value = interp.get_value(m_min)
+    if min_value < 0.001:
+        return
+    cd_mach0 = 0.8 * sinphi ** 2
+    min_deriv = (interp.get_value(m_min + 0.01) - min_value) / 0.01
+    if cd_mach0 >= min_value - 0.01 or min_deriv <= 0.01:
+        return
+    b = m_min * min_deriv / (min_value - cd_mach0)
+    a = (min_value - cd_mach0) / m_min ** b
+    m = 0.0
+    while m < m_min:
+        interp.add_point(m, a * m ** b + cd_mach0)
+        m += 0.05
+
+
+def build_nose_pressure_interpolator(nose_type: str, nose_length: float,
+                                     radius: float) -> LinearInterpolator:
+    """Mach → nose pressure CD (referenced to frontal area), OpenRocket method.
+
+    Tangent ogive: zero at all Mach (OR's sinphi=0 special case — the profile
+    joins the body tangentially). Conical: direct formula from the half-angle.
+    Other shapes: NASA TR-R-100 fineness-3 tables extrapolated to the actual
+    nose fineness via cd = stag·(cd₃/stag)^(log(fn+1)/log4), then a subsonic
+    a·M^b tail if the transonic start is non-zero.
+    """
+    shape = (nose_type or "ogive").lower()
+    if radius <= 0 or nose_length <= 0:
+        return LinearInterpolator([0.0, 5.0], [0.0, 0.0])
+    fineness = nose_length / (2.0 * radius)
+
+    if shape == "ogive":
+        # Tangent ogive joins the body at zero slope → sinphi = 0 → no
+        # pressure drag from this term (OpenRocket special case).
+        return LinearInterpolator([0.0, 5.0], [0.0, 0.0])
+
+    if shape == "conical":
+        sinphi = radius / math.hypot(radius, nose_length)
+        interp = build_ogive_nose_interpolator(0.0, sinphi)
+        _add_subsonic_tail(interp, sinphi)
+        return interp
+
+    table = {
+        "elliptical": ELLIPSOID_TABLE,
+        "haack":      LV_HAACK_TABLE,
+        "power":      POWER_X12_TABLE,
+        "parabolic":  PARABOLIC_TABLE,
+    }.get(shape)
+    if table is None:
+        return LinearInterpolator([0.0, 5.0], [0.0, 0.0])
+
+    # Extrapolate the fineness-3 table to the actual nose fineness
+    log4 = math.log(fineness + 1.0) / math.log(4.0)
+    interp = LinearInterpolator()
+    for m in table.x_points:
+        stag = stagnation_cd(m)
+        v = table.get_value(m)
+        interp.add_point(m, stag * (v / stag) ** log4 if v > 0 else 0.0)
+    _add_subsonic_tail(interp, 0.0)
+    return interp
+
+
 # ── Surface Finish Roughness Heights ──────────────────────────────────────────
 
 class SurfaceFinish:

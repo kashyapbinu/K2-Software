@@ -155,7 +155,7 @@ class DesignWorkspace(QWidget):
             parent = self._find_body_tube(selected)
             if parent is None:
                 self.engine.log_message.emit(
-                    f"⚠ {comp.component_type} must be placed inside a Body Tube")
+                    f"{comp.component_type} must be placed inside a Body Tube")
                 return
         else:
             # Body-level components go under the active stage
@@ -220,11 +220,12 @@ class DesignWorkspace(QWidget):
                 fin_pos = c._position
                 break
 
-        # Find motor position (first inner tube marked as motor mount)
-        motor_pos = asm.total_length() * 0.85
+        # Motor AFT-end position (OR convention: motor loads flush with the
+        # mount's aft end; engine subtracts motor_length/2 to get the motor CG).
+        motor_pos = asm.total_length()
         for c in reversed(list(asm.all_components())):
             if getattr(c, 'is_motor_mount', False):
-                motor_pos = c._position + c.component_length() / 2.0
+                motor_pos = c._position + c.component_length()
                 break
 
         self.engine.update(
@@ -275,16 +276,16 @@ class DesignWorkspace(QWidget):
         self._stab_margin.setText(f"{s.stability_margin:.2f} cal")
 
         if s.stability_margin < 0.5:
-            self._stab_status.setText("⚠ UNSTABLE")
+            self._stab_status.setText("UNSTABLE")
             self._stab_status.setStyleSheet("color: #f85149; font-weight: 600; font-size: 13px;")
         elif s.stability_margin < 1.0:
-            self._stab_status.setText("⚡ MARGINAL")
+            self._stab_status.setText("MARGINAL")
             self._stab_status.setStyleSheet("color: #d29922; font-weight: 600; font-size: 13px;")
         elif s.stability_margin <= 2.5:
             self._stab_status.setText("✓ STABLE")
             self._stab_status.setStyleSheet("color: #7ee787; font-weight: 600; font-size: 13px;")
         else:
-            self._stab_status.setText("⚠ OVERSTABLE")
+            self._stab_status.setText("OVERSTABLE")
             self._stab_status.setStyleSheet("color: #d29922; font-weight: 600; font-size: 13px;")
 
     def closeEvent(self, event):

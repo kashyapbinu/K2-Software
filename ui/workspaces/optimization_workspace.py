@@ -39,7 +39,9 @@ from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QRadioButton, QButtonGroup, QSizePolicy,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QThread
+
+from ui.icons import icon as app_icon
 
 logger = logging.getLogger("K2.OptimizationWS")
 
@@ -126,6 +128,156 @@ def _dark_figure(rows=1, cols=1, figsize=(8, 5)):
     for a in (axes.flat if hasattr(axes, "flat") else [axes]):
         _style_ax(a)
     return fig, axes
+
+
+class _DOEWorker(QThread):
+    """Runs the DOE sample sweep off the UI thread.
+
+    Builds the design matrix and evaluates each point with a full batch
+    simulation, then hands ``(dm, responses)`` back for plotting on the main
+    thread. Running this inline froze the GUI for the whole sweep.
+    """
+    finished_ok = pyqtSignal(object, object)   # dm (ndarray), responses (ndarray)
+    failed = pyqtSignal(str)
+
+    def __init__(self, base_config, enabled_vars, method, n_samples, swept_fn):
+        super().__init__()
+        self._base = base_config
+        self._ev = enabled_vars
+        self._method = method
+        self._n = n_samples
+        self._swept = swept_fn
+
+    def run(self):
+        try:
+            from core.batch_simulation import run_batch_simulation
+            n_vars = len(self._ev)
+            if self._method == "Full Factorial":
+                levels = max(2, int(round(self._n ** (1.0 / n_vars))))
+                grids = [np.linspace(0, 1, levels) for _ in range(n_vars)]
+                dm = np.array(np.meshgrid(*grids)).T.reshape(-1, n_vars)[:self._n]
+            else:  # Latin Hypercube / Taguchi
+                from scipy.stats.qmc import LatinHypercube
+                n = min(self._n, 27) if self._method == "Taguchi" else self._n
+                dm = LatinHypercube(d=n_vars, seed=42).random(n=n)
+
+            responses = np.zeros(len(dm))
+            for i in range(len(dm)):
+                values = [vmin + dm[i, j] * (vmax - vmin)
+                          for j, (key, vmin, vmax) in enumerate(self._ev)]
+                cfg = self._swept(self._base, self._ev, values)
+                try:
+                    responses[i] = run_batch_simulation(cfg, seed=42 + i).apogee
+                except Exception:
+                    responses[i] = 0.0
+            self.finished_ok.emit(dm, responses)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class _SensitivityWorker(QThread):
+    """Runs sensitivity analysis (LHS sweep + method-specific sims) off the UI
+    thread. Returns a payload dict the workspace plots on the main thread.
+    Morris screening fires extra paired sims, so all simulation must live
+    here — not in the render path."""
+    finished_ok = pyqtSignal(object)   # payload dict
+    failed = pyqtSignal(str)
+
+    def __init__(self, base_config, enabled_vars, method, n_samples, swept_fn):
+        super().__init__()
+        self._base = base_config
+        self._ev = enabled_vars
+        self._method = method
+        self._n = n_samples
+        self._swept = swept_fn
+
+    def run(self):
+        try:
+            from core.batch_simulation import run_batch_simulation
+            from scipy.stats.qmc import LatinHypercube
+            ev = self._ev
+            n_vars = len(ev)
+            n = self._n
+            dm = LatinHypercube(d=n_vars, seed=42).random(n=n)
+            X = np.zeros((n, n_vars))
+            y = np.zeros(n)
+            for i in range(n):
+                vals = [vmin + dm[i, j] * (vmax - vmin)
+                        for j, (key, vmin, vmax) in enumerate(ev)]
+                for j, v in enumerate(vals):
+                    X[i, j] = v
+                cfg = self._swept(self._base, ev, vals)
+                try:
+                    y[i] = run_batch_simulation(cfg, seed=42 + i).apogee
+                except Exception:
+                    y[i] = 0.0
+
+            out = {"method": self._method, "X": X, "y": y}
+            if self._method == "Sobol Indices":
+                from scipy.stats import pearsonr
+                tv = np.var(y)
+                s1, st = [], []
+                for j in range(n_vars):
+                    bins = np.linspace(X[:, j].min(), X[:, j].max(), 11)
+                    bidx = np.digitize(X[:, j], bins)
+                    cms = [np.mean(y[bidx == b]) for b in range(1, len(bins))
+                           if np.sum(bidx == b) > 0]
+                    s1v = (np.var(cms) / tv) if (cms and tv > 0) else 0
+                    s1.append(min(s1v, 1.0))
+                    # NOTE: this is a linear correlation (r²) proxy for the
+                    # total-order index, NOT a true variance-based ST. True ST
+                    # needs Saltelli A/B re-sampling (n·(d+2) sims); the LHS
+                    # sweep here can't capture interaction variance. Labeled as
+                    # a proxy in the plot.
+                    try:
+                        r, _ = pearsonr(X[:, j], y)
+                        stv = r ** 2
+                    except Exception:
+                        stv = s1v
+                    st.append(min(max(stv, s1v), 1.0))
+                out["s1"], out["st"] = s1, st
+            elif self._method == "PRCC":
+                from scipy.stats import spearmanr
+                prcc = []
+                for j in range(n_vars):
+                    try:
+                        r, _ = spearmanr(X[:, j], y)
+                        prcc.append(r)
+                    except Exception:
+                        prcc.append(0)
+                out["prcc"] = prcc
+            else:  # Morris Screening — extra paired elementary-effect sims
+                mu_star, sigma_vals = [], []
+                for j in range(n_vars):
+                    key, vmin, vmax = ev[j]
+                    delta = 0.1
+                    effects = []
+                    for i in range(min(n - 1, 50)):
+                        v1 = X[i, j]
+                        v2 = min(v1 + delta * (vmax - vmin), vmax)
+                        base_vals = [X[i, k] for k in range(n_vars)]
+                        cfg1 = self._swept(self._base, ev, base_vals)
+                        pert = list(base_vals)
+                        pert[j] = v2
+                        cfg2 = self._swept(self._base, ev, pert)
+                        try:
+                            r1 = run_batch_simulation(cfg1, seed=1000 + i).apogee
+                            r2 = run_batch_simulation(cfg2, seed=1000 + i).apogee
+                            dx = v2 - v1
+                            if abs(dx) > 1e-12:
+                                effects.append((r2 - r1) / dx)
+                        except Exception:
+                            pass
+                    if effects:
+                        mu_star.append(np.mean(np.abs(effects)))
+                        sigma_vals.append(np.std(effects))
+                    else:
+                        mu_star.append(0)
+                        sigma_vals.append(0)
+                out["mu_star"], out["sigma"] = mu_star, sigma_vals
+            self.finished_ok.emit(out)
+        except Exception as e:
+            self.failed.emit(str(e))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -326,6 +478,13 @@ class OptimizationWorkspace(QWidget):
 
         self.chk_surrogate = QCheckBox("Enable Surrogate Acceleration")
         self.chk_surrogate.setStyleSheet(_CHK)
+        # NOTE: surrogate acceleration is not yet wired into the optimization
+        # engine (config flag is read but no algorithm consumes it). Disabled
+        # to avoid implying a speedup that does not happen. Re-enable once
+        # _run_* algorithms use core.surrogate_model.
+        self.chk_surrogate.setEnabled(False)
+        self.chk_surrogate.setChecked(False)
+        self.chk_surrogate.setToolTip("Not yet implemented — full simulation is always used.")
         vl.addWidget(self.chk_surrogate)
 
         f = QFormLayout()
@@ -335,16 +494,19 @@ class OptimizationWorkspace(QWidget):
             "Random Forest", "Gradient Boosting", "Neural Network",
             "Kriging (GP)", "RBF Interpolation", "Polynomial",
         ])
+        self.combo_surrogate.setEnabled(False)
         f.addRow("Model:", self.combo_surrogate)
 
         self.spin_surrogate_samples = QSpinBox()
         self.spin_surrogate_samples.setRange(50, 2000)
         self.spin_surrogate_samples.setValue(200)
+        self.spin_surrogate_samples.setEnabled(False)
         f.addRow("Initial Samples:", self.spin_surrogate_samples)
 
         self.chk_active_learning = QCheckBox("Active Learning")
         self.chk_active_learning.setStyleSheet(_CHK)
         self.chk_active_learning.setChecked(True)
+        self.chk_active_learning.setEnabled(False)
         f.addRow("", self.chk_active_learning)
 
         vl.addLayout(f)
@@ -473,7 +635,7 @@ class OptimizationWorkspace(QWidget):
                 ("max_apogee", "Max Apogee", "maximize"),
                 ("max_rail_exit_velocity", "Max Rail Exit Vel", "maximize"),
                 ("max_velocity", "Max Velocity", "maximize"),
-                ("max_payload_fraction", "Max Payload Fraction", "maximize"),
+                ("max_payload_fraction", "Max Inert Mass Frac", "maximize"),
             ]),
             ("  ▸ Safety", [
                 ("max_stability_margin", "Max Stability Margin", "maximize"),
@@ -588,13 +750,13 @@ class OptimizationWorkspace(QWidget):
         vl = QVBoxLayout()
         vl.setSpacing(8)
 
-        self.btn_run = QPushButton("▶  START OPTIMIZATION")
+        self.btn_run = QPushButton(app_icon("run", color="#fff"), "START OPTIMIZATION")
         self.btn_run.setStyleSheet(_BTN_P)
         self.btn_run.setMinimumHeight(42)
         self.btn_run.clicked.connect(self._on_run)
         vl.addWidget(self.btn_run)
 
-        self.btn_cancel = QPushButton("⏹  CANCEL")
+        self.btn_cancel = QPushButton(app_icon("stop", color="#fff"), "CANCEL")
         self.btn_cancel.setStyleSheet(_BTN_D)
         self.btn_cancel.setMinimumHeight(42)
         self.btn_cancel.setEnabled(False)
@@ -621,13 +783,13 @@ class OptimizationWorkspace(QWidget):
 
         # Export row
         eh = QHBoxLayout()
-        self.btn_export_csv = QPushButton("📥 CSV")
+        self.btn_export_csv = QPushButton(app_icon("export"), "CSV")
         self.btn_export_csv.setStyleSheet(_BTN_S)
         self.btn_export_csv.setEnabled(False)
         self.btn_export_csv.clicked.connect(lambda: self._on_export("csv"))
         eh.addWidget(self.btn_export_csv)
 
-        self.btn_export_json = QPushButton("📥 JSON")
+        self.btn_export_json = QPushButton(app_icon("export"), "JSON")
         self.btn_export_json.setStyleSheet(_BTN_S)
         self.btn_export_json.setEnabled(False)
         self.btn_export_json.clicked.connect(lambda: self._on_export("json"))
@@ -719,6 +881,7 @@ class OptimizationWorkspace(QWidget):
         fig4, self._ax_pareto = _dark_figure(figsize=(8, 5))
         self._canvas_pareto = FigureCanvas(fig4)
         _style_ax(self._ax_pareto, "Pareto Front", "Objective 1", "Objective 2")
+        self._canvas_pareto.mpl_connect("button_press_event", self._on_pareto_click)
         self.tabs.addTab(self._canvas_pareto, "Pareto Front")
 
         # Tab 5: DOE & Response Surfaces
@@ -740,7 +903,7 @@ class OptimizationWorkspace(QWidget):
         doe_ctrl.addWidget(QLabel("Samples:"))
         doe_ctrl.addWidget(self.spin_doe_samples)
 
-        self.btn_run_doe = QPushButton("▶ Run DOE")
+        self.btn_run_doe = QPushButton(app_icon("run"), "Run DOE")
         self.btn_run_doe.setStyleSheet(_BTN_SUCCESS)
         self.btn_run_doe.setFixedHeight(26)
         self.btn_run_doe.clicked.connect(self._on_run_doe)
@@ -772,7 +935,7 @@ class OptimizationWorkspace(QWidget):
         sens_ctrl.addWidget(QLabel("Samples:"))
         sens_ctrl.addWidget(self.spin_sens_samples)
 
-        self.btn_run_sens = QPushButton("▶ Analyze")
+        self.btn_run_sens = QPushButton(app_icon("run"), "Analyze")
         self.btn_run_sens.setStyleSheet(_BTN_SUCCESS)
         self.btn_run_sens.setFixedHeight(26)
         self.btn_run_sens.clicked.connect(self._on_run_sensitivity)
@@ -804,7 +967,7 @@ class OptimizationWorkspace(QWidget):
         self.btn_add_best.clicked.connect(self._on_add_best_trade)
         trade_ctrl.addWidget(self.btn_add_best)
 
-        self.btn_run_trade = QPushButton("▶ Compare")
+        self.btn_run_trade = QPushButton(app_icon("run"), "Compare")
         self.btn_run_trade.setStyleSheet(_BTN_SUCCESS)
         self.btn_run_trade.setFixedHeight(26)
         self.btn_run_trade.clicked.connect(self._on_run_trade)
@@ -871,7 +1034,7 @@ class OptimizationWorkspace(QWidget):
         lay.setContentsMargins(12, 14, 12, 14)
         lay.setSpacing(10)
 
-        t = QLabel("🎯  Optimization Results")
+        t = QLabel("Optimization Results")
         t.setStyleSheet(
             "color:#58a6ff; font-size:15px; font-weight:700; padding:2px 0 6px 0;"
         )
@@ -932,22 +1095,22 @@ class OptimizationWorkspace(QWidget):
             "border-radius:4px;padding:6px;font-size:11px;text-align:left;}}"
             "QPushButton:hover{{background:#1c2333;border-color:#58a6ff;}}"
         )
-        self.btn_sol_apogee = QPushButton("🏆 Best Apogee: —")
+        self.btn_sol_apogee = QPushButton(app_icon("apogee", color="#7ee787"), "Best Apogee: —")
         self.btn_sol_apogee.setStyleSheet(sol_style.format(c="#7ee787"))
         self.btn_sol_apogee.clicked.connect(lambda: self._load_pareto_solution("apogee"))
         fps.addWidget(self.btn_sol_apogee)
 
-        self.btn_sol_reliability = QPushButton("🛡 Best Reliability: —")
+        self.btn_sol_reliability = QPushButton(app_icon("reliability", color="#58a6ff"), "Best Reliability: —")
         self.btn_sol_reliability.setStyleSheet(sol_style.format(c="#58a6ff"))
         self.btn_sol_reliability.clicked.connect(lambda: self._load_pareto_solution("reliability"))
         fps.addWidget(self.btn_sol_reliability)
 
-        self.btn_sol_mass = QPushButton("⚖ Best Mass Efficiency: —")
+        self.btn_sol_mass = QPushButton(app_icon("mass", color="#bc8cff"), "Best Mass Efficiency: —")
         self.btn_sol_mass.setStyleSheet(sol_style.format(c="#bc8cff"))
         self.btn_sol_mass.clicked.connect(lambda: self._load_pareto_solution("mass"))
         fps.addWidget(self.btn_sol_mass)
 
-        self.btn_sol_balanced = QPushButton("⚡ Best Balanced: —")
+        self.btn_sol_balanced = QPushButton(app_icon("balanced", color="#f0883e"), "Best Balanced: —")
         self.btn_sol_balanced.setStyleSheet(sol_style.format(c="#f0883e"))
         self.btn_sol_balanced.clicked.connect(lambda: self._load_pareto_solution("balanced"))
         fps.addWidget(self.btn_sol_balanced)
@@ -986,6 +1149,9 @@ class OptimizationWorkspace(QWidget):
         self.lbl_stat_evals = _vl(); fs.addRow("Evaluations:", self.lbl_stat_evals)
         self.lbl_stat_time = _vl(); fs.addRow("Time:", self.lbl_stat_time)
         self.lbl_stat_algo = _vl(); fs.addRow("Algorithm:", self.lbl_stat_algo)
+        self.lbl_stat_feasible = _vl(); fs.addRow("Feasible:", self.lbl_stat_feasible)
+        self.lbl_stat_best_gen = _vl(); fs.addRow("Best Generation:", self.lbl_stat_best_gen)
+        self.lbl_stat_hv = _vl(); fs.addRow("Hypervolume:", self.lbl_stat_hv)
         self.lbl_stat_surrogate = _vl(); fs.addRow("Surrogate R²:", self.lbl_stat_surrogate)
         gs.setLayout(fs)
         lay.addWidget(gs)
@@ -1077,6 +1243,12 @@ class OptimizationWorkspace(QWidget):
         mode_btn = self._mode_group.checkedButton()
         mode_val = mode_btn.property("mode_value") if mode_btn else "standard"
 
+        # Auto mission mode: a non-zero target apogee in Standard mode is
+        # otherwise silently ignored (Standard maximizes mean apogee). Treat
+        # it as a Mission Target so the optimizer actually hits the target.
+        if mode_val == "standard" and self.spin_target_apogee.value() > 0:
+            mode_val = "mission"
+
         # Surrogate
         surr_map = {
             0: "random_forest", 1: "gradient_boosting", 2: "neural_network",
@@ -1104,7 +1276,25 @@ class OptimizationWorkspace(QWidget):
             parallel=self.chk_parallel.isChecked(),
             n_workers=self.spin_workers.value(),
         )
+        # Remember the user's enabled objectives so plots show THOSE axes,
+        # not just the first keys of the objectives dict.
+        self._active_objectives = [(o.name, o.direction) for o in objectives]
         return config
+
+    def _plot_objective_axes(self, fallback_design):
+        """First two user-enabled objectives as [(key, direction), ...].
+        Falls back to the first two dict keys when fewer than 2 enabled."""
+        active = getattr(self, "_active_objectives", [])
+        if len(active) >= 2:
+            return active[0], active[1]
+        keys = list(fallback_design.objectives.keys())
+        if len(keys) < 2:
+            keys = keys + keys
+        pairs = [(k, "maximize") for k in keys[:2]]
+        if len(active) == 1:
+            other = next((p for p in pairs if p[0] != active[0][0]), pairs[1])
+            return active[0], other
+        return pairs[0], pairs[1]
 
     def _on_run(self):
         """Collect config and start optimization."""
@@ -1279,68 +1469,102 @@ class OptimizationWorkspace(QWidget):
 
     def _update_convergence_incremental(self, gen_data):
         """Incrementally update the convergence plot."""
-        ax = self._ax_conv
         if not hasattr(self, '_conv_bests'):
             self._conv_bests = []
             self._conv_means = []
             self._conv_worsts = []
+            self._conv_feas = []
 
         self._conv_bests.append(gen_data.get("best_fitness", 0))
         self._conv_means.append(gen_data.get("mean_fitness", 0))
         self._conv_worsts.append(gen_data.get("worst_fitness", 0))
+        self._conv_feas.append(gen_data.get("feasible_pct", 0))
 
+        self._draw_convergence(self._conv_bests, self._conv_means,
+                               self._conv_worsts, self._conv_feas,
+                               draw_idle=True)
+
+    def _draw_convergence(self, bests, means, worsts, feas, draw_idle=False):
+        """Render the Best/Mean/Worst fitness curves + a feasible-% secondary
+        axis. Quadratic constraint penalties can drive worst fitness to large
+        negative values that would flatten the readable Best/Mean trend under
+        autoscale — so the y-axis is clipped to a robust range built from the
+        Best/Mean curves, and Worst is drawn clipped (still visible where it
+        enters range)."""
+        ax = self._ax_conv
+        fig = ax.figure
+        # Drop any previous twin axis so we don't stack feasible-% axes.
+        for extra in [a for a in fig.axes if a is not ax]:
+            extra.remove()
         ax.clear()
         _style_ax(ax, "Fitness Convergence", "Generation", "Fitness")
 
-        gens = list(range(len(self._conv_bests)))
-        ax.plot(gens, self._conv_bests, color="#7ee787", linewidth=2, label="Best")
-        ax.fill_between(gens, self._conv_worsts, self._conv_bests,
-                         alpha=0.15, color="#58a6ff")
-        ax.plot(gens, self._conv_means, color="#58a6ff", linewidth=1.2,
-                alpha=0.7, linestyle="--", label="Mean")
-        ax.plot(gens, self._conv_worsts, color="#f85149", linewidth=0.8,
-                alpha=0.5, label="Worst")
+        gens = list(range(len(bests)))
+        ax.plot(gens, bests, color="#7ee787", linewidth=2, label="Best", zorder=4)
+        ax.plot(gens, means, color="#58a6ff", linewidth=1.2, alpha=0.8,
+                linestyle="--", label="Mean", zorder=3)
+        ax.fill_between(gens, worsts, bests, alpha=0.12, color="#58a6ff", zorder=1)
+        ax.plot(gens, worsts, color="#f85149", linewidth=0.8, alpha=0.5,
+                label="Worst", zorder=2)
+
+        # Robust y-limits from the Best/Mean curves (the meaningful signal).
+        focus = np.array([v for v in (bests + means)
+                          if v is not None and np.isfinite(v)], dtype=float)
+        if focus.size:
+            ylo, yhi = float(focus.min()), float(focus.max())
+            pad = 0.1 * (yhi - ylo) if yhi > ylo else (abs(yhi) * 0.1 or 1.0)
+            # Let the y-axis reach a little below Best/Mean toward Worst, but not
+            # all the way to catastrophic penalty values.
+            wfin = np.array([w for w in worsts if w is not None and np.isfinite(w)],
+                            dtype=float)
+            floor = ylo - pad
+            if wfin.size:
+                floor = max(float(np.percentile(wfin, 25)), ylo - 5 * (yhi - ylo + 1))
+            ax.set_ylim(min(floor, ylo - pad), yhi + pad)
+
+        # Feasible-% secondary curve.
+        if any(f for f in feas):
+            ax2 = ax.twinx()
+            ax2.plot(gens, feas, color="#d29922", linewidth=1.1, alpha=0.7,
+                     linestyle=":", label="Feasible %")
+            ax2.set_ylim(0, 105)
+            ax2.set_ylabel("Feasible %", color="#d29922", fontsize=9)
+            ax2.tick_params(axis="y", colors="#d29922", labelsize=8)
+            ax2.spines["right"].set_color("#30363d")
+            ax2.spines["top"].set_visible(False)
 
         ax.legend(facecolor="#161b22", edgecolor="#30363d",
                   labelcolor="#c9d1d9", fontsize=8, loc="lower right")
-
-        ax.figure.tight_layout()
-        self._canvas_conv.draw_idle()
+        fig.tight_layout()
+        if draw_idle:
+            self._canvas_conv.draw_idle()
+        else:
+            self._canvas_conv.draw()
 
     def _update_all_plots(self, result):
         """Update all plots after optimization completes."""
         self._conv_bests = []
         self._conv_means = []
         self._conv_worsts = []
+        self._conv_feas = []
 
         self._plot_convergence(result)
         self._plot_multi_objective(result)
         self._plot_pareto(result)
 
     def _plot_convergence(self, result):
-        ax = self._ax_conv
-        ax.clear()
-        _style_ax(ax, "Fitness Convergence", "Generation", "Fitness")
-
         if not result.generation_history:
+            self._ax_conv.clear()
+            _style_ax(self._ax_conv, "Fitness Convergence", "Generation", "Fitness")
             self._canvas_conv.draw()
             return
 
-        gens = [g.get("generation", i) for i, g in enumerate(result.generation_history)]
-        bests = [g.get("best_fitness", 0) for g in result.generation_history]
-        means = [g.get("mean_fitness", 0) for g in result.generation_history]
-        worsts = [g.get("worst_fitness", 0) for g in result.generation_history]
-
-        ax.plot(gens, bests, color="#7ee787", linewidth=2, label="Best", zorder=3)
-        ax.fill_between(gens, worsts, bests, alpha=0.12, color="#58a6ff")
-        ax.plot(gens, means, color="#58a6ff", linewidth=1.2, alpha=0.8,
-                linestyle="--", label="Mean")
-        ax.plot(gens, worsts, color="#f85149", linewidth=0.8, alpha=0.5, label="Worst")
-
-        ax.legend(facecolor="#161b22", edgecolor="#30363d",
-                  labelcolor="#c9d1d9", fontsize=8, loc="lower right")
-        ax.figure.tight_layout()
-        self._canvas_conv.draw()
+        hist = result.generation_history
+        bests = [g.get("best_fitness", 0) for g in hist]
+        means = [g.get("mean_fitness", 0) for g in hist]
+        worsts = [g.get("worst_fitness", 0) for g in hist]
+        feas = [g.get("feasible_pct", 0) for g in hist]
+        self._draw_convergence(bests, means, worsts, feas)
 
     def _plot_multi_objective(self, result):
         ax = self._ax_multi
@@ -1351,11 +1575,8 @@ class OptimizationWorkspace(QWidget):
             self._canvas_multi.draw()
             return
 
-        # Get first two objective keys
-        obj_keys = list(result.all_designs[0].objectives.keys())
-        if len(obj_keys) < 2:
-            obj_keys = obj_keys + obj_keys  # duplicate if only one
-        k1, k2 = obj_keys[0], obj_keys[1]
+        # Plot the objectives the user actually optimised
+        (k1, _), (k2, _) = self._plot_objective_axes(result.all_designs[0])
 
         # All designs
         x_all = [d.objectives.get(k1, 0) for d in result.all_designs]
@@ -1397,20 +1618,23 @@ class OptimizationWorkspace(QWidget):
         _style_ax(ax, "Pareto Front — Trade-Off Curve", "", "")
 
         if not result.pareto_front or len(result.pareto_front) < 2:
-            ax.text(0.5, 0.5, "Run multi-objective optimization\nto generate Pareto front",
+            ax.text(0.5, 0.5, "Select ≥2 objectives, then run\nto generate a Pareto front",
                     transform=ax.transAxes, ha="center", va="center",
                     color="#484f58", fontsize=13)
             self._canvas_pareto.draw()
             return
 
-        obj_keys = list(result.pareto_front[0].objectives.keys())
-        if len(obj_keys) < 2:
-            self._canvas_pareto.draw()
-            return
-
-        k1, k2 = obj_keys[0], obj_keys[1]
+        (k1, dir1), (k2, dir2) = self._plot_objective_axes(result.pareto_front[0])
         x_vals = [d.objectives.get(k1, 0) for d in result.pareto_front]
         y_vals = [d.objectives.get(k2, 0) for d in result.pareto_front]
+
+        # Cache for click-to-inspect (see _on_pareto_click).
+        self._pareto_pick = {
+            "designs": list(result.pareto_front),
+            "x": np.asarray(x_vals, dtype=float),
+            "y": np.asarray(y_vals, dtype=float),
+            "k1": k1, "k2": k2,
+        }
 
         # Rank by color gradient
         n = len(result.pareto_front)
@@ -1423,16 +1647,17 @@ class OptimizationWorkspace(QWidget):
         ax.plot([p[0] for p in pairs], [p[1] for p in pairs],
                 color="#58a6ff", linewidth=1.5, alpha=0.4, zorder=2)
 
-        # Annotate best solutions
+        # Annotate best solutions (direction-aware: best of a minimize
+        # objective is its minimum)
         if x_vals:
-            idx_best_x = int(np.argmax(x_vals))
+            idx_best_x = int(np.argmax(x_vals) if dir1 == "maximize" else np.argmin(x_vals))
             ax.annotate("Best " + k1.replace("_", " "),
                         (x_vals[idx_best_x], y_vals[idx_best_x]),
                         textcoords="offset points", xytext=(10, 10),
                         fontsize=8, color="#7ee787",
                         arrowprops=dict(arrowstyle="->", color="#7ee787", lw=0.8))
 
-            idx_best_y = int(np.argmax(y_vals))
+            idx_best_y = int(np.argmax(y_vals) if dir2 == "maximize" else np.argmin(y_vals))
             if idx_best_y != idx_best_x:
                 ax.annotate("Best " + k2.replace("_", " "),
                             (x_vals[idx_best_y], y_vals[idx_best_y]),
@@ -1440,9 +1665,9 @@ class OptimizationWorkspace(QWidget):
                             fontsize=8, color="#bc8cff",
                             arrowprops=dict(arrowstyle="->", color="#bc8cff", lw=0.8))
 
-        # Utopia point
-        ux = max(x_vals) if x_vals else 0
-        uy = max(y_vals) if y_vals else 0
+        # Utopia point (per-axis ideal, respecting objective direction)
+        ux = (max(x_vals) if dir1 == "maximize" else min(x_vals)) if x_vals else 0
+        uy = (max(y_vals) if dir2 == "maximize" else min(y_vals)) if y_vals else 0
         ax.scatter([ux], [uy], c="#f0883e", s=120, marker="D", zorder=5,
                    label="Utopia Point", edgecolors="#ffffff", linewidths=1)
 
@@ -1452,6 +1677,54 @@ class OptimizationWorkspace(QWidget):
                   labelcolor="#c9d1d9", fontsize=8, loc="upper right")
         ax.figure.tight_layout()
         self._canvas_pareto.draw()
+
+    def _on_pareto_click(self, event):
+        """Click a Pareto point to inspect it: highlight it, annotate its key
+        metrics, and load its full parameter set into the results panel."""
+        pick = getattr(self, "_pareto_pick", None)
+        if pick is None or event.inaxes is not self._ax_pareto:
+            return
+        if event.xdata is None or event.ydata is None or not len(pick["x"]):
+            return
+
+        ax = self._ax_pareto
+        # Nearest point in axis-normalized space (the two objectives have very
+        # different scales, so normalize by the current view limits).
+        xr = (ax.get_xlim()[1] - ax.get_xlim()[0]) or 1.0
+        yr = (ax.get_ylim()[1] - ax.get_ylim()[0]) or 1.0
+        dx = (pick["x"] - event.xdata) / xr
+        dy = (pick["y"] - event.ydata) / yr
+        idx = int(np.argmin(dx * dx + dy * dy))
+        design = pick["designs"][idx]
+
+        # Remove a previous pick annotation/marker, if any.
+        for art in getattr(self, "_pareto_pick_artists", []):
+            try:
+                art.remove()
+            except Exception:
+                pass
+        self._pareto_pick_artists = []
+
+        px, py = pick["x"][idx], pick["y"][idx]
+        m = ax.scatter([px], [py], s=180, facecolors="none",
+                       edgecolors="#f0883e", linewidths=2.0, zorder=6)
+        v = design.variables
+        mc = design.mc_stats or {}
+        txt = (f"{pick['k1'].replace('_', ' ')}: {px:.2f}\n"
+               f"{pick['k2'].replace('_', ' ')}: {py:.2f}\n"
+               f"Ø {v.get('diameter', 0):.3f} m · L {v.get('length', 0):.2f} m\n"
+               f"mass {v.get('dry_mass', 0):.2f} kg · "
+               f"apogee {mc.get('mean_apogee', 0):.0f} m")
+        ann = ax.annotate(txt, (px, py), textcoords="offset points", xytext=(12, 12),
+                          fontsize=8, color="#e6edf3",
+                          bbox=dict(boxstyle="round,pad=0.4", fc="#161b22",
+                                    ec="#f0883e", lw=1.0),
+                          zorder=7)
+        self._pareto_pick_artists = [m, ann]
+        self._canvas_pareto.draw_idle()
+
+        # Push the full design into the right-hand results panel.
+        self._update_results_panel_from_design(design)
 
     # ═════════════════════════════════════════════════════════════════════════
     #  DESIGN SPACE EXPLORER
@@ -1593,86 +1866,95 @@ class OptimizationWorkspace(QWidget):
     #  DOE & SENSITIVITY (run via thread)
     # ═════════════════════════════════════════════════════════════════════════
 
+    def _make_swept_config(self, base_config, enabled_vars, values):
+        """Apply swept variable values onto a base config using the SAME mapping
+        the optimizer uses (fin_span→fin_height, motor designation lookup, and
+        derived avg/max thrust from total impulse). Direct setattr would leave
+        motor_avg_thrust / fin_height stale, so propulsion and fin sweeps would
+        have no effect on the simulation."""
+        from core.optimization_engine import build_candidate_config, DesignVariable
+        dv_list = [
+            DesignVariable(
+                name=k, display_name=k, category="",
+                min_val=mn, max_val=mx, current_val=mn, enabled=True,
+                var_type="integer" if k == "fin_count" else "continuous",
+            )
+            for (k, mn, mx) in enabled_vars
+        ]
+        variables = {ev[0]: val for ev, val in zip(enabled_vars, values)}
+        return build_candidate_config(base_config, variables, dv_list)
+
     def _on_run_doe(self):
-        """Run Design of Experiments analysis."""
+        """Launch Design of Experiments analysis on a worker thread."""
+        if getattr(self, "_doe_worker", None) is not None and self._doe_worker.isRunning():
+            return
+        from core.batch_simulation import BatchSimConfig
+
+        enabled_vars = []
+        for key, (chk, smin, smax, cat) in self._var_widgets.items():
+            if chk.isChecked():
+                enabled_vars.append((key, smin.value(), smax.value()))
+        if len(enabled_vars) < 1:
+            QMessageBox.warning(self, "DOE Error", "Enable at least 1 design variable.")
+            return
+
         self.progress_label.setText("Running DOE analysis…")
         self.btn_run_doe.setEnabled(False)
-
         try:
-            from core.doe_engine import latin_hypercube, full_factorial, compute_main_effects
-            from core.batch_simulation import BatchSimConfig, run_batch_simulation
-
-            # Get enabled variables
-            enabled_vars = []
-            for key, (chk, smin, smax, cat) in self._var_widgets.items():
-                if chk.isChecked():
-                    enabled_vars.append((key, smin.value(), smax.value()))
-
-            if len(enabled_vars) < 1:
-                QMessageBox.warning(self, "DOE Error", "Enable at least 1 design variable.")
-                self.btn_run_doe.setEnabled(True)
-                return
-
-            n_samples = self.spin_doe_samples.value()
-            method = self.combo_doe_method.currentText()
-
-            # Build design matrix
-            n_vars = len(enabled_vars)
-            if method == "Latin Hypercube":
-                from scipy.stats.qmc import LatinHypercube
-                sampler = LatinHypercube(d=n_vars, seed=42)
-                dm = sampler.random(n=n_samples)
-            elif method == "Full Factorial":
-                levels = max(2, int(round(n_samples ** (1.0 / n_vars))))
-                grids = [np.linspace(0, 1, levels) for _ in range(n_vars)]
-                mesh = np.array(np.meshgrid(*grids)).T.reshape(-1, n_vars)
-                dm = mesh[:n_samples]
-            else:  # Taguchi
-                from scipy.stats.qmc import LatinHypercube
-                sampler = LatinHypercube(d=n_vars, seed=42)
-                dm = sampler.random(n=min(n_samples, 27))
-
-            # Scale to actual ranges
             base_config = BatchSimConfig.from_rocket_state(self.engine.state)
-            responses = []
-            for i in range(len(dm)):
-                cfg = copy.deepcopy(base_config)
-                for j, (key, vmin, vmax) in enumerate(enabled_vars):
-                    val = vmin + dm[i, j] * (vmax - vmin)
-                    if hasattr(cfg, key):
-                        setattr(cfg, key, val)
-                try:
-                    res = run_batch_simulation(cfg, seed=42 + i)
-                    responses.append(res.apogee)
-                except Exception:
-                    responses.append(0.0)
+            self._doe_worker = _DOEWorker(
+                base_config, enabled_vars, self.combo_doe_method.currentText(),
+                self.spin_doe_samples.value(), self._make_swept_config)
+            self._doe_worker.finished_ok.connect(
+                lambda dm, resp, ev=enabled_vars: self._render_doe(ev, dm, resp))
+            self._doe_worker.failed.connect(self._on_doe_failed)
+            self._doe_worker.start()
+        except Exception as e:
+            self._on_doe_failed(str(e))
 
-            responses = np.array(responses)
+    def _on_doe_failed(self, msg):
+        QMessageBox.warning(self, "DOE Error", f"DOE analysis failed:\n\n{msg}")
+        logger.error(f"DOE failed: {msg}")
+        self.progress_label.setText("DOE failed.")
+        self.btn_run_doe.setEnabled(True)
 
-            # Plot results
+    def _render_doe(self, enabled_vars, dm, responses):
+        """Plot DOE main effects + response surface (runs on the UI thread)."""
+        try:
+            n_vars = len(enabled_vars)
+            n_samples = len(dm)
+            responses = np.asarray(responses)
+
             ax_left, ax_right = self._ax_doe
             ax_left.clear()
             ax_right.clear()
 
             # Main effects plot
             var_names = [v[0] for v in enabled_vars]
-            _style_ax(ax_left, "Main Effects", "Variable", "Mean Response")
-            if len(enabled_vars) <= 8:
-                effects = []
-                for j in range(n_vars):
-                    median_val = np.median(dm[:, j])
-                    low_mask = dm[:, j] < median_val
-                    high_mask = dm[:, j] >= median_val
-                    if np.sum(low_mask) > 0 and np.sum(high_mask) > 0:
-                        effect = np.mean(responses[high_mask]) - np.mean(responses[low_mask])
-                    else:
-                        effect = 0
-                    effects.append(effect)
+            _style_ax(ax_left, "Main Effects (Δ mean response)", "Apogee Δ (m)", "")
+            # Main effect of each variable = mean response over its upper half
+            # minus its lower half. Computed for every variable (no cap) and
+            # ranked by magnitude so the panel is never blank when DOE data
+            # exists and reads as an importance ranking.
+            effects = []
+            for j in range(n_vars):
+                median_val = np.median(dm[:, j])
+                low_mask = dm[:, j] < median_val
+                high_mask = dm[:, j] >= median_val
+                if np.sum(low_mask) > 0 and np.sum(high_mask) > 0:
+                    effect = np.mean(responses[high_mask]) - np.mean(responses[low_mask])
+                else:
+                    effect = 0.0
+                effects.append(effect)
 
-                colors = ["#7ee787" if e > 0 else "#f85149" for e in effects]
-                ax_left.barh(var_names, effects, color=colors, alpha=0.8,
-                             edgecolor="#30363d")
-                ax_left.axvline(0, color="#484f58", linewidth=0.5)
+            effects = np.asarray(effects, dtype=float)
+            order = np.argsort(np.abs(effects))        # ascending → largest on top
+            names_o = [var_names[i] for i in order]
+            eff_o = effects[order]
+            colors = ["#7ee787" if e > 0 else "#f85149" for e in eff_o]
+            ax_left.barh(names_o, eff_o, color=colors, alpha=0.8,
+                         edgecolor="#30363d")
+            ax_left.axvline(0, color="#484f58", linewidth=0.5)
 
             # Response surface contour (first two variables)
             _style_ax(ax_right, "Response Surface", "", "")
@@ -1741,130 +2023,80 @@ class OptimizationWorkspace(QWidget):
             self.btn_run_doe.setEnabled(True)
 
     def _on_run_sensitivity(self):
-        """Run sensitivity analysis."""
+        """Launch sensitivity analysis on a worker thread."""
+        if getattr(self, "_sens_worker", None) is not None and self._sens_worker.isRunning():
+            return
+        from core.batch_simulation import BatchSimConfig
+
+        enabled_vars = []
+        for key, (chk, smin, smax, cat) in self._var_widgets.items():
+            if chk.isChecked():
+                enabled_vars.append((key, smin.value(), smax.value()))
+        if len(enabled_vars) < 2:
+            QMessageBox.warning(self, "Sensitivity Error",
+                "Enable at least 2 design variables.")
+            return
+
         self.progress_label.setText("Running sensitivity analysis…")
         self.btn_run_sens.setEnabled(False)
-
         try:
-            from core.batch_simulation import BatchSimConfig, run_batch_simulation
-
-            enabled_vars = []
-            for key, (chk, smin, smax, cat) in self._var_widgets.items():
-                if chk.isChecked():
-                    enabled_vars.append((key, smin.value(), smax.value()))
-
-            if len(enabled_vars) < 2:
-                QMessageBox.warning(self, "Sensitivity Error",
-                    "Enable at least 2 design variables.")
-                self.btn_run_sens.setEnabled(True)
-                return
-
-            n_samples = self.spin_sens_samples.value()
-            n_vars = len(enabled_vars)
-            method = self.combo_sens_method.currentText()
-
             base_config = BatchSimConfig.from_rocket_state(self.engine.state)
+            self._sens_worker = _SensitivityWorker(
+                base_config, enabled_vars, self.combo_sens_method.currentText(),
+                self.spin_sens_samples.value(), self._make_swept_config)
+            self._sens_worker.finished_ok.connect(
+                lambda out, ev=enabled_vars: self._render_sensitivity(ev, out))
+            self._sens_worker.failed.connect(self._on_sens_failed)
+            self._sens_worker.start()
+        except Exception as e:
+            self._on_sens_failed(str(e))
 
-            # Generate samples via LHS
-            from scipy.stats.qmc import LatinHypercube
-            sampler = LatinHypercube(d=n_vars, seed=42)
-            dm = sampler.random(n=n_samples)
+    def _on_sens_failed(self, msg):
+        QMessageBox.warning(self, "Sensitivity Error",
+            f"Sensitivity analysis failed:\n\n{msg}")
+        logger.error(f"Sensitivity analysis failed: {msg}")
+        self.progress_label.setText("Sensitivity analysis failed.")
+        self.btn_run_sens.setEnabled(True)
 
-            # Evaluate
-            X_data = np.zeros((n_samples, n_vars))
-            y_data = np.zeros(n_samples)
-            for i in range(n_samples):
-                cfg = copy.deepcopy(base_config)
-                for j, (key, vmin, vmax) in enumerate(enabled_vars):
-                    val = vmin + dm[i, j] * (vmax - vmin)
-                    X_data[i, j] = val
-                    if hasattr(cfg, key):
-                        setattr(cfg, key, val)
-                try:
-                    res = run_batch_simulation(cfg, seed=42 + i)
-                    y_data[i] = res.apogee
-                except Exception:
-                    y_data[i] = 0.0
-
+    def _render_sensitivity(self, enabled_vars, out):
+        """Plot sensitivity results (runs on the UI thread — no simulation)."""
+        try:
+            n_vars = len(enabled_vars)
             var_names = [v[0].replace("_", " ").title() for v in enabled_vars]
+            X_data, y_data, method = out["X"], out["y"], out["method"]
 
             ax_left, ax_right = self._ax_sens
             ax_left.clear()
             ax_right.clear()
 
             if method == "Sobol Indices":
-                # Approximate Sobol using variance decomposition
                 _style_ax(ax_left, "First-Order Sobol Indices (S1)", "", "")
-                _style_ax(ax_right, "Total-Order Sobol Indices (ST)", "", "")
-
-                total_var = np.var(y_data)
-                s1_vals = []
-                st_vals = []
-                for j in range(n_vars):
-                    # First order: Var(E[Y|Xi]) / Var(Y)
-                    bins = np.linspace(X_data[:, j].min(), X_data[:, j].max(), 11)
-                    bin_idx = np.digitize(X_data[:, j], bins)
-                    conditional_means = []
-                    for b in range(1, len(bins)):
-                        mask = bin_idx == b
-                        if np.sum(mask) > 0:
-                            conditional_means.append(np.mean(y_data[mask]))
-                    if conditional_means and total_var > 0:
-                        s1 = np.var(conditional_means) / total_var
-                    else:
-                        s1 = 0
-                    s1_vals.append(min(s1, 1.0))
-
-                    # Total order: 1 - Var(E[Y|X~i]) / Var(Y)
-                    other_dims = [k for k in range(n_vars) if k != j]
-                    if other_dims:
-                        # Group by other dimensions
-                        from scipy.stats import pearsonr
-                        try:
-                            r, _ = pearsonr(X_data[:, j], y_data)
-                            st = r ** 2
-                        except Exception:
-                            st = s1
-                    else:
-                        st = s1
-                    st_vals.append(min(max(st, s1), 1.0))
-
-                colors_s1 = ["#58a6ff"] * n_vars
-                colors_st = ["#bc8cff"] * n_vars
-
-                ax_left.barh(var_names, s1_vals, color=colors_s1, alpha=0.8,
-                             edgecolor="#30363d")
-                ax_right.barh(var_names, st_vals, color=colors_st, alpha=0.8,
-                              edgecolor="#30363d")
+                _style_ax(ax_right, "Total-Order (linear r² proxy)", "", "")
+                # Rank by first-order influence (largest at top) so both panels
+                # read as an importance ranking, not raw variable order.
+                s1 = np.asarray(out["s1"], dtype=float)
+                st = np.asarray(out["st"], dtype=float)
+                order = np.argsort(s1)              # ascending → barh puts max on top
+                names_o = [var_names[i] for i in order]
+                ax_left.barh(names_o, s1[order], color="#58a6ff",
+                             alpha=0.8, edgecolor="#30363d")
+                ax_right.barh(names_o, st[order], color="#bc8cff",
+                              alpha=0.8, edgecolor="#30363d")
                 ax_left.set_xlim(0, 1)
                 ax_right.set_xlim(0, 1)
 
             elif method == "PRCC":
-                # Partial Rank Correlation
                 _style_ax(ax_left, "PRCC — Tornado Plot", "PRCC", "")
                 _style_ax(ax_right, "Scatter vs Apogee", "", "Apogee (m)")
-
-                from scipy.stats import spearmanr
-                prcc_vals = []
-                for j in range(n_vars):
-                    try:
-                        r, _ = spearmanr(X_data[:, j], y_data)
-                        prcc_vals.append(r)
-                    except Exception:
-                        prcc_vals.append(0)
-
-                # Sort by absolute value
+                prcc_vals = out["prcc"]
                 sorted_idx = np.argsort(np.abs(prcc_vals))
                 sorted_names = [var_names[i] for i in sorted_idx]
                 sorted_vals = [prcc_vals[i] for i in sorted_idx]
-
                 colors = ["#7ee787" if v > 0 else "#f85149" for v in sorted_vals]
                 ax_left.barh(sorted_names, sorted_vals, color=colors, alpha=0.8,
                              edgecolor="#30363d")
                 ax_left.axvline(0, color="#484f58", linewidth=0.5)
                 ax_left.set_xlim(-1, 1)
-
-                # Scatter of most important variable
                 if sorted_idx.size > 0:
                     best_j = sorted_idx[-1]
                     ax_right.scatter(X_data[:, best_j], y_data,
@@ -1874,59 +2106,26 @@ class OptimizationWorkspace(QWidget):
             else:  # Morris Screening
                 _style_ax(ax_left, "Morris μ* (Importance)", "μ*", "")
                 _style_ax(ax_right, "Morris σ (Interaction)", "σ", "")
-
-                mu_star = []
-                sigma_vals = []
-                for j in range(n_vars):
-                    # Elementary effects
-                    delta = 0.1
-                    effects = []
-                    for i in range(min(n_samples - 1, 50)):
-                        cfg1 = copy.deepcopy(base_config)
-                        cfg2 = copy.deepcopy(base_config)
-                        key, vmin, vmax = enabled_vars[j]
-                        v1 = X_data[i, j]
-                        v2 = min(v1 + delta * (vmax - vmin), vmax)
-                        for k, (kk, _, _) in enumerate(enabled_vars):
-                            if hasattr(cfg1, kk):
-                                setattr(cfg1, kk, X_data[i, k])
-                                setattr(cfg2, kk, X_data[i, k])
-                        if hasattr(cfg2, key):
-                            setattr(cfg2, key, v2)
-                        try:
-                            r1 = run_batch_simulation(cfg1, seed=1000 + i).apogee
-                            r2 = run_batch_simulation(cfg2, seed=1000 + i).apogee
-                            dx = v2 - v1
-                            if abs(dx) > 1e-12:
-                                effects.append((r2 - r1) / dx)
-                        except Exception:
-                            pass
-
-                    if effects:
-                        mu_star.append(np.mean(np.abs(effects)))
-                        sigma_vals.append(np.std(effects))
-                    else:
-                        mu_star.append(0)
-                        sigma_vals.append(0)
-
-                ax_left.barh(var_names, mu_star, color="#58a6ff", alpha=0.8,
+                # Rank by μ* (importance), largest at top.
+                mu = np.asarray(out["mu_star"], dtype=float)
+                sig = np.asarray(out["sigma"], dtype=float)
+                order = np.argsort(mu)
+                names_o = [var_names[i] for i in order]
+                ax_left.barh(names_o, mu[order], color="#58a6ff", alpha=0.8,
                              edgecolor="#30363d")
-                ax_right.barh(var_names, sigma_vals, color="#f0883e", alpha=0.8,
+                ax_right.barh(names_o, sig[order], color="#f0883e", alpha=0.8,
                               edgecolor="#30363d")
 
             for a in self._ax_sens:
                 a.figure.tight_layout()
             self._canvas_sens.draw()
-
             self.progress_label.setText(
-                f"Sensitivity analysis complete — {n_samples} samples, "
-                f"{n_vars} variables"
-            )
-
+                f"Sensitivity analysis complete — {len(y_data)} samples, "
+                f"{n_vars} variables")
         except Exception as e:
             QMessageBox.warning(self, "Sensitivity Error",
-                f"Sensitivity analysis failed:\n\n{e}")
-            logger.error(f"Sensitivity analysis failed: {e}", exc_info=True)
+                f"Sensitivity render failed:\n\n{e}")
+            logger.error(f"Sensitivity render failed: {e}", exc_info=True)
         finally:
             self.btn_run_sens.setEnabled(True)
 
@@ -2153,7 +2352,7 @@ class OptimizationWorkspace(QWidget):
             satisfied = info.get("satisfied", True)
             value = info.get("value", 0)
             limit = info.get("limit", 0)
-            icon = "✅" if satisfied else "❌"
+            icon = "✓" if satisfied else "✗"
             color = "#7ee787" if satisfied else "#f85149"
 
             lbl = QLabel(f"{icon} {name}: {value:.2f} (limit: {limit:.2f})")
@@ -2172,7 +2371,7 @@ class OptimizationWorkspace(QWidget):
                     for d in designs]
         if apogees:
             best_idx = int(np.argmax(apogees))
-            self.btn_sol_apogee.setText(f"🏆 Best Apogee: {apogees[best_idx]:.0f} m")
+            self.btn_sol_apogee.setText(f"Best Apogee: {apogees[best_idx]:.0f} m")
             self._pareto_best_apogee = designs[best_idx]
 
         # Best Reliability
@@ -2180,7 +2379,7 @@ class OptimizationWorkspace(QWidget):
         if rel_vals:
             best_idx = int(np.argmax(rel_vals))
             self.btn_sol_reliability.setText(
-                f"🛡 Best Reliability: {rel_vals[best_idx] * 100:.0f}%"
+                f"Best Reliability: {rel_vals[best_idx] * 100:.0f}%"
             )
             self._pareto_best_reliability = designs[best_idx]
 
@@ -2188,15 +2387,21 @@ class OptimizationWorkspace(QWidget):
         masses = [d.variables.get("dry_mass", 999) for d in designs]
         if masses:
             best_idx = int(np.argmin(masses))
-            self.btn_sol_mass.setText(f"⚖ Best Mass: {masses[best_idx]:.2f} kg")
+            self.btn_sol_mass.setText(f"Best Mass: {masses[best_idx]:.2f} kg")
             self._pareto_best_mass = designs[best_idx]
 
-        # Balanced (closest to utopia)
-        if len(designs) > 2:
-            # Normalize objectives and find min distance to utopia
-            obj_keys = list(designs[0].objectives.keys())
-            obj_matrix = np.array([[d.objectives.get(k, 0) for k in obj_keys]
-                                    for d in designs])
+        # Balanced (closest to utopia) — over the user-enabled objectives only,
+        # with minimize objectives sign-flipped so "utopia" is the true ideal.
+        # Works for any front size (a single-objective run has one design, which
+        # is trivially the balanced one) so the button is never left empty.
+        if len(designs) >= 1:
+            active = getattr(self, "_active_objectives", [])
+            if not active:
+                active = [(k, "maximize") for k in list(designs[0].objectives.keys())[:2]]
+            obj_matrix = np.array([
+                [(d.objectives.get(k, 0) if direction == "maximize"
+                  else -d.objectives.get(k, 0)) for k, direction in active]
+                for d in designs])
             if obj_matrix.shape[0] > 0:
                 mins = obj_matrix.min(axis=0)
                 maxs = obj_matrix.max(axis=0)
@@ -2207,7 +2412,7 @@ class OptimizationWorkspace(QWidget):
                 dists = np.sqrt(np.sum((normed - utopia) ** 2, axis=1))
                 best_idx = int(np.argmin(dists))
                 self.btn_sol_balanced.setText(
-                    f"⚡ Balanced: Apogee {apogees[best_idx]:.0f} m"
+                    f"Balanced: Apogee {apogees[best_idx]:.0f} m"
                 )
                 self._pareto_best_balanced = designs[best_idx]
 
@@ -2217,11 +2422,66 @@ class OptimizationWorkspace(QWidget):
         self.lbl_stat_time.setText(f"{result.elapsed_time:.1f} s")
         self.lbl_stat_algo.setText(result.algorithm_used.upper())
 
+        # Feasible count + percentage of the final population.
+        designs = result.all_designs or []
+        n_total = len(designs)
+        n_feasible = sum(1 for d in designs if d.feasible)
+        if n_total:
+            self.lbl_stat_feasible.setText(
+                f"{n_feasible} / {n_total}  ({n_feasible / n_total * 100:.0f} %)")
+        else:
+            self.lbl_stat_feasible.setText("—")
+
+        # Best generation = first generation that reached the max best-fitness.
+        hist = result.generation_history or []
+        if hist:
+            bests = [g.get("best_fitness", float("-inf")) for g in hist]
+            best_gen = int(np.argmax(bests))
+            self.lbl_stat_best_gen.setText(f"{best_gen} / {len(hist) - 1}")
+        else:
+            self.lbl_stat_best_gen.setText("—")
+
+        # Hypervolume — only meaningful with ≥2 enabled objectives (a real
+        # Pareto front). 2D dominated hypervolume over the normalized front,
+        # measured from the nadir; larger = better coverage of the trade-off.
+        active = getattr(self, "_active_objectives", [])
+        hv = self._hypervolume(result.pareto_front, active) if len(active) >= 2 else None
+        self.lbl_stat_hv.setText(f"{hv:.4f}" if hv is not None else "N/A (single-obj)")
+
         if result.surrogate_accuracy:
             r2 = result.surrogate_accuracy.get("r2", 0)
             self.lbl_stat_surrogate.setText(f"{r2:.3f}")
         else:
             self.lbl_stat_surrogate.setText("N/A")
+
+    @staticmethod
+    def _hypervolume(front, active):
+        """Normalized 2D hypervolume of a Pareto *front* over the first two
+        *active* objectives. Objectives are sign-flipped to all-maximize, scaled
+        to [0,1] by their own spread, and the dominated area is measured from
+        the (0,0) nadir. Returns None when it can't be computed."""
+        if not front or len(active) < 2:
+            return None
+        (k1, d1), (k2, d2) = active[0], active[1]
+        s1 = 1.0 if d1 == "maximize" else -1.0
+        s2 = 1.0 if d2 == "maximize" else -1.0
+        pts = np.array([[s1 * d.objectives.get(k1, 0.0),
+                         s2 * d.objectives.get(k2, 0.0)] for d in front], dtype=float)
+        if pts.shape[0] < 1:
+            return None
+        mins = pts.min(axis=0)
+        maxs = pts.max(axis=0)
+        rng = maxs - mins
+        rng[rng < 1e-12] = 1.0
+        norm = (pts - mins) / rng                      # [0,1]^2, larger = better
+        # Sweep the non-dominated staircase, summing rectangle areas to (0,0).
+        order = norm[np.argsort(-norm[:, 0])]          # descending obj1
+        hv, prev_y = 0.0, 0.0
+        for x, y in order:
+            if y > prev_y:
+                hv += x * (y - prev_y)
+                prev_y = y
+        return float(hv)
 
     def _update_improvement(self, result):
         """Show improvement over baseline."""
@@ -2247,27 +2507,35 @@ class OptimizationWorkspace(QWidget):
             d_land = opt_land - baseline.landing_distance
             d_mass = opt_mass - base.dry_mass
 
-            pct_a = (d_apogee / baseline.apogee * 100) if baseline.apogee > 0 else 0
+            def _pct(delta, base_val):
+                return (delta / abs(base_val) * 100) if abs(base_val) > 1e-9 else 0.0
+
+            pct_a = _pct(d_apogee, baseline.apogee)
+            pct_s = _pct(d_stab, baseline.min_stability_margin)
+            pct_l = _pct(d_land, baseline.landing_distance)
+            pct_m = _pct(d_mass, base.dry_mass)
 
             c_pos = "#7ee787"
             c_neg = "#f85149"
 
+            # "better" direction differs per metric: apogee/stability up is good,
+            # landing distance and mass down is good.
             self.lbl_imp_apogee.setText(f"{d_apogee:+.1f} m ({pct_a:+.1f}%)")
             self.lbl_imp_apogee.setStyleSheet(
                 _VAL.replace("#e6edf3", c_pos if d_apogee > 0 else c_neg)
             )
 
-            self.lbl_imp_stability.setText(f"{d_stab:+.2f} cal")
+            self.lbl_imp_stability.setText(f"{d_stab:+.2f} cal ({pct_s:+.1f}%)")
             self.lbl_imp_stability.setStyleSheet(
                 _VAL.replace("#e6edf3", c_pos if d_stab > 0 else c_neg)
             )
 
-            self.lbl_imp_landing.setText(f"{d_land:+.0f} m")
+            self.lbl_imp_landing.setText(f"{d_land:+.0f} m ({pct_l:+.1f}%)")
             self.lbl_imp_landing.setStyleSheet(
                 _VAL.replace("#e6edf3", c_pos if d_land < 0 else c_neg)
             )
 
-            self.lbl_imp_mass.setText(f"{d_mass:+.3f} kg")
+            self.lbl_imp_mass.setText(f"{d_mass:+.3f} kg ({pct_m:+.1f}%)")
             self.lbl_imp_mass.setStyleSheet(
                 _VAL.replace("#e6edf3", c_pos if d_mass < 0 else c_neg)
             )
