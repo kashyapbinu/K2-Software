@@ -39,7 +39,7 @@
                padding-top:34px; }
 
   /* Mission timeline ribbon */
-  #timeline { position:relative; height:30px; margin:0 6%; }
+  #timeline { position:relative; height:42px; margin:0 6%; }
   #timeline .tl-line { position:absolute; top:7px; left:0; right:0; height:1px;
                        background:rgba(255,255,255,0.22); }
   .tl-node { position:absolute; top:0; transform:translateX(-50%);
@@ -52,6 +52,11 @@
                   color:rgba(255,255,255,0.40); white-space:nowrap; }
   .tl-node.done i { background:#fff; border-color:#fff; }
   .tl-node.done span { color:rgba(255,255,255,0.92); }
+  /* Altitude at which each stage fired (shown once the stage is reached) */
+  .tl-node b { display:block; margin-top:2px; font-size:8.5px; font-weight:500;
+               letter-spacing:0.4px; white-space:nowrap; color:transparent;
+               font-variant-numeric:tabular-nums; }
+  .tl-node.done b { color:rgba(88,166,255,0.95); }
 
   /* Telemetry bar */
   #bar { display:flex; align-items:center; justify-content:space-between;
@@ -141,13 +146,13 @@
     </div>
     <div id="timeline">
       <div class="tl-line"></div>
-      <div class="tl-node" id="tl-LIFTOFF"   style="left:4%"><i></i><span>LIFTOFF</span></div>
-      <div class="tl-node" id="tl-MAX-Q"     style="left:20%"><i></i><span>MAX-Q</span></div>
-      <div class="tl-node" id="tl-BURNOUT"   style="left:36%"><i></i><span>BURNOUT</span></div>
-      <div class="tl-node" id="tl-APOGEE"    style="left:52%"><i></i><span>APOGEE</span></div>
-      <div class="tl-node" id="tl-DROGUE"    style="left:68%"><i></i><span>DROGUE</span></div>
-      <div class="tl-node" id="tl-MAIN"      style="left:84%"><i></i><span>MAIN</span></div>
-      <div class="tl-node" id="tl-TOUCHDOWN" style="left:97%"><i></i><span>TOUCHDOWN</span></div>
+      <div class="tl-node" id="tl-LIFTOFF"   style="left:4%"><i></i><span>LIFTOFF</span><b></b></div>
+      <div class="tl-node" id="tl-MAX-Q"     style="left:20%"><i></i><span>MAX-Q</span><b></b></div>
+      <div class="tl-node" id="tl-BURNOUT"   style="left:36%"><i></i><span>BURNOUT</span><b></b></div>
+      <div class="tl-node" id="tl-APOGEE"    style="left:52%"><i></i><span>APOGEE</span><b></b></div>
+      <div class="tl-node" id="tl-DROGUE"    style="left:68%"><i></i><span>DROGUE</span><b></b></div>
+      <div class="tl-node" id="tl-MAIN"      style="left:84%"><i></i><span>MAIN</span><b></b></div>
+      <div class="tl-node" id="tl-TOUCHDOWN" style="left:97%"><i></i><span>TOUCHDOWN</span><b></b></div>
     </div>
     <div id="bar">
       <div id="readouts">

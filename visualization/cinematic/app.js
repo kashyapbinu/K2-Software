@@ -566,7 +566,13 @@ const markerLog = [];               // names in firing order (debug/test)
 function addMarker(name, pos, alt, t) {
   markerLog.push(name);
   const node = document.getElementById('tl-' + name);
-  if (node) node.classList.add('done');
+  if (node) {
+    node.classList.add('done');
+    // Show the altitude this stage was reached at, under its label.
+    const altEl = node.querySelector('b');
+    if (altEl) altEl.textContent = alt >= 1000
+      ? (alt / 1000).toFixed(2) + ' km' : Math.round(alt) + ' m';
+  }
   const color = new THREE.Color(MARKER_COLORS[name] || '#58a6ff');
   const grp = new THREE.Group();
   // glowing tip
@@ -597,7 +603,11 @@ function clearMarkers() {
   for (const m of markers) scene.remove(m);
   markers.length = 0;
   markerLog.length = 0;
-  document.querySelectorAll('.tl-node.done').forEach(n => n.classList.remove('done'));
+  document.querySelectorAll('.tl-node').forEach(n => {
+    n.classList.remove('done');
+    const b = n.querySelector('b');
+    if (b) b.textContent = '';
+  });
 }
 
 // ── Event banners + marker placement ─────────────────────────────────────────

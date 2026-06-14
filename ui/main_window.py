@@ -41,7 +41,7 @@ class MainWindow(QMainWindow):
 
     TAB_ICONS = ["design", "propulsion", "cfd", "structures", "dynamics", "avionics",
                  "simulation", "mission", "mission", "results", "montecarlo", "optimization"]
-    TAB_NAMES = ["Design", "Propulsion", "CFD", "Structures", "Dynamics", "Avionics", "Simulation", "Mission Visualizer", "Cinematic", "Results", "Monte Carlo", "Optimization"]
+    TAB_NAMES = ["Design", "Propulsion", "CFD", "Structures", "Dynamics", "Avionics", "Simulation", "Mission Visualizer", "Advanced Visualiser", "Results", "Monte Carlo", "Optimization"]
 
     def __init__(self):
         super().__init__()

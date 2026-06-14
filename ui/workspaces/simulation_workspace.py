@@ -372,9 +372,9 @@ class SimulationWorkspace(QWidget):
         box.setText("Where do you want to watch this flight?")
         box.setInformativeText(
             "Normal: stay here with the live readouts.\n"
-            "Cinematic: switch to the 3D cinematic view, then launch.")
+            "Advanced Visualiser: switch to the 3D view, then launch.")
         normal_btn = box.addButton("Normal", QMessageBox.ButtonRole.AcceptRole)
-        cine_btn = box.addButton("Cinematic Mode", QMessageBox.ButtonRole.AcceptRole)
+        cine_btn = box.addButton("Advanced Visualiser", QMessageBox.ButtonRole.AcceptRole)
         box.addButton(QMessageBox.StandardButton.Cancel)
         box.setDefaultButton(cine_btn)
         box.exec()
