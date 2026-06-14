@@ -401,6 +401,27 @@ QTabBar::tab:hover:!selected {
     color: #c9d1d9;
 }
 
+/* ── Tab-bar scroll buttons (shown when tabs overflow) ──────────── */
+QTabBar::scroller {
+    width: 30px;
+}
+QTabBar QToolButton {
+    background-color: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    margin: 2px 1px;
+    width: 22px;
+    color: #c9d1d9;
+}
+QTabBar QToolButton:hover {
+    background-color: #1f6feb;
+    border-color: #1f6feb;
+}
+QTabBar QToolButton:disabled {
+    background-color: #161b22;
+    border-color: #21262d;
+}
+
 /* ── Push Buttons ───────────────────────────────────────────────── */
 QPushButton {
     background-color: #21262d;
