@@ -234,7 +234,7 @@ class PropulsionWorkspace(QWidget):
 
         # Update engine
         self.engine.update(
-            motor_designation="Custom BATES",
+            motor_designation=sim_data.get("motor_name", "Custom Motor"),
             motor_avg_thrust=avg_thrust,
             motor_max_thrust=max_thrust,
             motor_total_impulse=total_impulse,

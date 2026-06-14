@@ -410,6 +410,9 @@ class CustomMotorDialog(QDialog):
         sim = MotorSimulator(propellant=prop, grains=grains, throat_diameter=t_dia, exit_diameter=e_dia)
         try:
             res = sim.simulate(dt=0.01)
+            # Tag with the grain type so the applied motor is named correctly
+            # (was hardcoded "Custom BATES" for every grain type downstream).
+            res["motor_name"] = "Custom " + ["BATES", "Tubular", "End-Burner", "Star"][g_type]
             self._last_result = res
             
             # Update Metrics
@@ -450,14 +453,31 @@ class CustomMotorDialog(QDialog):
             self.lbl_motor_class.setText(f"Motor Class: {motor_class}")
             
             self._update_plot()
-            
+
             # Start animation
             self._anim_idx = 0
             # Target ~2 seconds for animation (2000 ms). Determine interval based on max 100 frames.
             frames = min(len(res["regression"]), 100)
             interval = max(20, 2000 // frames if frames > 0 else 20)
             self._anim_timer.start(interval)
-            
+
+            # Guard against a non-firing motor: if chamber pressure never exceeds
+            # ambient the burn area is too small for this throat (common with an
+            # End-Burner + a large throat), so thrust is ~0 the whole burn.
+            # Show why and don't let a 0-impulse dud be applied to the rocket.
+            max_pc = m.get("max_pc", 0.0)            # Pa
+            if impulse < 0.1 or max_pc <= 101325.0 * 1.01:
+                self.btn_apply.setEnabled(False)
+                self.btn_export.setEnabled(True)
+                QMessageBox.warning(
+                    self, "Motor Did Not Fire",
+                    "The motor never reached a sustainable chamber pressure, so "
+                    "thrust is ~0 for the whole burn (total impulse "
+                    f"{impulse:.2f} N·s).\n\nThe burn area is too small for this "
+                    "throat. Try a smaller throat diameter, more grains, or a "
+                    "more energetic propellant (higher a / C*).")
+                return
+
             # Enable apply and export
             self.btn_apply.setEnabled(True)
             self.btn_export.setEnabled(True)
