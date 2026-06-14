@@ -568,14 +568,6 @@ class StructuresWorkspace(QWidget):
         self.lbl_score.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_score.setStyleSheet("color:#8b949e;font-size:22px;font-weight:800;")
         vsc.addWidget(self.lbl_score)
-        self.lbl_score_grade = QLabel("")
-        self.lbl_score_grade.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_score_grade.setStyleSheet("color:#8b949e;font-size:13px;font-weight:700;")
-        vsc.addWidget(self.lbl_score_grade)
-        self.lbl_verdict_big = QLabel("")
-        self.lbl_verdict_big.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_verdict_big.setStyleSheet("color:#8b949e;font-size:12px;font-weight:700;padding-top:2px;")
-        vsc.addWidget(self.lbl_verdict_big)
         _struct_note = QLabel(
             "Note: This assessment is an estimated qualitative evaluation based on "
             "simulation outputs and predefined heuristics. It is intended for "
@@ -1426,10 +1418,6 @@ class StructuresWorkspace(QWidget):
             verdict = "❌ Poor"
         self.lbl_score.setText(verdict)
         self.lbl_score.setStyleSheet(f"color:{sc.color};font-size:22px;font-weight:800;")
-        self.lbl_score_grade.setText(sc.grade)
-        self.lbl_score_grade.setStyleSheet(f"color:{sc.color};font-size:13px;font-weight:700;")
-        self.lbl_verdict_big.setText(f"Verdict: {rep.verdict}")
-        self.lbl_verdict_big.setStyleSheet(f"color:{rep.verdict_color};font-size:12px;font-weight:700;padding-top:2px;")
 
         self._populate_fin(rep.fin)
         self._populate_recovery(rep.recovery)
