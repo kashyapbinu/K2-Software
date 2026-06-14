@@ -250,28 +250,30 @@ class MainWindow(QMainWindow):
     # ── File operations ──
 
     def _on_new(self):
+        # Open a fresh project in a NEW window/process and leave the current one
+        # untouched. This is far more reliable than trying to reset every plot,
+        # 3D viewer and result cache in place across all workspaces.
         reply = QMessageBox.question(self, "New Project",
-            "Create a new project? Unsaved changes will be lost.",
+            "Open a new project in a fresh window?\n\n"
+            "Your current project stays open in this window.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.Yes:
-            if self.sim_engine.is_running:
-                self.sim_engine.stop()
-            self.engine.reset()
-            from core.components import RocketAssembly
-            self.design_ws.set_assembly(RocketAssembly())
-            # Clear the recorded flight so Results / Simulation / the visualizers
-            # don't keep showing the previous rocket's data.
-            try:
-                self.sim_engine.history.clear()
-            except Exception:
-                pass
-            # Reset every workspace that holds cached analysis results (CFD, FEM,
-            # optimization, Monte-Carlo, flight, …) — "New" should blank them all,
-            # not just Design.
-            self._reset_all_workspaces()
-            self._current_file = None
-            self._update_title()
-            logger.info("New project created")
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        import subprocess, sys, os
+        try:
+            if getattr(sys, "frozen", False):
+                # Installed build: sys.executable is K2.exe — launch it fresh.
+                subprocess.Popen([sys.executable], close_fds=True)
+            else:
+                # Source run: launch python on main.py (ui/ -> project root).
+                root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                subprocess.Popen([sys.executable, os.path.join(root, "main.py")],
+                                 close_fds=True)
+            logger.info("Launched a new K2 instance for New Project")
+        except Exception as e:
+            logger.error(f"Could not launch a new instance: {e}", exc_info=True)
+            QMessageBox.critical(self, "New Project",
+                f"Could not open a new window:\n{e}")
 
     def _reset_all_workspaces(self):
         """Call reset_workspace() on any workspace tab that defines it."""
