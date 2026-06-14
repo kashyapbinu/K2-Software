@@ -1684,6 +1684,37 @@ class StructuresWorkspace(QWidget):
         except Exception as e:
             logger.error(f"3D stress update failed: {e}")
 
+    def _capture_stress_contours(self):
+        """Screenshot the 3D stress viewer in every stress mode for the report."""
+        images = []
+        sv = getattr(self, "_stress3d", None)
+        if sv is None or not hasattr(sv, "plotter") or sv.plotter is None:
+            return images
+        try:
+            from PyQt6.QtWidgets import QApplication
+            from ui.widgets.stress_viewer import STRESS_MODES
+            self._update_stress3d()            # make sure a field is rendered
+            orig = sv.mode_combo.currentText() if hasattr(sv, "mode_combo") else None
+            for mode in STRESS_MODES:
+                try:
+                    if hasattr(sv, "mode_combo"):
+                        sv.mode_combo.setCurrentText(mode)   # triggers _on_mode → render
+                    QApplication.processEvents()
+                    sv.plotter.render()
+                    img = sv.plotter.screenshot(return_img=True)
+                    if img is not None:
+                        images.append((mode, img))
+                except Exception as e:
+                    logger.debug("stress contour %s skipped: %s", mode, e)
+            if orig is not None:
+                try:
+                    sv.mode_combo.setCurrentText(orig)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"Stress contour capture failed: {e}")
+        return images
+
     def _export_report(self):
         """Export a full structural PDF report from the current analysis."""
         if not getattr(self, "_wks_report", None):
@@ -1700,8 +1731,10 @@ class StructuresWorkspace(QWidget):
             return
         try:
             from structures.report import generate_structural_report
+            images = self._capture_stress_contours()
             generate_structural_report(
-                path, self.engine.state, self._wks_report, self.mat_combo.currentText())
+                path, self.engine.state, self._wks_report,
+                self.mat_combo.currentText(), contour_images=images)
             self._status.setText(f"Report exported: {path}")
         except Exception as e:
             logger.error(f"Report export failed: {e}", exc_info=True)

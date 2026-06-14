@@ -3492,14 +3492,39 @@ class CFDWorkspace(QWidget):
             fig = getattr(wid, "figure", None)
             if fig is not None and len(fig.axes) and fig.axes[0].has_data():
                 figs.append(fig)
-        # 3D contour screenshot from the pyvista view.
+        # Capture every contour view: cycle the visualization combo through all
+        # field modes, render each, and screenshot it. Restore the original view
+        # afterward.
         images = []
-        try:
-            if getattr(self, "_plotter", None) is not None:
-                img = self._plotter.screenshot(return_img=True)
-                images.append(("3D contour", img))
-        except Exception:
-            pass
+        plotter = getattr(self, "_plotter", None)
+        combo = getattr(self, "_vis_combo", None)
+        if plotter is not None and combo is not None and combo.isEnabled():
+            from PyQt6.QtWidgets import QApplication
+            orig = combo.currentIndex()
+            self._log("Rendering contours for the report…")
+            for i in range(1, combo.count()):     # skip 0 = Geometry Preview
+                name = combo.itemText(i).replace("—", "-")
+                try:
+                    combo.blockSignals(True); combo.setCurrentIndex(i); combo.blockSignals(False)
+                    self._refresh_vis()
+                    plotter.render()
+                    QApplication.processEvents()
+                    img = plotter.screenshot(return_img=True)
+                    if img is not None:
+                        images.append((name, img))
+                except Exception as e:
+                    logger.debug("contour %s skipped: %s", name, e)
+            # Restore the view the user was looking at.
+            try:
+                combo.blockSignals(True); combo.setCurrentIndex(orig); combo.blockSignals(False)
+                self._refresh_vis()
+            except Exception:
+                pass
+        elif plotter is not None:
+            try:
+                images.append(("3D view", plotter.screenshot(return_img=True)))
+            except Exception:
+                pass
         ok = save_report(path, "CFD Report",
                          f"Mach {self._sp_mach.value():.2f} · {self._sp_alt.value():.0f} m · "
                          f"AoA {self._sp_aoa.value():.1f}°", kv, figures=figs, images=images)

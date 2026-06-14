@@ -107,8 +107,13 @@ def _recommendations(state, rep):
     return recs
 
 
-def generate_structural_report(path, state, rep, material_name="Aluminum 6061-T6"):
-    """Write a full structural PDF report to *path*. Returns the path."""
+def generate_structural_report(path, state, rep, material_name="Aluminum 6061-T6",
+                               contour_images=None):
+    """Write a full structural PDF report to *path*. Returns the path.
+
+    ``contour_images`` is an optional list of ``(caption, RGB ndarray)`` stress
+    field screenshots, appended as a Stress Contours section.
+    """
     ss = _styles()
     doc = SimpleDocTemplate(
         str(path), pagesize=A4,
@@ -120,7 +125,7 @@ def generate_structural_report(path, state, rep, material_name="Aluminum 6061-T6
     name = getattr(state, "name", None) or "Untitled Rocket"
 
     # ── Header ──
-    story.append(Paragraph("K2 AEROSPACE", ss["K2Title"]))
+    story.append(Paragraph("K2 AEROSIM", ss["K2Title"]))
     story.append(Paragraph("Structural Analysis Report", ss["K2Sub"]))
     story.append(Paragraph(
         f"{name} &nbsp;·&nbsp; {datetime.now():%Y-%m-%d %H:%M} &nbsp;·&nbsp; "
@@ -315,7 +320,40 @@ def generate_structural_report(path, state, rep, material_name="Aluminum 6061-T6
     ]))
     story.append(vt)
 
+    # ── Stress Contours ──
+    _tmp_imgs = []
+    if contour_images:
+        try:
+            import tempfile
+            from PIL import Image as _PILImage
+            from reportlab.platypus import Image as _RLImage, PageBreak
+            story.append(PageBreak())
+            story.append(Paragraph("Stress Contours", ss["K2H"]))
+            story.append(Paragraph(
+                "Analytical stress-field reconstruction (not a nodal FEA field). "
+                "See the application note in the Structures workspace.", ss["K2Body"]))
+            story.append(Spacer(1, 4))
+            for caption, arr in contour_images:
+                if arr is None:
+                    continue
+                tf = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                tf.close()
+                _PILImage.fromarray(arr).save(tf.name)
+                _tmp_imgs.append(tf.name)
+                story.append(Paragraph(f"<b>{caption}</b>", ss["K2Body"]))
+                story.append(_RLImage(tf.name, width=165 * mm, height=92 * mm))
+                story.append(Spacer(1, 8))
+        except Exception as e:
+            logger.warning(f"Could not embed stress contours: {e}")
+
     doc.build(story)
+    # Clean up temp contour PNGs now the PDF is written.
+    for _p in _tmp_imgs:
+        try:
+            import os as _os
+            _os.remove(_p)
+        except Exception:
+            pass
     logger.info(f"Structural report written: {path}")
     return path
 
