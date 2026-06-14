@@ -949,6 +949,19 @@ class DynamicsWorkspace(QWidget):
 
         self._update_warnings(vmax, mmax)
 
+    def reset_workspace(self):
+        """Blank all dynamics results (called on New Project)."""
+        self._flutter_result = None
+        self._vib_result = None
+        self._aero_result = None
+        self._modal_result = None
+        try:
+            self.lbl_overall.setText("RUN ASSESSMENT")
+            self.lbl_overall.setStyleSheet("font-weight:800;font-size:16px;padding:10px;"
+                                           "border-radius:6px;background:#161b22;color:#484f58;")
+        except Exception:
+            pass
+
     def _update_warnings(self, vmax, mmax):
         warns = []
         fr, ar = self._flutter_result, self._aero_result

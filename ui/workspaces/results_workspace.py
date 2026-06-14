@@ -147,6 +147,10 @@ class ResultsWorkspace(QWidget):
             return None  # signal to use legacy path
         return None
 
+    def reset_workspace(self):
+        """Clear results to the empty state (called on New Project)."""
+        self.refresh_plots()   # history is already cleared → shows the empty state
+
     def refresh_plots(self):
         history = self._get_history()
         if history is None:

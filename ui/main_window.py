@@ -259,21 +259,46 @@ class MainWindow(QMainWindow):
             self.engine.reset()
             from core.components import RocketAssembly
             self.design_ws.set_assembly(RocketAssembly())
+            # Clear the recorded flight so Results / Simulation / the visualizers
+            # don't keep showing the previous rocket's data.
+            try:
+                self.sim_engine.history.clear()
+            except Exception:
+                pass
+            # Reset every workspace that holds cached analysis results (CFD, FEM,
+            # optimization, Monte-Carlo, flight, …) — "New" should blank them all,
+            # not just Design.
+            self._reset_all_workspaces()
             self._current_file = None
             self._update_title()
             logger.info("New project created")
 
+    def _reset_all_workspaces(self):
+        """Call reset_workspace() on any workspace tab that defines it."""
+        for ws in (getattr(self, n, None) for n in (
+                "propulsion_ws", "cfd_ws", "structures_ws", "dynamics_ws",
+                "avionics_ws", "simulation_ws", "mission_viz_ws", "cinematic_ws",
+                "results_ws", "monte_carlo_ws", "optimization_ws")):
+            if ws is not None and hasattr(ws, "reset_workspace"):
+                try:
+                    ws.reset_workspace()
+                except Exception as e:
+                    logger.warning(f"Workspace reset failed for {type(ws).__name__}: {e}")
+
     def _on_open(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open Project",
             str(Path.home() / "OneDrive" / "Desktop"),
-            "All Supported (*.k2proj *.ork *.json);;K2 Projects (*.k2proj);;OpenRocket Files (*.ork);;JSON Files (*.json);;All Files (*)")
+            "All Supported (*.k2 *.k2proj *.ork *.json);;K2 Projects (*.k2 *.k2proj);;OpenRocket Files (*.ork);;JSON Files (*.json);;All Files (*)")
         if path:
             if path.lower().endswith('.ork'):
                 self._on_import_ork_path(path)
                 return
-            state = load_project(path)
+            state, assembly = load_project(path)
             if state:
                 self.engine.set_state(state)
+                # Restore the component tree (design) too, not just the numbers.
+                if assembly is not None:
+                    self.design_ws.set_assembly(assembly)
                 self._current_file = path
                 self._update_title()
                 logger.info(f"Opened: {path}")
@@ -288,13 +313,14 @@ class MainWindow(QMainWindow):
 
     def _on_save_as(self):
         path, _ = QFileDialog.getSaveFileName(self, "Save Project As",
-            str(get_default_project_dir() / f"{self.engine.state.name}.k2proj"),
-            "K2 Projects (*.k2proj);;JSON Files (*.json)")
+            str(get_default_project_dir() / f"{self.engine.state.name}.k2"),
+            "K2 Projects (*.k2);;JSON Files (*.json)")
         if path:
             self._save_to(path)
 
     def _save_to(self, path):
-        if save_project(self.engine.state, path):
+        assembly = self.design_ws.get_assembly() if hasattr(self, "design_ws") else None
+        if save_project(self.engine.state, path, assembly):
             self._current_file = path
             self._update_title()
             self.status_label.setText(f"Saved: {Path(path).name}")

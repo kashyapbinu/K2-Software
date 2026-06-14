@@ -505,6 +505,15 @@ class MonteCarloWorkspace(QWidget):
     # Actions
     # ═════════════════════════════════════════════════════════════════════════
 
+    def reset_workspace(self):
+        """Blank Monte-Carlo results (called on New Project)."""
+        self._results = None
+        try:
+            if hasattr(self, "summary_label"):
+                self.summary_label.setText("Run a Monte Carlo analysis to see results.")
+        except Exception:
+            pass
+
     def _on_run(self):
         """Collect UI values, create engine, and start analysis."""
         config = MonteCarloConfig(

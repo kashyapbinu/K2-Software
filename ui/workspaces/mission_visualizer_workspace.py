@@ -1832,6 +1832,19 @@ class MissionVisualizerWorkspace(QWidget):
         except Exception:
             pass
 
+    def reset_workspace(self):
+        """Reset the visualizer (called on New Project)."""
+        self._last_text = None
+        self._last_col = None
+        for m in ("_clear_flight", "_reset_flight", "clear_scene"):
+            fn = getattr(self, m, None)
+            if callable(fn):
+                try:
+                    fn()
+                except Exception:
+                    pass
+                break
+
     def _reset_camera(self):
         if not self._plotter:
             return

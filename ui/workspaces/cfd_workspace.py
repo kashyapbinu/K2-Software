@@ -3581,6 +3581,15 @@ class CFDWorkspace(QWidget):
             self._plotter.clear_plane_widgets()
             self._refresh_vis()
 
+    def reset_workspace(self):
+        """Blank CFD results (called on New Project)."""
+        self._result = None
+        try:
+            if hasattr(self, "_log_box"):
+                self._log_box.clear()
+        except Exception:
+            pass
+
     def _log(self, msg: str):
         self._log_box.append(msg)
         logger.info(msg)

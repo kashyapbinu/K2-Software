@@ -19,14 +19,20 @@ logger = logging.getLogger("K2.ProjectManager")
 PROJECT_FORMAT_VERSION = "1.0.0"
 
 
-def save_project(state: RocketState, filepath: str) -> bool:
+def save_project(state: RocketState, filepath: str, assembly=None) -> bool:
     """
-    Save the current rocket state to a JSON project file.
-    
+    Save the current rocket project to a JSON ``.k2`` file.
+
+    Saves the full rocket state *and* the component assembly (the design tree),
+    so a reopened project restores the actual rocket — not just scalar numbers.
+    Analysis results (flight, CFD, FEM, optimization) are not saved; they are
+    recomputed from the design.
+
     Args:
         state: The RocketState to serialize.
-        filepath: Destination .k2proj file path.
-        
+        filepath: Destination ``.k2`` file path.
+        assembly: The RocketAssembly (component tree), if available.
+
     Returns:
         True if save was successful, False otherwise.
     """
@@ -35,7 +41,8 @@ def save_project(state: RocketState, filepath: str) -> bool:
             "format_version": PROJECT_FORMAT_VERSION,
             "application": "K2 AeroSim",
             "saved_at": datetime.now().isoformat(),
-            "rocket_state": state.to_dict()
+            "rocket_state": state.to_dict(),
+            "assembly": assembly.to_dict() if assembly is not None else None,
         }
         
         filepath = Path(filepath)
@@ -52,43 +59,52 @@ def save_project(state: RocketState, filepath: str) -> bool:
         return False
 
 
-def load_project(filepath: str) -> RocketState | None:
+def load_project(filepath: str):
     """
-    Load a rocket state from a JSON project file.
-    
-    Args:
-        filepath: Path to the .k2proj file.
-        
+    Load a rocket project from a ``.k2`` (or legacy ``.k2proj``) file.
+
     Returns:
-        RocketState if successful, None otherwise.
+        ``(RocketState, RocketAssembly | None)`` on success, or
+        ``(None, None)`` on failure. The assembly is the rebuilt component tree
+        when the file contains one (older files without it return None).
     """
     try:
         filepath = Path(filepath)
-        
+
         if not filepath.exists():
             logger.error(f"Project file not found: {filepath}")
-            return None
-        
+            return None, None
+
         with open(filepath, "r", encoding="utf-8") as f:
             project_data = json.load(f)
-        
+
         # Version check
         version = project_data.get("format_version", "unknown")
         if version != PROJECT_FORMAT_VERSION:
             logger.warning(f"Project format version mismatch: {version} (expected {PROJECT_FORMAT_VERSION})")
-        
+
         rocket_data = project_data.get("rocket_state", {})
         state = RocketState.from_dict(rocket_data)
-        
-        logger.info(f"Project loaded: {filepath} (rocket: {state.name})")
-        return state
-        
+
+        assembly = None
+        asm_data = project_data.get("assembly")
+        if asm_data:
+            try:
+                from core.components import RocketAssembly
+                assembly = RocketAssembly.from_dict(asm_data)
+            except Exception as e:
+                logger.warning(f"Could not rebuild assembly from project: {e}")
+
+        logger.info(f"Project loaded: {filepath} (rocket: {state.name}, "
+                    f"assembly: {'yes' if assembly else 'no'})")
+        return state, assembly
+
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON in project file: {e}")
-        return None
+        return None, None
     except Exception as e:
         logger.error(f"Failed to load project: {e}")
-        return None
+        return None, None
 
 
 def get_default_project_dir() -> Path:

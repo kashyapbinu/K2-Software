@@ -1316,6 +1316,32 @@ class StructuresWorkspace(QWidget):
         hist = getattr(se, "history", None) if se else None
         return hist if (hist and len(hist) > 0) else None
 
+    def reset_workspace(self):
+        """Blank all structural results (called on New Project)."""
+        self._fem_result = None
+        self._modal_result = None
+        self._thermal_result = None
+        self._wks_report = None
+        self._last_bc = None
+        self._has_run = False
+        try:
+            self.lbl_score.setText("RUN ANALYSIS")
+            self.lbl_score.setStyleSheet("font-weight:800;font-size:16px;padding:10px;"
+                                         "border-radius:6px;background:#161b22;color:#484f58;")
+        except Exception:
+            pass
+        for v in ("_stress3d", "_defo_view"):
+            w = getattr(self, v, None)
+            if w is not None and hasattr(w, "show_empty"):
+                try:
+                    w.show_empty()
+                except Exception:
+                    pass
+        try:
+            self._refresh_flight_indicator()
+        except Exception:
+            pass
+
     def _refresh_flight_indicator(self):
         """Update the flight-load import indicator from sim history/state."""
         hist = self._get_history()
