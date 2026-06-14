@@ -1253,6 +1253,9 @@ function resetFlight() {
   zoom = 1.0; dragAz = 0; dragEl = 0;
   resetVisuals();
 }
+// Exposed so the Python side can reset the view on New Project (app.js is an
+// ES module, so its functions aren't global otherwise).
+window.k2ResetFlight = resetFlight;
 
 // ── Qt bridge ────────────────────────────────────────────────────────────────
 buildRocket({});                                   // placeholder until init arrives

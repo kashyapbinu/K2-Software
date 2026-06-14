@@ -957,6 +957,23 @@ class DynamicsWorkspace(QWidget):
         self._modal_result = None
         from ui.workspace_reset import clear_visuals
         clear_visuals(self)
+        # Reset every result value label to its blank state.
+        for n in ("lbl_vmax_f", "lbl_fspd", "lbl_fmach", "lbl_fmargin",
+                  "lbl_divspd", "lbl_divmach", "lbl_divmargin", "lbl_revmach",
+                  "lbl_effmax", "lbl_deflect", "lbl_grms", "lbl_gpk", "lbl_drms",
+                  "lbl_resfreq", "lbl_maxq", "lbl_qmach", "lbl_qalt",
+                  "lbl_fverdict", "lbl_divverdict", "lbl_qverdict"):
+            w = getattr(self, n, None)
+            if w is not None:
+                try:
+                    w.setText("—")
+                except Exception:
+                    pass
+        try:
+            self.lbl_warnings.setText("Run assessment to check consistency.")
+            self.lbl_warnings.setStyleSheet("color:#8b949e;font-size:11px;")
+        except Exception:
+            pass
         try:
             self.lbl_overall.setText("RUN ASSESSMENT")
             self.lbl_overall.setStyleSheet("font-weight:800;font-size:16px;padding:10px;"

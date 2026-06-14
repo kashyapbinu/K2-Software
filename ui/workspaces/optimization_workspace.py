@@ -2582,6 +2582,32 @@ class OptimizationWorkspace(QWidget):
         self._active_objectives = []
         from ui.workspace_reset import clear_visuals
         clear_visuals(self)
+        # Blank the best-design / performance / reliability / stats / improvement
+        # value labels.
+        for name, w in list(vars(self).items()):
+            if name.startswith(("lbl_best_", "lbl_perf_", "lbl_rel_",
+                                "lbl_stat_", "lbl_imp_")) and hasattr(w, "setText"):
+                try:
+                    w.setText("—")
+                except Exception:
+                    pass
+        for b, txt in (("btn_sol_apogee", "Best Apogee: —"),
+                       ("btn_sol_reliability", "Best Reliability: —"),
+                       ("btn_sol_mass", "Best Mass Efficiency: —"),
+                       ("btn_sol_balanced", "Best Balanced: —")):
+            w = getattr(self, b, None)
+            if w is not None:
+                try:
+                    w.setText(txt); w.setEnabled(False)
+                except Exception:
+                    pass
+        for b in ("btn_export_csv", "btn_export_json", "btn_export_pdf"):
+            w = getattr(self, b, None)
+            if w is not None:
+                try:
+                    w.setEnabled(False)
+                except Exception:
+                    pass
         # The DOE / sensitivity tabs hold a row of axes on one shared figure;
         # clear_visuals handles the single-axis canvases, this clears those rows.
         for ax_pair in ("_ax_doe", "_ax_sens"):

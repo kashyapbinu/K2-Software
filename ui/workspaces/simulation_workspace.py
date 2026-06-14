@@ -526,6 +526,15 @@ class SimulationWorkspace(QWidget):
         self.integrator_combo.setEnabled(True)
         self.progress.setValue(100)
 
+    def reset_workspace(self):
+        """Blank the live readouts + phase lights (called on New Project)."""
+        if self.sim_engine.is_running:
+            try:
+                self.sim_engine.stop()
+            except Exception:
+                pass
+        self._reset_ui()
+
     def _reset_ui(self):
         self.btn_run.setEnabled(True)
         self.btn_run.setText("▶  RUN")

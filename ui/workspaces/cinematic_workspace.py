@@ -173,6 +173,14 @@ class CinematicWorkspace(QWidget):
             "descent_rate": max(1.0, min(descent, 60.0)),
         }
 
+    def reset_workspace(self):
+        """Clear the 3D replay/flight on New Project (resetSig → resetFlight)."""
+        if self._bridge is not None:
+            try:
+                self._bridge.resetSig.emit()
+            except Exception:
+                pass
+
     def _on_sim_started(self):
         if self._bridge is None:
             return

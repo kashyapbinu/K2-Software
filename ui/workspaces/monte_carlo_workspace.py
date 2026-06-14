@@ -521,6 +521,19 @@ class MonteCarloWorkspace(QWidget):
         self._results = None
         from ui.workspace_reset import clear_visuals
         clear_visuals(self)
+        for name, w in list(vars(self).items()):
+            if name.startswith("lbl_") and hasattr(w, "setText"):
+                try:
+                    w.setText("—")
+                except Exception:
+                    pass
+        for b in ("btn_export", "btn_export_pdf"):
+            w = getattr(self, b, None)
+            if w is not None:
+                try:
+                    w.setEnabled(False)
+                except Exception:
+                    pass
         try:
             if hasattr(self, "summary_label"):
                 self.summary_label.setText("Run a Monte Carlo analysis to see results.")

@@ -3717,6 +3717,20 @@ class CFDWorkspace(QWidget):
         self._result = None
         from ui.workspace_reset import clear_visuals
         clear_visuals(self)
+        for name, w in list(vars(self).items()):
+            if name.startswith("_lbl_") and hasattr(w, "setText"):
+                try:
+                    w.setText("—")
+                except Exception:
+                    pass
+        for b in ("_btn_export_pdf", "_btn_export_csv", "_btn_export_vtk",
+                  "_btn_export_struct", "_btn_inject"):
+            w = getattr(self, b, None)
+            if w is not None:
+                try:
+                    w.setEnabled(False)
+                except Exception:
+                    pass
         try:
             if hasattr(self, "_log_box"):
                 self._log_box.clear()
