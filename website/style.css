@@ -821,9 +821,18 @@ a { color: inherit; }
   margin: 0 0 18px; padding-bottom: 10px;
   border-bottom: 1px solid var(--border, #21262d);
 }
-.dev-prose { color: var(--muted); font-size: 1.02rem; line-height: 1.75; }
-.dev-prose p { margin: 0 0 16px; }
-.dev-prose h4 { color: var(--text); font-size: 1.1rem; margin: 26px 0 10px; }
+.dev-prose { color: #e8edf6; font-size: 1.1rem; line-height: 1.9; max-width: 780px;
+             letter-spacing: 0.005em; }
+.dev-prose p { margin: 0 0 20px; }
+/* Lead paragraph (the intro) — display font, larger, brightest */
+.dev-prose p:first-child {
+  font-family: var(--font-display, "Space Grotesk", sans-serif);
+  font-size: 1.45rem; font-weight: 500; line-height: 1.5;
+  color: #ffffff; letter-spacing: -0.01em; margin-bottom: 26px;
+}
+.dev-prose p strong, .dev-prose strong { color: #ffffff; font-weight: 600; }
+.dev-prose h4 { color: #fff; font-size: 1.15rem; margin: 30px 0 10px;
+                font-family: var(--font-display, "Space Grotesk", sans-serif); }
 .dev-prose a { color: #58a6ff; }
 
 .dev-updates { display: flex; flex-direction: column; gap: 18px; }
