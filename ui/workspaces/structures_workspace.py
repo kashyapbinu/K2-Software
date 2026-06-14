@@ -825,14 +825,37 @@ class StructuresWorkspace(QWidget):
     }
 
     def _on_condition_changed(self, condition):
-        """Apply the condition's representative flight point, then re-analyse."""
-        fp = self._CONDITION_FLIGHT.get(condition)
-        if fp:
-            for sp, val in ((self.sp_mach, fp[0]), (self.sp_alt, fp[1])):
+        """Set the condition's flight point — from the last simulation when one
+        exists (Max-Q point for Max-Q, peak-Mach point for Thermal, real peak
+        thrust for Max Thrust), otherwise a representative preset — then
+        re-analyse."""
+        self._refresh_flight_indicator()
+        fl = self._flight_loads
+        use_sim = fl is not None and getattr(fl, "available", False)
+
+        mach = alt = None
+        if condition == "Max-Q" and use_sim and fl.maxq_mach > 0:
+            mach, alt = fl.maxq_mach, fl.maxq_altitude
+        elif condition == "Thermal" and use_sim and fl.max_mach > 0:
+            # Peak aero heating ≈ peak Mach; use its altitude when captured.
+            mach, alt = fl.max_mach, (fl.maxmach_altitude or fl.maxq_altitude)
+        # Max Thrust / Recovery are axial-dominated (Mach-insensitive) → presets.
+
+        if mach is None:
+            fp = self._CONDITION_FLIGHT.get(condition)
+            if fp:
+                mach, alt = fp
+        if mach is not None:
+            for sp, val in ((self.sp_mach, mach), (self.sp_alt, alt if alt else self.sp_alt.value())):
                 sp.blockSignals(True)
                 sp.setValue(val)
                 sp.blockSignals(False)
-            self._update_q()
+
+        # Use the real peak thrust for the thrust-driven case when available.
+        if condition == "Max Thrust" and use_sim and fl.max_thrust > 0:
+            self.sp_force.setValue(fl.max_thrust)
+
+        self._update_q()
         self._refresh()
 
     # ── Quick analytical refresh ─────────────────────────────────────────────
