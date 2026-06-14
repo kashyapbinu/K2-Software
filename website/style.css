@@ -821,19 +821,29 @@ a { color: inherit; }
   margin: 0 0 18px; padding-bottom: 10px;
   border-bottom: 1px solid var(--border, #21262d);
 }
-.dev-prose { color: #e8edf6; font-size: 1.1rem; line-height: 1.9; max-width: 780px;
+.dev-prose { color: #e8edf6; font-size: 1.1rem; line-height: 1.9; max-width: 820px;
              letter-spacing: 0.005em; }
 .dev-prose p { margin: 0 0 20px; }
-/* Lead paragraph (the intro) — display font, larger, brightest */
-.dev-prose p:first-child {
-  font-family: var(--font-display, "Space Grotesk", sans-serif);
-  font-size: 1.45rem; font-weight: 500; line-height: 1.5;
-  color: #ffffff; letter-spacing: -0.01em; margin-bottom: 26px;
-}
+.dev-prose p:last-child { margin-bottom: 0; }
 .dev-prose p strong, .dev-prose strong { color: #ffffff; font-weight: 600; }
 .dev-prose h4 { color: #fff; font-size: 1.15rem; margin: 30px 0 10px;
                 font-family: var(--font-display, "Space Grotesk", sans-serif); }
 .dev-prose a { color: #58a6ff; }
+
+/* Frosted-glass card behind the Thoughts content */
+#thoughts .dev-prose {
+  background: rgba(255, 255, 255, 0.045);
+  backdrop-filter: blur(16px) saturate(125%);
+  -webkit-backdrop-filter: blur(16px) saturate(125%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 18px;
+  padding: 36px 40px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.38),
+              inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+@media (max-width: 620px) {
+  #thoughts .dev-prose { padding: 26px 22px; }
+}
 
 .dev-updates { display: flex; flex-direction: column; gap: 18px; }
 .dev-entry {
