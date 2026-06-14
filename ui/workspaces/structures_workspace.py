@@ -1684,35 +1684,78 @@ class StructuresWorkspace(QWidget):
         except Exception as e:
             logger.error(f"3D stress update failed: {e}")
 
+    @staticmethod
+    def _fig_to_image(fig):
+        """Render a matplotlib figure to an RGB ndarray (or None if empty)."""
+        try:
+            import numpy as np
+            if not fig.axes or not any(a.has_data() for a in fig.axes):
+                return None
+            fig.canvas.draw()
+            buf = np.asarray(fig.canvas.buffer_rgba())
+            return buf[:, :, :3].copy()
+        except Exception:
+            return None
+
     def _capture_stress_contours(self):
-        """Screenshot the 3D stress viewer in every stress mode for the report."""
+        """Capture all structural visuals for the report: 3D stress contours in
+        every mode, the deformation and mode-shape views, and the fin /
+        through-length stress / temperature plots."""
         images = []
-        sv = getattr(self, "_stress3d", None)
-        if sv is None or not hasattr(sv, "plotter") or sv.plotter is None:
-            return images
         try:
             from PyQt6.QtWidgets import QApplication
-            from ui.widgets.stress_viewer import STRESS_MODES
-            self._update_stress3d()            # make sure a field is rendered
-            orig = sv.mode_combo.currentText() if hasattr(sv, "mode_combo") else None
-            for mode in STRESS_MODES:
+        except Exception:
+            QApplication = None
+
+        # ── 3D stress contours (every mode) ──
+        sv = getattr(self, "_stress3d", None)
+        if sv is not None and getattr(sv, "plotter", None) is not None:
+            try:
+                from ui.widgets.stress_viewer import STRESS_MODES
+                self._update_stress3d()
+                orig = sv.mode_combo.currentText() if hasattr(sv, "mode_combo") else None
+                for mode in STRESS_MODES:
+                    try:
+                        if hasattr(sv, "mode_combo"):
+                            sv.mode_combo.setCurrentText(mode)
+                        if QApplication: QApplication.processEvents()
+                        sv.plotter.render()
+                        img = sv.plotter.screenshot(return_img=True)
+                        if img is not None:
+                            images.append((f"Stress — {mode}", img))
+                    except Exception as e:
+                        logger.debug("stress contour %s skipped: %s", mode, e)
+                if orig is not None:
+                    try: sv.mode_combo.setCurrentText(orig)
+                    except Exception: pass
+            except Exception as e:
+                logger.warning(f"Stress contour capture failed: {e}")
+
+        # ── 3D pyvista viewers (deformation, mode shapes) ──
+        for attr, caption in (("_defo_view", "Deformation"),
+                              ("_modal_plot", "Mode Shape")):
+            w = getattr(self, attr, None)
+            plotter = getattr(w, "plotter", None)
+            if plotter is not None:
                 try:
-                    if hasattr(sv, "mode_combo"):
-                        sv.mode_combo.setCurrentText(mode)   # triggers _on_mode → render
-                    QApplication.processEvents()
-                    sv.plotter.render()
-                    img = sv.plotter.screenshot(return_img=True)
+                    if QApplication: QApplication.processEvents()
+                    plotter.render()
+                    img = plotter.screenshot(return_img=True)
                     if img is not None:
-                        images.append((mode, img))
+                        images.append((caption, img))
                 except Exception as e:
-                    logger.debug("stress contour %s skipped: %s", mode, e)
-            if orig is not None:
-                try:
-                    sv.mode_combo.setCurrentText(orig)
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.warning(f"Stress contour capture failed: {e}")
+                    logger.debug("%s screenshot skipped: %s", caption, e)
+
+        # ── matplotlib plots (fin deflection, stress profile, temperature) ──
+        for attr, caption in (("_fin_plot", "Fin Deflection"),
+                              ("_stress_plot", "Von Mises along the airframe"),
+                              ("_temp_plot", "Wall Temperature")):
+            w = getattr(self, attr, None)
+            fig = getattr(w, "figure", None)
+            if fig is not None:
+                img = self._fig_to_image(fig)
+                if img is not None:
+                    images.append((caption, img))
         return images
 
     def _export_report(self):

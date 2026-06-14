@@ -328,10 +328,11 @@ def generate_structural_report(path, state, rep, material_name="Aluminum 6061-T6
             from PIL import Image as _PILImage
             from reportlab.platypus import Image as _RLImage, PageBreak
             story.append(PageBreak())
-            story.append(Paragraph("Stress Contours", ss["K2H"]))
+            story.append(Paragraph("Analysis Visualizations", ss["K2H"]))
             story.append(Paragraph(
-                "Analytical stress-field reconstruction (not a nodal FEA field). "
-                "See the application note in the Structures workspace.", ss["K2Body"]))
+                "Stress contours are an analytical reconstruction (not a nodal FEA "
+                "field). Deformation and mode-shape views are from the FEA mesh.",
+                ss["K2Body"]))
             story.append(Spacer(1, 4))
             for caption, arr in contour_images:
                 if arr is None:
