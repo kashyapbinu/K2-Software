@@ -1026,6 +1026,24 @@ class CFDWorkspace(QWidget):
             "QProgressBar::chunk{background:#1f6feb; border-radius:3px;}"
         )
         lay.addWidget(self._progress)
+
+        # ── Export results (PDF + CSV) ──
+        exp_group = QGroupBox("Export Results")
+        exp_group.setStyleSheet(_GRP_SS)
+        eg = QHBoxLayout(); eg.setSpacing(6)
+        self._btn_export_pdf = QPushButton(icon("report"), "PDF")
+        self._btn_export_pdf.setStyleSheet(_BTN_SECONDARY)
+        self._btn_export_pdf.setEnabled(False)
+        self._btn_export_pdf.clicked.connect(self._export_pdf)
+        eg.addWidget(self._btn_export_pdf)
+        self._btn_export_csv = QPushButton(icon("export"), "CSV")
+        self._btn_export_csv.setStyleSheet(_BTN_SECONDARY)
+        self._btn_export_csv.setEnabled(False)
+        self._btn_export_csv.clicked.connect(self._export_results_csv)
+        eg.addWidget(self._btn_export_csv)
+        exp_group.setLayout(eg)
+        lay.addWidget(exp_group)
+
         lay.addStretch()
 
         scroll.setWidget(inner)
@@ -1354,13 +1372,7 @@ class CFDWorkspace(QWidget):
         ll.addWidget(self._log_box)
         lay.addWidget(log_grp)
 
-        # Export
-        self._btn_export_pdf = QPushButton(icon("report"), "Export PDF Report")
-        self._btn_export_pdf.setStyleSheet(_BTN_SECONDARY)
-        self._btn_export_pdf.setEnabled(False)
-        self._btn_export_pdf.clicked.connect(self._export_pdf)
-        lay.addWidget(self._btn_export_pdf)
-
+        # Export (PDF/CSV moved to the left panel; VTK + FEM mapping stay here)
         self._btn_export_vtk = QPushButton(icon("export"), "Export VTK Results")
         self._btn_export_vtk.setStyleSheet(_BTN_SECONDARY)
         self._btn_export_vtk.setEnabled(False)
@@ -2116,6 +2128,7 @@ class CFDWorkspace(QWidget):
         self._btn_export_vtk.setEnabled(bool(result.volume_vtk or result.surface_vtk))
         self._btn_export_struct.setEnabled(bool(result.surface_vtk))
         self._btn_export_pdf.setEnabled(True)
+        self._btn_export_csv.setEnabled(True)
         self._vis_combo.setEnabled(True)
         self._vis_combo.setCurrentIndex(2)  # auto-show Pressure volume slice
         self._btn_run.setEnabled(True)
@@ -3413,6 +3426,39 @@ class CFDWorkspace(QWidget):
             from cfd.post_processing import inject_cfd_results_into_engine
             inject_cfd_results_into_engine(self._result, self.engine)
             self._log("CFD results injected into simulation engine.")
+
+    def _export_results_csv(self):
+        """CSV of the single-run CFD results: boundary conditions, force
+        coefficients + drag split, and the convergence residual history."""
+        if not self._result:
+            return
+        import csv
+        from pathlib import Path
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Results CSV", "cfd_results.csv", "CSV Files (*.csv)")
+        if not path:
+            return
+        r = self._result
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["quantity", "value"])
+                w.writerow(["mach", self._sp_mach.value()])
+                w.writerow(["altitude_m", self._sp_alt.value()])
+                w.writerow(["aoa_deg", self._sp_aoa.value()])
+                w.writerow(["cd", r.cd])
+                w.writerow(["cd_pressure", r.cd_pressure])
+                w.writerow(["cd_friction", r.cd_friction])
+                w.writerow(["cl", r.cl])
+                w.writerow(["cm", r.cm])
+                w.writerow(["converged", r.converged])
+                w.writerow([])
+                w.writerow(["iteration", "residual"])
+                for it, res in (getattr(r, "residual_history", None) or []):
+                    w.writerow([it, res])
+            self._log(f"Results CSV saved: {Path(path).name}")
+        except Exception as e:
+            self._log(f"CSV export failed: {e}")
 
     def _export_pdf(self):
         """CFD PDF: boundary conditions, force coefficients, convergence, Cp,
