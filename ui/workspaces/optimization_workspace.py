@@ -795,6 +795,12 @@ class OptimizationWorkspace(QWidget):
         self.btn_export_json.setEnabled(False)
         self.btn_export_json.clicked.connect(lambda: self._on_export("json"))
         eh.addWidget(self.btn_export_json)
+
+        self.btn_export_pdf = QPushButton(app_icon("report"), "PDF")
+        self.btn_export_pdf.setStyleSheet(_BTN_S)
+        self.btn_export_pdf.setEnabled(False)
+        self.btn_export_pdf.clicked.connect(lambda: self._on_export("pdf"))
+        eh.addWidget(self.btn_export_pdf)
         vl.addLayout(eh)
 
         g.setLayout(vl)
@@ -1436,6 +1442,7 @@ class OptimizationWorkspace(QWidget):
         self.btn_cancel.setEnabled(False)
         self.btn_export_csv.setEnabled(True)
         self.btn_export_json.setEnabled(True)
+        self.btn_export_pdf.setEnabled(True)
         self.progress_bar.setValue(100)
 
         n = result.total_evaluations
@@ -2604,6 +2611,48 @@ class OptimizationWorkspace(QWidget):
                 "JSON Files (*.json)")
             if path:
                 self._export_json(path)
+
+        elif fmt == "pdf":
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Export PDF Report", "optimization_report.pdf",
+                "PDF Files (*.pdf)")
+            if path:
+                self._export_pdf(path)
+
+    def _export_pdf(self, path: str):
+        """Optimization PDF: best design + stats + convergence/Pareto/DOE/sensitivity."""
+        from ui.pdf_report import save_report
+        r = self._result
+        bd = r.best_design
+        v = bd.variables if bd else {}
+        mc = (bd.mc_stats if bd else {}) or {}
+        n_feas = sum(1 for d in r.all_designs if d.feasible) if r.all_designs else 0
+        kv = [
+            ("Algorithm", r.algorithm_used.upper()),
+            ("Total evaluations", f"{r.total_evaluations:,}"),
+            ("Elapsed time", f"{r.elapsed_time:.1f} s"),
+            ("Population (final)", len(r.all_designs)),
+            ("Feasible", f"{n_feas} / {len(r.all_designs)}" if r.all_designs else "—"),
+            ("Pareto-front size", len(r.pareto_front or [])),
+            ("Best fitness", f"{bd.fitness:.3f}" if bd else "—"),
+            ("Best apogee", f"{mc.get('mean_apogee', 0):.1f} m"),
+            ("Best diameter", f"{v.get('diameter', 0):.4f} m"),
+            ("Best length", f"{v.get('length', 0):.3f} m"),
+            ("Best dry mass", f"{v.get('dry_mass', 0):.3f} kg"),
+            ("Best total impulse", f"{v.get('motor_total_impulse', 0):.0f} N·s"),
+            ("Success rate", f"{mc.get('success_rate', 0) * 100:.1f} %"),
+        ]
+        figs = [getattr(self, a).figure for a in
+                ("_canvas_conv", "_canvas_multi", "_canvas_pareto",
+                 "_canvas_doe", "_canvas_sens", "_canvas_trade")
+                if getattr(self, a, None) is not None]
+        ok = save_report(path, "Optimization Report",
+                         f"{r.algorithm_used.upper()} · {r.total_evaluations:,} evaluations",
+                         kv, figures=figs)
+        if ok:
+            self.progress_label.setText(f"PDF report saved: {Path(path).name}")
+        else:
+            QMessageBox.warning(self, "Export Error", "Could not write the PDF report.")
 
     def _export_csv(self, path: str):
         """Export all designs to CSV."""

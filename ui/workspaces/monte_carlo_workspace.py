@@ -322,6 +322,12 @@ class MonteCarloWorkspace(QWidget):
         self.btn_export.clicked.connect(self._on_export)
         al.addWidget(self.btn_export)
 
+        self.btn_export_pdf = QPushButton(icon("report"), "EXPORT PDF")
+        self.btn_export_pdf.setStyleSheet(_BTN_S)
+        self.btn_export_pdf.setEnabled(False)
+        self.btn_export_pdf.clicked.connect(self._on_export_pdf)
+        al.addWidget(self.btn_export_pdf)
+
         g8.setLayout(al)
         lay.addWidget(g8)
 
@@ -588,6 +594,7 @@ class MonteCarloWorkspace(QWidget):
         self.btn_run.setEnabled(True)
         self.btn_cancel.setEnabled(False)
         self.btn_export.setEnabled(True)
+        self.btn_export_pdf.setEnabled(True)
         self.progress_bar.setValue(100)
 
         n_valid = getattr(results, 'n_valid', n)
@@ -1060,6 +1067,51 @@ class MonteCarloWorkspace(QWidget):
     # ═════════════════════════════════════════════════════════════════════════
     # Export
     # ═════════════════════════════════════════════════════════════════════════
+
+    def _on_export_pdf(self):
+        """Monte Carlo PDF: statistics + distribution / landing / box / tornado plots."""
+        if self._results is None:
+            return
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        from pathlib import Path
+        from ui.pdf_report import save_report
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export PDF Report", "monte_carlo_report.pdf", "PDF Files (*.pdf)")
+        if not path:
+            return
+        r = self._results
+        ci = getattr(r, "apogee_ci_95", (0.0, 0.0))
+        n = len(getattr(r, "all_runs", []) or getattr(r, "runs", []))
+        kv = [
+            ("Runs", n),
+            ("Apogee mean", f"{r.apogee_mean:.1f} m"),
+            ("Apogee std", f"{r.apogee_std:.1f} m"),
+            ("Apogee min / max", f"{r.apogee_min:.1f} / {r.apogee_max:.1f} m"),
+            ("Apogee median", f"{r.apogee_median:.1f} m"),
+            ("Apogee 95% CI", f"{ci[0]:.0f} – {ci[1]:.0f} m"),
+            ("Max velocity mean", f"{r.velocity_mean:.1f} m/s"),
+            ("Max Mach mean", f"{r.mach_mean:.3f}"),
+            ("Peak accel mean", f"{r.accel_mean:.1f} m/s²"),
+            ("Landing dist mean", f"{r.landing_distance_mean:.0f} m"),
+            ("Success rate", f"{r.success_percentage:.1f} %"),
+            ("P(target altitude)", f"{r.prob_target_altitude * 100:.1f} %"),
+            ("P(mission success)", f"{r.mission_success_probability * 100:.1f} %"),
+        ]
+        figs = [getattr(self, a).figure for a in
+                ("_ax_apogee", "_ax_landing", "_ax_dist", "_ax_tornado")
+                if getattr(self, a, None) is not None]
+        # box-plot axes are a row of subplots; grab the shared figure once
+        if getattr(self, "_ax_box", None) is not None:
+            try:
+                figs.append(self._ax_box[0].figure)
+            except Exception:
+                pass
+        ok = save_report(path, "Monte Carlo Report",
+                         f"{n} runs · {r.success_percentage:.0f}% success", kv, figures=figs)
+        if ok:
+            self.status_label.setText(f"PDF report saved: {Path(path).name}") if hasattr(self, "status_label") else None
+        else:
+            QMessageBox.warning(self, "Export Error", "Could not write the PDF report.")
 
     def _on_export(self):
         if self._results is None or not self._results.runs:

@@ -1355,6 +1355,12 @@ class CFDWorkspace(QWidget):
         lay.addWidget(log_grp)
 
         # Export
+        self._btn_export_pdf = QPushButton(icon("report"), "Export PDF Report")
+        self._btn_export_pdf.setStyleSheet(_BTN_SECONDARY)
+        self._btn_export_pdf.setEnabled(False)
+        self._btn_export_pdf.clicked.connect(self._export_pdf)
+        lay.addWidget(self._btn_export_pdf)
+
         self._btn_export_vtk = QPushButton(icon("export"), "Export VTK Results")
         self._btn_export_vtk.setStyleSheet(_BTN_SECONDARY)
         self._btn_export_vtk.setEnabled(False)
@@ -2109,6 +2115,7 @@ class CFDWorkspace(QWidget):
         self._btn_inject.setEnabled(result.converged)
         self._btn_export_vtk.setEnabled(bool(result.volume_vtk or result.surface_vtk))
         self._btn_export_struct.setEnabled(bool(result.surface_vtk))
+        self._btn_export_pdf.setEnabled(True)
         self._vis_combo.setEnabled(True)
         self._vis_combo.setCurrentIndex(2)  # auto-show Pressure volume slice
         self._btn_run.setEnabled(True)
@@ -3406,6 +3413,52 @@ class CFDWorkspace(QWidget):
             from cfd.post_processing import inject_cfd_results_into_engine
             inject_cfd_results_into_engine(self._result, self.engine)
             self._log("CFD results injected into simulation engine.")
+
+    def _export_pdf(self):
+        """CFD PDF: boundary conditions, force coefficients, convergence, Cp,
+        polar (if a sweep ran) and a 3D contour screenshot."""
+        if not self._result:
+            return
+        from pathlib import Path
+        from ui.pdf_report import save_report
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export PDF Report", "cfd_report.pdf", "PDF Files (*.pdf)")
+        if not path:
+            return
+        r = self._result
+        kv = [
+            ("Mach", f"{self._sp_mach.value():.2f}"),
+            ("Altitude", f"{self._sp_alt.value():.0f} m"),
+            ("Angle of attack", f"{self._sp_aoa.value():.1f} °"),
+            ("Total Cd", f"{r.cd:.5f}"),
+            ("  Pressure Cd", f"{r.cd_pressure:.5f}"),
+            ("  Friction Cd", f"{r.cd_friction:.5f}"),
+            ("Cl", f"{r.cl:.5f}"),
+            ("Cm", f"{r.cm:.5f}"),
+            ("Converged", "yes" if r.converged else "no"),
+        ]
+        # Capture the matplotlib plot widgets that have data.
+        figs = []
+        for w in ("_res_plot", "_cp_plot", "_polar_plot"):
+            wid = getattr(self, w, None)
+            fig = getattr(wid, "figure", None)
+            if fig is not None and len(fig.axes) and fig.axes[0].has_data():
+                figs.append(fig)
+        # 3D contour screenshot from the pyvista view.
+        images = []
+        try:
+            if getattr(self, "_plotter", None) is not None:
+                img = self._plotter.screenshot(return_img=True)
+                images.append(("3D contour", img))
+        except Exception:
+            pass
+        ok = save_report(path, "CFD Report",
+                         f"Mach {self._sp_mach.value():.2f} · {self._sp_alt.value():.0f} m · "
+                         f"AoA {self._sp_aoa.value():.1f}°", kv, figures=figs, images=images)
+        if ok:
+            self._log(f"PDF report saved: {Path(path).name}")
+        else:
+            self._log("PDF report failed — see log.")
 
     def _export_vtk(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Export Folder")
