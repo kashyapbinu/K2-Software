@@ -82,6 +82,8 @@ class FlightLoads:
     maxq_altitude: float = 0.0    # m
     maxq_time: float = 0.0        # s
     maxmach_altitude: float = 0.0  # m (altitude at peak Mach — peak heating)
+    maxthrust_mach: float = 0.0    # Mach at the peak-thrust instant
+    maxthrust_altitude: float = 0.0  # m (altitude at peak thrust — early boost)
     wind_speed: float = 0.0       # m/s
     vehicle_mass: float = 5.0     # kg (at max-Q)
     moment_arm: float = 0.0       # m, |x_CP - x_CG| at max-Q (bending arm)
@@ -97,10 +99,11 @@ class FlightLoads:
         _, v_max, _ = history.find_max("velocity")
         _, m_max, idx_m = history.find_max("mach")
         _, a_max, _ = history.find_max("acceleration")
-        _, thr_max, _ = history.find_max("thrust")
+        _, thr_max, idx_thr = history.find_max("thrust")
 
         snap = history.get_snapshot(idx_q) if idx_q is not None else {}
         snap_m = history.get_snapshot(idx_m) if idx_m is not None else {}
+        snap_thr = history.get_snapshot(idx_thr) if idx_thr is not None else {}
         wind = getattr(state, "wind_speed", 0.0) if state else 0.0
         mass = snap.get("mass", 0.0) or (state.total_mass() if state else 5.0)
         # Bending moment arm at max-Q = distance between centre of pressure and
@@ -115,6 +118,8 @@ class FlightLoads:
             maxq_mach=snap.get("mach", m_max),
             maxq_altitude=snap.get("altitude", 0.0),
             maxmach_altitude=snap_m.get("altitude", snap.get("altitude", 0.0)),
+            maxthrust_mach=snap_thr.get("mach", 0.0),
+            maxthrust_altitude=snap_thr.get("altitude", 0.0),
             maxq_time=t_q, wind_speed=wind,
             vehicle_mass=mass if mass > 0 else 5.0,
             moment_arm=arm,

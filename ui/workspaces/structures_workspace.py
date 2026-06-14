@@ -839,14 +839,22 @@ class StructuresWorkspace(QWidget):
         elif condition == "Thermal" and use_sim and fl.max_mach > 0:
             # Peak aero heating ≈ peak Mach; use its altitude when captured.
             mach, alt = fl.max_mach, (fl.maxmach_altitude or fl.maxq_altitude)
-        # Max Thrust / Recovery are axial-dominated (Mach-insensitive) → presets.
+        elif condition == "Max Thrust" and use_sim and fl.max_thrust > 0:
+            # Peak thrust is early in the burn (low altitude, near the pad) —
+            # use the actual altitude/Mach at that instant, not a fixed preset.
+            mach, alt = fl.maxthrust_mach, fl.maxthrust_altitude
+        # Recovery is axial-dominated (Mach-insensitive) → preset.
 
         if mach is None:
             fp = self._CONDITION_FLIGHT.get(condition)
             if fp:
                 mach, alt = fp
         if mach is not None:
-            for sp, val in ((self.sp_mach, mach), (self.sp_alt, alt if alt else self.sp_alt.value())):
+            # alt may legitimately be ~0 (peak thrust on the pad), so set it
+            # directly rather than treating 0 as "no data".
+            if alt is None:
+                alt = self.sp_alt.value()
+            for sp, val in ((self.sp_mach, mach), (self.sp_alt, alt)):
                 sp.blockSignals(True)
                 sp.setValue(val)
                 sp.blockSignals(False)
