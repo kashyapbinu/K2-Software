@@ -133,7 +133,7 @@ class StructuresWorkspace(QWidget):
         f3 = QFormLayout(); f3.setSpacing(8)
         self.lc_combo = QComboBox()
         self.lc_combo.addItems(["Max Thrust", "Max-Q", "Recovery Shock", "Thermal", "Custom"])
-        self.lc_combo.currentTextChanged.connect(self._refresh)
+        self.lc_combo.currentTextChanged.connect(self._on_condition_changed)
         f3.addRow("Condition:", self.lc_combo)
         self.sp_force = QDoubleSpinBox(); self.sp_force.setRange(0,50000); self.sp_force.setValue(500)
         self.sp_force.setSuffix(" N"); f3.addRow("Axial Force:", self.sp_force)
@@ -812,6 +812,28 @@ class StructuresWorkspace(QWidget):
             self.lbl_G.setText(f"{mat.G/1e9:.1f} GPa")
             self.lbl_dens.setText(f"{mat.density:.0f} kg/m³")
             self.lbl_cte.setText(f"{mat.cte*1e6:.1f} µm/m·K")
+
+    # Representative flight point per load case. Each condition is dominated by a
+    # different physics regime, so it must be evaluated at its own Mach/altitude
+    # — otherwise (e.g.) Thermal at the transonic Max-Q Mach badly under-predicts
+    # aero heating. Values are presets; the user can still edit them afterward.
+    _CONDITION_FLIGHT = {
+        "Max Thrust":     (0.25, 500.0),     # liftoff / early boost (thrust-dominated)
+        "Max-Q":          (1.00, 8000.0),    # transonic peak dynamic pressure
+        "Recovery Shock": (0.00, 500.0),     # subsonic descent (Mach unused here)
+        "Thermal":        (3.00, 12000.0),   # sustained supersonic aero heating
+    }
+
+    def _on_condition_changed(self, condition):
+        """Apply the condition's representative flight point, then re-analyse."""
+        fp = self._CONDITION_FLIGHT.get(condition)
+        if fp:
+            for sp, val in ((self.sp_mach, fp[0]), (self.sp_alt, fp[1])):
+                sp.blockSignals(True)
+                sp.setValue(val)
+                sp.blockSignals(False)
+            self._update_q()
+        self._refresh()
 
     # ── Quick analytical refresh ─────────────────────────────────────────────
     def _refresh(self, state=None):
