@@ -262,6 +262,16 @@ class DynamicsWorkspace(QWidget):
                                        "border-radius:6px;background:#161b22;color:#484f58;")
         lay.addWidget(self.lbl_overall)
 
+        _note = QLabel(
+            "Note: This assessment is an estimated qualitative evaluation based on "
+            "simulation outputs and predefined heuristics. It is intended for "
+            "informational and comparative purposes only and should not be used for "
+            "engineering certification, safety-critical decisions, or as a substitute "
+            "for professional structural analysis and validation.")
+        _note.setWordWrap(True)
+        _note.setStyleSheet("color:#6e7681;font-size:9px;padding:2px 2px 4px 2px;")
+        lay.addWidget(_note)
+
         # Flutter
         gf = QGroupBox("Flutter"); gf.setStyleSheet(_GRP)
         ff = QFormLayout(); ff.setSpacing(6)
@@ -924,16 +934,15 @@ class DynamicsWorkspace(QWidget):
 
         score = (0.30 * flutter_score + 0.25 * div_score + 0.20 * q_score
                  + 0.15 * res_score + 0.10 * rev_score)
-        if score >= 90:
-            rating, col = "EXCELLENT", _C_SAFE
-        elif score >= 75:
-            rating, col = "GOOD", _C_SAFE
+        # Qualitative 3-level verdict (no numeric score shown to the user).
+        if score >= 75:
+            rating, col = "✅ Good", _C_SAFE
         elif score >= 50:
-            rating, col = "CAUTION", _C_CAUT
+            rating, col = "⚠️ Marginal", _C_CAUT
         else:
-            rating, col = "UNSAFE", _C_BAD
+            rating, col = "❌ Poor", _C_BAD
         self._safety_score = score; self._safety_rating = rating
-        self.lbl_overall.setText(f"SAFETY SCORE  {score:.0f}/100\n{rating}")
+        self.lbl_overall.setText(rating)
         self.lbl_overall.setStyleSheet(
             f"font-weight:800;font-size:16px;padding:10px;border-radius:6px;"
             f"background:#161b22;color:{col};border:1px solid {col}66;")

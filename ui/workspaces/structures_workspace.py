@@ -561,14 +561,14 @@ class StructuresWorkspace(QWidget):
         t = QLabel("Results"); t.setStyleSheet("color:#58a6ff;font-size:15px;font-weight:700;padding:2px 0 6px 0;")
         lay.addWidget(t)
 
-        # ── Structural Safety Score ──
-        gsc = QGroupBox("Structural Safety Score"); gsc.setStyleSheet(_GRP)
+        # ── Structural Safety Assessment ──
+        gsc = QGroupBox("Structural Safety Assessment"); gsc.setStyleSheet(_GRP)
         vsc = QVBoxLayout(); vsc.setSpacing(4)
-        self.lbl_score = QLabel("— / 100")
+        self.lbl_score = QLabel("Run analysis")
         self.lbl_score.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_score.setStyleSheet("color:#8b949e;font-size:30px;font-weight:800;")
+        self.lbl_score.setStyleSheet("color:#8b949e;font-size:22px;font-weight:800;")
         vsc.addWidget(self.lbl_score)
-        self.lbl_score_grade = QLabel("Run analysis")
+        self.lbl_score_grade = QLabel("")
         self.lbl_score_grade.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_score_grade.setStyleSheet("color:#8b949e;font-size:13px;font-weight:700;")
         vsc.addWidget(self.lbl_score_grade)
@@ -576,6 +576,15 @@ class StructuresWorkspace(QWidget):
         self.lbl_verdict_big.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_verdict_big.setStyleSheet("color:#8b949e;font-size:12px;font-weight:700;padding-top:2px;")
         vsc.addWidget(self.lbl_verdict_big)
+        _struct_note = QLabel(
+            "Note: This assessment is an estimated qualitative evaluation based on "
+            "simulation outputs and predefined heuristics. It is intended for "
+            "informational and comparative purposes only and should not be used for "
+            "engineering certification, safety-critical decisions, or as a substitute "
+            "for professional structural analysis and validation.")
+        _struct_note.setWordWrap(True)
+        _struct_note.setStyleSheet("color:#6e7681;font-size:9px;padding:4px 2px 2px 2px;")
+        vsc.addWidget(_struct_note)
         gsc.setLayout(vsc); lay.addWidget(gsc)
 
         # ── Physics Consistency Checks ──
@@ -1354,10 +1363,16 @@ class StructuresWorkspace(QWidget):
 
     def _populate_workstation(self, rep):
         self._refresh_flight_indicator()
-        # ── Safety score ──
+        # ── Safety assessment (qualitative — no numeric score shown) ──
         sc = rep.score
-        self.lbl_score.setText(f"{sc.score} / 100")
-        self.lbl_score.setStyleSheet(f"color:{sc.color};font-size:30px;font-weight:800;")
+        if sc.score >= 75:
+            verdict = "✅ Good"
+        elif sc.score >= 50:
+            verdict = "⚠️ Marginal"
+        else:
+            verdict = "❌ Poor"
+        self.lbl_score.setText(verdict)
+        self.lbl_score.setStyleSheet(f"color:{sc.color};font-size:22px;font-weight:800;")
         self.lbl_score_grade.setText(sc.grade)
         self.lbl_score_grade.setStyleSheet(f"color:{sc.color};font-size:13px;font-weight:700;")
         self.lbl_verdict_big.setText(f"Verdict: {rep.verdict}")
