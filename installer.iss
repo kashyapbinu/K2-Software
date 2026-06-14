@@ -8,7 +8,7 @@
 ; user gets a normal "installed application that opens as an app" experience.
 
 #define MyAppName "K2 Aerospace"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.1.1"
 #define MyAppPublisher "Kashyap Binu"
 #define MyAppURL "https://github.com/kashyapbinu/K2-Software"
 #define MyAppExeName "K2.exe"

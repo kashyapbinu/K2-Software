@@ -85,7 +85,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("K2 Aerospace")
     app.setOrganizationName("K2")
-    app.setApplicationVersion("0.1.2")
+    app.setApplicationVersion("0.1.1")
 
     # ── App / window / taskbar icon ──────────────────────────────────────────
     # Resolve the bundled icon (under bin/, kept relative in the frozen bundle).
