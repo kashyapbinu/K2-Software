@@ -7,9 +7,9 @@
 ; and (optional) desktop shortcuts, and registers a proper uninstaller — so the
 ; user gets a normal "installed application that opens as an app" experience.
 
-#define MyAppName "K2 Aerospace"
+#define MyAppName "K2 AeroSim"
 #define MyAppVersion "0.1.1"
-#define MyAppPublisher "Kashyap Binu"
+#define MyAppPublisher "K2 AeroSim"
 #define MyAppURL "https://github.com/kashyapbinu/K2-Software"
 #define MyAppExeName "K2.exe"
 

@@ -83,8 +83,8 @@ def main():
         pass  # WebEngine optional — Cinematic tab shows an install hint instead
 
     app = QApplication(sys.argv)
-    app.setApplicationName("K2 Aerospace")
-    app.setOrganizationName("K2")
+    app.setApplicationName("K2 AeroSim")
+    app.setOrganizationName("K2 AeroSim")
     app.setApplicationVersion("0.1.1")
 
     # ── App / window / taskbar icon ──────────────────────────────────────────
@@ -100,7 +100,7 @@ def main():
     if sys.platform == "win32":
         try:
             import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("K2.Aerospace.0.1")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("K2.AeroSim.0.1")
         except Exception:
             pass
 

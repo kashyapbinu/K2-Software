@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Main Window
+K2 AeroSim — Main Window
 =============================
 Tabbed workspace layout with 7 engineering workspaces.
 Global toolbar and console dock.
@@ -37,7 +37,7 @@ logger = logging.getLogger("K2.MainWindow")
 
 
 class MainWindow(QMainWindow):
-    """K2 Aerospace main application window with tabbed workspaces."""
+    """K2 AeroSim main application window with tabbed workspaces."""
 
     TAB_ICONS = ["design", "propulsion", "cfd", "structures", "dynamics", "avionics",
                  "simulation", "mission", "mission", "results", "montecarlo", "optimization"]
@@ -57,7 +57,7 @@ class MainWindow(QMainWindow):
         self.flight_computer = FlightComputer(self.sim_engine.event_mgr)
 
         # ── Window setup ──
-        self.setWindowTitle("K2 Aerospace — Rocket Simulation Platform")
+        self.setWindowTitle("K2 AeroSim — Rocket Simulation Platform")
         self.setMinimumSize(1200, 750)
         self.resize(1600, 950)
 
@@ -72,7 +72,7 @@ class MainWindow(QMainWindow):
         # ── Initial state push ──
         QTimer.singleShot(200, self._initial_state_push)
 
-        logger.info("K2 Aerospace initialized — 11 workspaces ready")
+        logger.info("K2 AeroSim initialized — 11 workspaces ready")
 
     def _setup_toolbar(self):
         self.toolbar = MainToolbar(self)
@@ -363,10 +363,10 @@ class MainWindow(QMainWindow):
     def _update_title(self):
         name = self.engine.state.name
         file_info = f" — {Path(self._current_file).name}" if self._current_file else ""
-        self.setWindowTitle(f"K2 Aerospace — {name}{file_info}")
+        self.setWindowTitle(f"K2 AeroSim — {name}{file_info}")
 
     def closeEvent(self, event):
-        reply = QMessageBox.question(self, "Quit K2 Aerospace",
+        reply = QMessageBox.question(self, "Quit K2 AeroSim",
             "Are you sure you want to quit?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
