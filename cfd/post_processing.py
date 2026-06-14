@@ -1,5 +1,5 @@
 """
-K2 Aerospace — CFD Post-Processing
+K2 AeroSim — CFD Post-Processing
 =====================================
 Loads SU2 VTK outputs into PyVista for visualization inside the CFD Workspace.
 Provides Cp distribution extraction, mesh statistics, force vector computation,

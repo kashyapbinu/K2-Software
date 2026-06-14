@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Headless Batch Simulation Runner
+K2 AeroSim — Headless Batch Simulation Runner
 =================================================
 Thread-safe, non-Qt 6DOF trajectory simulator for Monte Carlo analysis.
 

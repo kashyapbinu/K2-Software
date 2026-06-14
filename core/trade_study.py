@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Trade Study Engine
+K2 AeroSim — Trade Study Engine
 ====================================
 Multi-configuration comparison for engineering decision-making.
 

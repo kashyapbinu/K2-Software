@@ -1,5 +1,5 @@
 /**
- * K2 Aerospace — Cinematic Flight View
+ * K2 AeroSim — Cinematic Flight View
  * =====================================
  * three.js renderer fed live telemetry from the K2 simulation engine via
  * QWebChannel. Visual-only: all physics happens Python-side; this file just

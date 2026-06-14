@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Propulsion Workspace
+K2 AeroSim — Propulsion Workspace
 Motor analysis, thrust curves, Isp, mass flow, chamber pressure.
 """
 import json, logging

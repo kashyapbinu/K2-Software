@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Empirical Drag Tables
+K2 AeroSim — Empirical Drag Tables
 ======================================
 Ported from OpenRocket's BarrowmanCalculator and SymmetricComponentCalc.
 

@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Drogue Parachute
+K2 AeroSim — Drogue Parachute
 """
 
 class Drogue:

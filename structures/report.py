@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Structural Analysis Report Generator
+K2 AeroSim — Structural Analysis Report Generator
 ====================================================
 Produces a professional multi-section PDF from a WorkstationReport:
 

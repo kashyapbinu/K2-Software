@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Shock Detection System
+K2 AeroSim — Shock Detection System
 ========================================
 Detects shock waves in supersonic flow fields using multiple sensor
 methods: pressure gradient, Ducros sensor, dilatation (divergence),

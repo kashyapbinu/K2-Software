@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Structures Workstation Backend
+K2 AeroSim — Structures Workstation Backend
 ==============================================
 Pure-Python analytical engine that turns a rocket (geometry + material +
 flight history) into the full set of structural answers the Structures

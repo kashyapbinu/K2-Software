@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Preset Picker Dialog
+K2 AeroSim — Preset Picker Dialog
 Searchable/filterable table of component presets.
 """
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLineEdit,

@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Console Panel
+K2 AeroSim — Console Panel
 ===============================
 Terminal-styled log output panel with custom logging handler.
 Routes Python logging messages to the UI with timestamps and color coding.

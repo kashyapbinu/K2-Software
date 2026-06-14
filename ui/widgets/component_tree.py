@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Component Tree Widget
+K2 AeroSim — Component Tree Widget
 Hierarchical tree view showing rocket structure.
 """
 import logging

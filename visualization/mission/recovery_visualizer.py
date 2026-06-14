@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Recovery (Parachute) Visualizer
+K2 AeroSim — Recovery (Parachute) Visualizer
 ================================================
 Renders an animated recovery system on the shared Mission Visualizer plotter.
 

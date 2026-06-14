@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Dark-themed Matplotlib widget for embedding plots in Qt.
+K2 AeroSim — Dark-themed Matplotlib widget for embedding plots in Qt.
 """
 import matplotlib
 matplotlib.use("QtAgg")

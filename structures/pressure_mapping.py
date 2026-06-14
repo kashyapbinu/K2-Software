@@ -1,5 +1,5 @@
 """
-K2 Aerospace — CFD → FEM Pressure Mapping
+K2 AeroSim — CFD → FEM Pressure Mapping
 ==========================================
 Transfers aerodynamic pressure distributions from CFD solutions onto
 structural FEM meshes and verifies force / moment conservation.
@@ -461,7 +461,7 @@ def generate_dload_cards(
     str
         The *DLOAD card text.
     """
-    lines = ["** K2 Aerospace — Mapped Aerodynamic Pressure Loads"]
+    lines = ["** K2 AeroSim — Mapped Aerodynamic Pressure Loads"]
     lines.append(f"** Method: {result.mapping_method}")
     lines.append(f"** CFD points: {result.num_cfd_points}  "
                  f"FEM elements: {result.num_fem_elements}")

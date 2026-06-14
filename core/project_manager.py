@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Project Manager
+K2 AeroSim — Project Manager
 ================================
 Handles saving and loading rocket projects as JSON files.
 Supports forward-compatible deserialization (unknown keys are ignored).
@@ -33,7 +33,7 @@ def save_project(state: RocketState, filepath: str) -> bool:
     try:
         project_data = {
             "format_version": PROJECT_FORMAT_VERSION,
-            "application": "K2 Aerospace",
+            "application": "K2 AeroSim",
             "saved_at": datetime.now().isoformat(),
             "rocket_state": state.to_dict()
         }
@@ -93,6 +93,6 @@ def load_project(filepath: str) -> RocketState | None:
 
 def get_default_project_dir() -> Path:
     """Return the default directory for saving projects."""
-    docs = Path.home() / "Documents" / "K2 Aerospace Projects"
+    docs = Path.home() / "Documents" / "K2 AeroSim Projects"
     docs.mkdir(parents=True, exist_ok=True)
     return docs

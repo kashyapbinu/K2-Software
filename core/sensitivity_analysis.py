@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Global Sensitivity Analysis
+K2 AeroSim — Global Sensitivity Analysis
 =============================================
 Methods for identifying dominant design parameters:
 

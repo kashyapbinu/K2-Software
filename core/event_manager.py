@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Simulation Event Manager
+K2 AeroSim — Simulation Event Manager
 =========================================
 Publish-subscribe event bus for simulation events.
 Decouples simulation logic from UI and subsystem responses.

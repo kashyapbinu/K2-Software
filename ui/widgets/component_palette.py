@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Component Palette
+K2 AeroSim — Component Palette
 Grid of buttons to add rocket components.
 """
 import logging

@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Aerodynamic Heating & Thermal Stress (Physics-Validated)
+K2 AeroSim — Aerodynamic Heating & Thermal Stress (Physics-Validated)
 ========================================================================
 Models:
   - Stagnation temperature (isentropic)

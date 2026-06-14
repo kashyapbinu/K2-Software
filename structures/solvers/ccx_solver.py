@@ -1,5 +1,5 @@
 """
-K2 Aerospace — CalculiX Solver Backend
+K2 AeroSim — CalculiX Solver Backend
 ========================================
 Implements FEMSolver using the CalculiX open-source FEA suite (ccx).
 ccx binary must be in the K2 bin/ folder or on PATH.
@@ -37,7 +37,7 @@ def _find_ccx() -> Optional[Path]:
 
 
 class CalculiXSolver(FEMSolver):
-    """CalculiX FEM solver backend for K2 Aerospace."""
+    """CalculiX FEM solver backend for K2 AeroSim."""
 
     def __init__(self, config: FEMConfig):
         super().__init__(config)
@@ -85,7 +85,7 @@ class CalculiXSolver(FEMSolver):
             mesh_text = self._mesh_path.read_text(encoding="ascii", errors="replace")
 
         with open(inp, "w", encoding="ascii", errors="replace") as f:
-            f.write("** K2 Aerospace — CalculiX Analysis\n**\n")
+            f.write("** K2 AeroSim — CalculiX Analysis\n**\n")
             # Include mesh
             f.write(mesh_text + "\n")
             # Shell section — assign thickness + material to all elements

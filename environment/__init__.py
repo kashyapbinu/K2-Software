@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Environment Model
+K2 AeroSim — Environment Model
 """
 
 from environment.atmosphere_model import Atmosphere

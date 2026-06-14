@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Structural Physics Consistency Checks
+K2 AeroSim — Structural Physics Consistency Checks
 =====================================================
 Audits a WorkstationReport for results that violate basic structural
 mechanics or fall outside the range expected for a 1–3 m amateur/research

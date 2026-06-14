@@ -1,5 +1,5 @@
 """
-K2 Aerospace - Mission Visualizer Workspace
+K2 AeroSim - Mission Visualizer Workspace
 ============================================
 Real-time 3D mission visualization synchronized with the simulation engine.
 Subscribes to engine.telemetry_tick for live rendering while the solver runs

@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Flight History Manager
+K2 AeroSim — Flight History Manager
 =======================================
 Records and retrieves complete simulation history.
 Replaces the simple list[dict] approach in RocketStateEngine.

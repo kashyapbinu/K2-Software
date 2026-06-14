@@ -1,5 +1,5 @@
 """
-K2 Aerospace — CFD Module
+K2 AeroSim — CFD Module
 ==========================
 Open-source CFD pipeline using Gmsh (meshing) and SU2 (solver).
 

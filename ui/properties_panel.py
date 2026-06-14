@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Properties & Output Panel
+K2 AeroSim — Properties & Output Panel
 ==========================================
 Right dock panel displaying computed/derived rocket properties.
 Auto-refreshes when RocketState changes.

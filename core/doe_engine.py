@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Design of Experiments (DOE) Engine
+K2 AeroSim — Design of Experiments (DOE) Engine
 ===================================================
 Methods for systematic design-space exploration:
 

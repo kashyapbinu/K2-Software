@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Simulation Workspace
+K2 AeroSim — Simulation Workspace
 Mission control: Run/Pause/Stop, environment, recovery config, live readouts.
 """
 import logging

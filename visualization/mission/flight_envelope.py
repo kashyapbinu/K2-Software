@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Flight Envelope Visualization
+K2 AeroSim — Flight Envelope Visualization
 ==============================================
 Mission-planning and recovery-safety overlay for the Mission Visualizer.
 This is the layer that pushes K2 past a plain trajectory viewer toward a

@@ -1,5 +1,5 @@
 """
-K2 Aerospace — CFD Meshing (Gmsh)
+K2 AeroSim — CFD Meshing (Gmsh)
 ====================================
 Generates a 3D volumetric SU2 mesh for RANS simulation.
 

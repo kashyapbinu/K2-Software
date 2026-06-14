@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Optimization Engine
+K2 AeroSim — Optimization Engine
 ====================================
 Aerospace-grade Multidisciplinary Design Optimization (MDO) engine.
 

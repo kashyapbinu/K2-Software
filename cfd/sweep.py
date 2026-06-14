@@ -1,5 +1,5 @@
 """
-K2 Aerospace — CFD Parameter Sweep Engine
+K2 AeroSim — CFD Parameter Sweep Engine
 ==========================================
 Runs a series of SU2 solves over a swept flow variable (Angle of Attack or
 Mach number) reusing a SINGLE computational mesh, then extracts engineering

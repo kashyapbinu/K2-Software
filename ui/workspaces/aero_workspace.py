@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Aerodynamics Workspace
+K2 AeroSim — Aerodynamics Workspace
 CD vs Mach, stability analysis, wind settings, future CFD placeholders.
 """
 import numpy as np, logging

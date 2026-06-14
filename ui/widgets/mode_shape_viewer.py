@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Mode Shape Viewer
+K2 AeroSim — Mode Shape Viewer
 =================================
 Professional displacement contour visualization for modal analysis.
 Renders animated mode shapes with ANSYS/Abaqus-style color mapping.

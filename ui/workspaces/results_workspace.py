@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Results Workspace
+K2 AeroSim — Results Workspace
 Professional post-flight data visualization with synchronized cursor.
 """
 import csv, logging

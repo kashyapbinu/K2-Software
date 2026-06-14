@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Cinematic Flight View
+K2 AeroSim — Cinematic Flight View
 ======================================
 A second, purely visual flight view rendered with three.js inside a
 QWebEngineView: PBR rocket, HDR-style bloom, GPU exhaust/smoke sprites,

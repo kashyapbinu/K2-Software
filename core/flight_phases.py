@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Flight Phase System
+K2 AeroSim — Flight Phase System
 ====================================
 Enum-based flight phases with automatic transition logic.
 

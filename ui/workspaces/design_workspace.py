@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Design Workspace (Component Builder)
+K2 AeroSim — Design Workspace (Component Builder)
 OpenRocket-style component-based rocket designer with multi-stage support.
 Includes real-time stability analysis (CP, CG, margin).
 """

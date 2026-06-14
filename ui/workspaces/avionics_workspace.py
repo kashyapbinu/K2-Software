@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Avionics Workspace
+K2 AeroSim — Avionics Workspace
 Simulated telemetry dashboard with sensor configuration and flight computer state.
 """
 import logging

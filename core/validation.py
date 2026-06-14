@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Result Validation Framework
+K2 AeroSim — Result Validation Framework
 ============================================
 Every analysis result carries a ValidationInfo describing:
 - Validation level  (VALIDATED / ESTIMATED / SIMPLIFIED / PLACEHOLDER)

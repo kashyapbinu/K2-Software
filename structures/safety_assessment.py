@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Structural Safety Assessment
+K2 AeroSim — Structural Safety Assessment
 =============================================
 Computes factor-of-safety (FoS) for every failure mode relevant to
 aerospace thin-wall structures and identifies the governing mode.

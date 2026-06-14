@@ -1,5 +1,5 @@
 """
-K2 Aerospace — 3D Structural Stress Viewer
+K2 AeroSim — 3D Structural Stress Viewer
 ==========================================
 Interactive ANSYS-style stress visualization of the rocket airframe.
 

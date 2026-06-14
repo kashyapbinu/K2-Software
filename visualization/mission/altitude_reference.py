@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Altitude Reference System
+K2 AeroSim — Altitude Reference System
 ==========================================
 Renders altitude situational-awareness layers on the Mission Visualizer
 plotter so the user can judge height at a glance:

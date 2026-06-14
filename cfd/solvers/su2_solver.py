@@ -1,5 +1,5 @@
 """
-K2 Aerospace — SU2 Solver Backend
+K2 AeroSim — SU2 Solver Backend
 ====================================
 Implements CFDSolver using the Stanford SU2 open-source CFD suite.
 SU2 binaries (SU2_CFD, SU2_DEF) must be present in the K2 bin/ folder.
@@ -87,7 +87,7 @@ _TURB_MODEL_MAP = {
 
 _SU2_CONFIG_TEMPLATE = """\
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% K2 Aerospace - SU2 CFD Configuration                   %%
+%% K2 AeroSim - SU2 CFD Configuration                   %%
 %% Auto-generated - do not edit by hand                   %%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -253,7 +253,7 @@ def _integrate_surface_forces(
 
 
 class SU2Solver(CFDSolver):
-    """SU2 CFD solver backend for K2 Aerospace."""
+    """SU2 CFD solver backend for K2 AeroSim."""
 
     def __init__(self, config: CFDConfig):
         super().__init__(config)

@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Optimization Workspace
+K2 AeroSim — Optimization Workspace
 =======================================
 Professional MDO (Multidisciplinary Design Optimization) interface with:
   - 8 analysis sub-tabs

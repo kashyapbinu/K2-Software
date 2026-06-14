@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Cp Distribution Plot Widget
+K2 AeroSim — Cp Distribution Plot Widget
 =============================================
 Aerospace-standard pressure coefficient distribution plot with inverted
 Y-axis (Cp convention: negative up = suction), hover cursor, and section

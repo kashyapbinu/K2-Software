@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Descent Dynamics
+K2 AeroSim — Descent Dynamics
 """
 
 import math

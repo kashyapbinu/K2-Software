@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Main Parachute
+K2 AeroSim — Main Parachute
 """
 
 class MainChute:

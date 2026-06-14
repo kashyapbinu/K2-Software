@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Physical Constants & Unit Definitions
+K2 AeroSim — Physical Constants & Unit Definitions
 =====================================================
 Centralized physical constants used across all simulation modules.
 All values in SI units.

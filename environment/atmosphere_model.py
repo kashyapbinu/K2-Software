@@ -1,5 +1,5 @@
 """
-K2 Aerospace — International Standard Atmosphere (ISA)
+K2 AeroSim — International Standard Atmosphere (ISA)
 =======================================================
 Atmosphere model valid from sea level to 86 km.
 

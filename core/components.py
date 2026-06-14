@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Component Data Model
+K2 AeroSim — Component Data Model
 Hierarchical rocket component system with multi-stage support.
 """
 import math, uuid, logging

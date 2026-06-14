@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Structures Solver Backends
+K2 AeroSim — Structures Solver Backends
 """
 from structures.solvers.base import FEMSolver, FEMConfig, FEMResult, ModalResult, ThermalResult
 from structures.solvers.ccx_solver import CalculiXSolver

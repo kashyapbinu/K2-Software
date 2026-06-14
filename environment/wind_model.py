@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Advanced Wind Model
+K2 AeroSim — Advanced Wind Model
 ====================================
 Ported from OpenRocket's PinkNoiseWindModel.java.
 

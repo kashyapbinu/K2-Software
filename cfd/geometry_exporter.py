@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Geometry Exporter
+K2 AeroSim — Geometry Exporter
 ==================================
 Converts a K2 RocketAssembly (or an external CAD file) into a watertight
 triangulated STL surface suitable for CFD meshing.

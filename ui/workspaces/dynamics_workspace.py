@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Dynamics Workspace
+K2 AeroSim — Dynamics Workspace
 ====================================
 Flutter, vibration, aeroelastic + flight-envelope safety analysis UI.
 3-panel layout: config | plots | engineering assessment.

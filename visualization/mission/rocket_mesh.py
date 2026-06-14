@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Assembly Rocket Mesh Builder
+K2 AeroSim — Assembly Rocket Mesh Builder
 ============================================
 Builds ONE merged PolyData of the actual rocket design (nose shape, body
 tubes, transitions, fins, nozzle) for the Mission Visualizer, with per-vertex

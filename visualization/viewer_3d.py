@@ -1,5 +1,5 @@
 """
-K2 Aerospace — 3D Rocket Viewer (Component-Based)
+K2 AeroSim — 3D Rocket Viewer (Component-Based)
 Renders the assembled rocket from the component tree.
 
 Coordinate system (matching OpenRocket):

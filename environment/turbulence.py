@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Turbulence Model
+K2 AeroSim — Turbulence Model
 ================================
 Bandlimited Dryden turbulence for rocket flight simulation.
 """

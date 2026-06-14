@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Monte Carlo Analysis Engine
+K2 AeroSim — Monte Carlo Analysis Engine
 =============================================
 Orchestrates parameter perturbation, parallel execution via QThreadPool,
 and statistical aggregation for probabilistic flight performance analysis.

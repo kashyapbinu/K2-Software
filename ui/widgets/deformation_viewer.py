@@ -1,5 +1,5 @@
 """
-K2 Aerospace — 3D Structural Deformation Viewer
+K2 AeroSim — 3D Structural Deformation Viewer
 ================================================
 Shows the rocket airframe deforming under load. Uses the SAME assembly-based
 geometry as the Design viewer and the 3D stress viewer (build_rocket_regions),

@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Parachute Dynamics
+K2 AeroSim — Parachute Dynamics
 ====================================
 High-fidelity recovery system drag calculations including
 inflation transients, steady-state drag, and failure modes.

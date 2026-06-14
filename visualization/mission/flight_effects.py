@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Mission Visualizer Flight Effects
+K2 AeroSim — Mission Visualizer Flight Effects
 =================================================
 Scene-overlay effects for the live 3D flight view, following the established
 overlay pattern (RecoveryVisualizer / FlightEnvelope): each class owns named

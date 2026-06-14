@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Numerical Integrators
+K2 AeroSim — Numerical Integrators
 ======================================
 Pluggable integrators for trajectory simulation.
 

@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Deployment Logic
+K2 AeroSim — Deployment Logic
 """
 
 class DeploymentLogic:

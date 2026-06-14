@@ -1,5 +1,5 @@
 """
-K2 Aerospace — FEM Solver Abstract Base
+K2 AeroSim — FEM Solver Abstract Base
 ========================================
 Defines the FEMSolver interface and data classes.
 All concrete solver implementations (CalculiX, etc.)

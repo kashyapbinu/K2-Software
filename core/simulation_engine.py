@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Simulation Engine v3 (6DOF, OpenRocket Physics)
+K2 AeroSim — Simulation Engine v3 (6DOF, OpenRocket Physics)
 ================================================================
 Real-time trajectory simulation using modular core components.
 

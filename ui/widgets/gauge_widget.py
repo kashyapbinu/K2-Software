@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Gauge Widget for avionics dashboard.
+K2 AeroSim — Gauge Widget for avionics dashboard.
 Custom-painted circular analog gauge.
 """
 import math

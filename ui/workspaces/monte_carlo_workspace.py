@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Monte Carlo Workspace
+K2 AeroSim — Monte Carlo Workspace
 ======================================
 Professional Monte Carlo analysis interface with configuration inputs,
 matplotlib visualizations, and statistical results in a 3-panel layout.

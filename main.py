@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Rocket Simulation Platform
+K2 AeroSim — Rocket Simulation Platform
 ============================================
 Integrated aerospace digital twin for high-power and experimental rockets.
 
@@ -47,10 +47,10 @@ def setup_logging():
 
 
 def main():
-    """Launch the K2 Aerospace application."""
+    """Launch the K2 AeroSim application."""
     setup_logging()
     logger = logging.getLogger("K2")
-    logger.info("Starting K2 Aerospace...")
+    logger.info("Starting K2 AeroSim...")
 
     # ── Global crash handlers ────────────────────────────────────────────────
     def _excepthook(exc_type, exc_value, exc_tb):
@@ -111,7 +111,7 @@ def main():
     window = MainWindow()
     window.show()
 
-    logger.info("K2 Aerospace is ready")
+    logger.info("K2 AeroSim is ready")
     sys.exit(app.exec())
 
 

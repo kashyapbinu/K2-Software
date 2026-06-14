@@ -1,5 +1,5 @@
 """
-K2 Aerospace — CFD Solver Abstract Base
+K2 AeroSim — CFD Solver Abstract Base
 ========================================
 Defines the CFDSolver interface and data classes.
 All concrete solver implementations (SU2, OpenFOAM, etc.)

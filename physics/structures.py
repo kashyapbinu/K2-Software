@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Structural Analysis Module (Analytical)
+K2 AeroSim — Structural Analysis Module (Analytical)
 =======================================================
 Quick analytical stress calculations for real-time display.
 Full FEM analysis is in structures/solvers/.

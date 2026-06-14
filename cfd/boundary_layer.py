@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Boundary Layer Analysis
+K2 AeroSim — Boundary Layer Analysis
 =========================================
 Extracts boundary layer diagnostics from CFD surface and volume meshes
 for visualization: Y+, wall shear stress, separation detection, and

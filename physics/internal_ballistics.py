@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Internal Ballistics Engine
+K2 AeroSim — Internal Ballistics Engine
 ===========================================
 Simulates the thermodynamics and burn geometry of solid rocket motors.
 Supports BATES grains and calculates steady-state chamber pressure,

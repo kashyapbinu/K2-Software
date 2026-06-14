@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Component Editor
+K2 AeroSim — Component Editor
 Dynamic property editor for the selected rocket component.
 """
 import json, logging

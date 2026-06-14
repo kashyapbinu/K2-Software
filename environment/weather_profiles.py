@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Weather Profiles
+K2 AeroSim — Weather Profiles
 """
 
 from environment.wind_model import WindModel

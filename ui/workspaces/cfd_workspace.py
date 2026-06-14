@@ -1,5 +1,5 @@
 """
-K2 Aerospace — CFD Workspace
+K2 AeroSim — CFD Workspace
 Clean, scrollable layout matching other K2 workspaces.
 """
 from __future__ import annotations

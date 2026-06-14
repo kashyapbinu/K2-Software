@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Toolbar
+K2 AeroSim — Toolbar
 ========================
 Main application toolbar with essential actions:
 New, Open, Save, Run Simulation, Settings.

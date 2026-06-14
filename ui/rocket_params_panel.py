@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Rocket Parameters Panel
+K2 AeroSim — Rocket Parameters Panel
 =========================================
 Left dock panel with editable fields for primary rocket configuration.
 Changes are pushed live to the RocketStateEngine.

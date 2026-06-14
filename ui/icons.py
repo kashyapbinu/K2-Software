@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Icon helper
+K2 AeroSim — Icon helper
 ==========================
 Central registry mapping semantic keys to scalable FontAwesome icons
 (via qtawesome). Replaces the old emoji glyphs in tabs, toolbar actions

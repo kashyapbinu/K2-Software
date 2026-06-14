@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Structures Workspace (Full Rebuild)
+K2 AeroSim — Structures Workspace (Full Rebuild)
 ====================================================
 3-panel layout matching CFD workspace: config | visualization | results.
 Material selection, stress analysis, FEM, modal, thermal, buckling.

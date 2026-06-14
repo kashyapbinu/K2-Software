@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Propulsion Module
+K2 AeroSim — Propulsion Module
 """
 import math, numpy as np, logging
 from core.constants import G_EARTH

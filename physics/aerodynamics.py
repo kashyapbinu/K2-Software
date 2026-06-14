@@ -1,5 +1,5 @@
 """
-K2 Aerospace — High-Fidelity Aerodynamics Model (OpenRocket Port)
+K2 AeroSim — High-Fidelity Aerodynamics Model (OpenRocket Port)
 ==================================================================
 Engineering-grade aerodynamic calculations for rocket flight simulation.
 

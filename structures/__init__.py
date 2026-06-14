@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Structures Package
+K2 AeroSim — Structures Package
 ===================================
 Structural analysis: FEM (CalculiX), thermal, materials.
 """

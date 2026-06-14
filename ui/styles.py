@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Dark Engineering Theme
+K2 AeroSim — Dark Engineering Theme
 =======================================
 Professional QSS stylesheet inspired by aerospace engineering software.
 Dark theme with cyan/teal accents for a technical, premium feel.

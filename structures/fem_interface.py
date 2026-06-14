@@ -1,5 +1,5 @@
 """
-K2 Aerospace — FEM Interface (Orchestrator)
+K2 AeroSim — FEM Interface (Orchestrator)
 =============================================
 High-level API that coordinates meshing, solving, and post-processing.
 """
@@ -14,7 +14,7 @@ logger = logging.getLogger("K2.FEM")
 
 
 class FEMInterface:
-    """Orchestrates structural analysis for K2 Aerospace."""
+    """Orchestrates structural analysis for K2 AeroSim."""
 
     def __init__(self, work_dir: Path = None):
         from core.paths import user_data_dir

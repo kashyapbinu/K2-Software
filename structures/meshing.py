@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Structural Meshing (Gmsh)
+K2 AeroSim — Structural Meshing (Gmsh)
 ==========================================
 Generates shell meshes of the rocket for CalculiX FEM analysis.
 Output: CalculiX .inp mesh file with node/element sets per component.
@@ -206,7 +206,7 @@ def _write_inp(fp: Path, nodes, elements, nsets, elsets):
     elements = new_elements
 
     with open(fp, "w", encoding="ascii", errors="replace") as f:
-        f.write("** K2 Aerospace — Structural Mesh\n**\n")
+        f.write("** K2 AeroSim — Structural Mesh\n**\n")
         f.write("*NODE, NSET=NALL\n")
         for nid, x, y, z in nodes:
             f.write(f"{nid}, {x:.8e}, {y:.8e}, {z:.8e}\n")

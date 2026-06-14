@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Surrogate Model Module
+K2 AeroSim — Surrogate Model Module
 =======================================
 Lightweight surrogate models for accelerating optimisation.
 

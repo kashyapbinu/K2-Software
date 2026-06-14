@@ -1,5 +1,5 @@
 """
-K2 Aerospace — Centralized Rocket State Engine
+K2 AeroSim — Centralized Rocket State Engine
 ================================================
 The RocketState is the single source of truth for the entire simulation.
 Every module (propulsion, aero, structures, trajectory, visualization)
