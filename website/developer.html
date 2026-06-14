@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Developer's Talk — K2 AeroSim</title>
-<meta name="description" content="Developer's Talk — thoughts, design notes and update log for K2 AeroSim, by Kashyap Binu.">
+<meta name="description" content="Developer's Talk — thoughts, design notes, roadmap and update log for K2 AeroSim, by Kashyap Binu.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -37,7 +37,7 @@
   <div class="section-head">
     <span class="kicker">FROM THE DEVELOPER</span>
     <h2>Developer's Talk</h2>
-    <p>Design notes, the thinking behind K2 AeroSim, and what's changing release to release.</p>
+    <p>The thinking behind K2 AeroSim, what's coming next, and how to report what's broken.</p>
   </div>
 </section>
 
@@ -45,23 +45,66 @@
 <section class="section devtalk-section" id="thoughts">
   <h3 class="devtalk-h">Thoughts</h3>
   <div class="dev-prose">
-    <!-- CONTENT: replace this block with your thoughts about the software. -->
-    <p>Placeholder — your thoughts on the software go here.</p>
+    <p>Hi! I'm Kashyap, a final-year undergraduate engineering student and, more importantly, an aerospace enthusiast.</p>
+
+    <p>K2 AeroSim started from a simple idea: to build a unified rocket simulation platform where multiple engineering disciplines work together through a connected multiphysics pipeline. Instead of isolated modules, K2 aims to provide an integrated environment where propulsion, aerodynamics, CFD, structures, optimization, and other analyses seamlessly exchange data, making the overall design and analysis process more streamlined and efficient.</p>
+
+    <p>Several modules within K2 are built upon well-established methodologies and open-source tools such as OpenRocket, SU2, and CalculiX. However, integrating these different systems into a unified workflow has been far from straightforward. At times, completely unexpected issues appeared during integration, and on more than one occasion the software managed to "break physics" in ways I didn't think were possible.</p>
+
+    <p>Some modules, including optimization, Monte Carlo analysis, and portions of the structural and CFD systems, also rely on customized analytical models and validated engineering equations. These too required significant debugging and refinement during the integration process.</p>
+
+    <p>To the best of my knowledge, every feature currently included in K2 has been researched extensively and validated multiple times, both from an architectural and a physics perspective. That said, no software is perfect, especially one of this scale developed by a single student. There may still be bugs, inconsistencies, or unexpected edge cases that I have not encountered.</p>
+
+    <p>If you come across anything suspicious, incorrect, or broken, please report it. Every report helps improve K2.</p>
+
+    <p>You may also notice that certain parts of the software are slower than expected. This is intentional in some places. A number of modules currently execute sequentially because they depend heavily on the outputs of previous stages, and maintaining a stable, divergence-free simulation pipeline has taken priority over raw performance. Expanding parallel execution and improving overall speed is one of the highest priorities for future releases.</p>
+
+    <p>K2 is open source for exactly this reason. I don't expect it to be perfect, and I believe collaborative development is the best way to make it better over time.</p>
+
+    <p>One final note: K2 AeroSim is not affiliated with any company or organization. There is no deeper meaning behind the name — I simply thought "K2" sounded cool and decided to stick with it.</p>
+  </div>
+</section>
+
+<!-- ───────────────────────── ROADMAP ───────────────────────── -->
+<section class="section devtalk-section" id="roadmap">
+  <h3 class="devtalk-h">Features Currently Under Development</h3>
+  <div class="dev-prose">
+    <ul class="dev-list">
+      <li><strong>Liquid Propellant Simulation</strong> — support for liquid and hybrid rocket propulsion systems with injector and feed-system modeling.</li>
+      <li><strong>Multi-Stage Rocket Simulation</strong> — full stage separation, ignition sequencing, and stage-wise trajectory analysis.</li>
+      <li><strong>AI-Powered Optimization Engine</strong> — automatic optimization of geometry, propulsion, stability, and performance parameters.</li>
+      <li><strong>Enhanced Parallel Computing</strong> — progressive parallelization of additional modules through dependency-aware architectural refactoring for improved performance.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ───────────────────────── BUG REPORTS ───────────────────────── -->
+<section class="section devtalk-section" id="report">
+  <h3 class="devtalk-h">Report a Bug</h3>
+  <div class="dev-prose">
+    <p>Found something suspicious, incorrect, or broken? Please report it — pick whichever is easier:</p>
+  </div>
+  <div class="report-methods">
+    <a class="report-card" href="https://forms.gle/xNi7yA6wCCaEzrxu8" target="_blank" rel="noopener">
+      <div class="report-icon">📝</div>
+      <h4>Quick form</h4>
+      <p>A short Google Form — no account needed. Best for a fast report.</p>
+      <span class="report-go">Open the form →</span>
+    </a>
+    <a class="report-card" href="https://github.com/kashyapbinu/K2-Software/issues/new" target="_blank" rel="noopener">
+      <div class="report-icon">🐙</div>
+      <h4>GitHub Issue</h4>
+      <p>Open an issue on the repository. Best for detailed reports, logs, and tracking.</p>
+      <span class="report-go">Open an issue →</span>
+    </a>
   </div>
 </section>
 
 <!-- ───────────────────────── UPDATES ───────────────────────── -->
 <section class="section devtalk-section" id="updates">
   <h3 class="devtalk-h">Updates</h3>
-  <div class="dev-updates">
-    <!-- CONTENT: add one <article class="dev-entry"> per update, newest first. -->
-    <article class="dev-entry">
-      <div class="dev-date">YYYY-MM-DD</div>
-      <div class="dev-body">
-        <h4>Update title</h4>
-        <p>Placeholder — describe the update here.</p>
-      </div>
-    </article>
+  <div class="dev-prose">
+    <p class="dev-empty">No updates yet — this space will be updated as new releases land.</p>
   </div>
 </section>
 
