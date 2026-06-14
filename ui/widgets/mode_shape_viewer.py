@@ -287,7 +287,12 @@ class ModeShapeViewer(QWidget):
         self._grid["Displacement (mm)"] = mags_normalized * max_raw * 1000.0
 
         if max_raw > 0:
-            self.plotter.update_scalar_bar_range([0, max_raw * 1000.0])
+            # The plotter may have been cleared (e.g. New Project) between timer
+            # ticks, leaving no active mapper — skip rather than crash in a loop.
+            try:
+                self.plotter.update_scalar_bar_range([0, max_raw * 1000.0])
+            except Exception:
+                pass
 
     def clear(self):
         """Reset the viewer to empty state."""

@@ -31,17 +31,28 @@ def clear_visuals(ws):
                 except Exception:
                     w.draw()
                 continue
-            # StressViewer-style 3D viewer with an empty state.
-            if hasattr(w, "show_empty") and callable(w.show_empty):
-                w.show_empty()
-                continue
-            # Other pyvista viewers (Deformation, ModeShape): clear the scene.
+            # 3D viewers (Stress / Deformation / ModeShape): prefer the viewer's
+            # OWN reset/clear/show_empty — these also reset internal state (e.g.
+            # stop the mode-shape animation), so a running timer won't touch a
+            # half-cleared plotter and crash. Only fall back to clearing the raw
+            # plotter scene when the viewer exposes nothing.
             plotter = getattr(w, "plotter", None)
-            if plotter is not None:
-                try:
-                    plotter.clear()
-                    plotter.render()
-                except Exception:
-                    pass
+            if plotter is not None or hasattr(w, "show_empty"):
+                for m in ("reset", "show_empty", "clear"):
+                    fn = getattr(w, m, None)
+                    if callable(fn):
+                        try:
+                            fn()
+                        except Exception:
+                            pass
+                        break
+                else:
+                    if plotter is not None:
+                        try:
+                            plotter.clear()
+                            plotter.render()
+                        except Exception:
+                            pass
+                continue
         except Exception as e:
             logger.debug("clear_visuals skipped %r: %s", type(w).__name__, e)
