@@ -295,6 +295,17 @@ class StressViewer(QWidget):
         self.comp_combo.currentTextChanged.connect(self._on_component)
         bl.addWidget(self.comp_combo)
         bl.addStretch()
+        _basis = QLabel("⚠ Analytical estimate — smooth field, not nodal FEA")
+        _basis.setStyleSheet("color:#d29922;font-size:10px;font-weight:600;")
+        _basis.setToolTip(
+            "This contour is a smooth analytical reconstruction from the closed-form "
+            "stress solution (axial / bending / hoop / shear distributed by beam-shape "
+            "functions), not a mesh-based FEA field. It does NOT resolve geometric stress "
+            "concentrations at fin roots, couplers, motor-mount or bulkhead interfaces — "
+            "those are accounted for as scalar stress-concentration factors (Kt) in the "
+            "reported safety factor, not shown spatially here.")
+        bl.addWidget(_basis)
+        bl.addSpacing(10)
         self.btn_reset = QPushButton(icon("reset_view"), "Reset View")
         self.btn_reset.setStyleSheet(_CTRL_BTN)
         self.btn_reset.clicked.connect(self.reset_view)
