@@ -468,6 +468,13 @@ class MissionVisualizerWorkspace(QWidget):
                 color:#e6edf3; background:#0d1117;
                 border-top:2px solid #58a6ff;
             }
+            QTabBar::scroller { width:30px; }
+            QTabBar QToolButton {
+                background:#21262d; border:1px solid #30363d; border-radius:4px;
+                margin:2px 1px; width:22px; color:#c9d1d9;
+            }
+            QTabBar QToolButton:hover { background:#1f6feb; border-color:#1f6feb; }
+            QTabBar QToolButton:disabled { background:#161b22; border-color:#21262d; }
         """)
         tabs.addTab(self._build_telemetry_tab(), "Telemetry")
         tabs.addTab(self._build_events_tab(),    "Flight Events")

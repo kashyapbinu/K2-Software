@@ -1059,6 +1059,11 @@ class CFDWorkspace(QWidget):
             "QTabBar::tab{background:#161b22;color:#8b949e;padding:6px 16px;"
             "font-size:12px;font-weight:600;border:1px solid #21262d;border-bottom:none;}"
             "QTabBar::tab:selected{background:#0d1117;color:#58a6ff;}"
+            "QTabBar::scroller{width:30px;}"
+            "QTabBar QToolButton{background:#21262d;border:1px solid #30363d;"
+            "border-radius:4px;margin:2px 1px;width:22px;color:#c9d1d9;}"
+            "QTabBar QToolButton:hover{background:#1f6feb;border-color:#1f6feb;}"
+            "QTabBar QToolButton:disabled{background:#161b22;border-color:#21262d;}"
         )
         self._center_tabs.addTab(self._build_field_view(), "3D Field")
         self._center_tabs.addTab(self._build_polar_view(), "Polars")

@@ -349,6 +349,11 @@ class MonteCarloWorkspace(QWidget):
             "QTabBar::tab { background:#161b22; color:#8b949e; padding:6px 14px; "
             "  border:1px solid #21262d; border-bottom:none; border-radius:4px 4px 0 0; }"
             "QTabBar::tab:selected { background:#0d1117; color:#58a6ff; font-weight:700; }"
+            "QTabBar::scroller { width:30px; }"
+            "QTabBar QToolButton { background:#21262d; border:1px solid #30363d; "
+            "  border-radius:4px; margin:2px 1px; width:22px; color:#c9d1d9; }"
+            "QTabBar QToolButton:hover { background:#1f6feb; border-color:#1f6feb; }"
+            "QTabBar QToolButton:disabled { background:#161b22; border-color:#21262d; }"
         )
 
         # Tab 1: Apogee Distribution
