@@ -564,9 +564,10 @@ class StructuresWorkspace(QWidget):
         # ── Structural Safety Assessment ──
         gsc = QGroupBox("Structural Safety Assessment"); gsc.setStyleSheet(_GRP)
         vsc = QVBoxLayout(); vsc.setSpacing(4)
-        self.lbl_score = QLabel("Run analysis")
+        self.lbl_score = QLabel("RUN ANALYSIS")
         self.lbl_score.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_score.setStyleSheet("color:#8b949e;font-size:22px;font-weight:800;")
+        self.lbl_score.setStyleSheet("font-weight:800;font-size:16px;padding:10px;"
+                                     "border-radius:6px;background:#161b22;color:#484f58;")
         vsc.addWidget(self.lbl_score)
         _struct_note = QLabel(
             "Note: This assessment is an estimated qualitative evaluation based on "
@@ -1417,7 +1418,9 @@ class StructuresWorkspace(QWidget):
         else:
             verdict = "❌ Poor"
         self.lbl_score.setText(verdict)
-        self.lbl_score.setStyleSheet(f"color:{sc.color};font-size:22px;font-weight:800;")
+        self.lbl_score.setStyleSheet(
+            f"font-weight:800;font-size:16px;padding:10px;border-radius:6px;"
+            f"background:#161b22;color:{sc.color};border:1px solid {sc.color}66;")
 
         self._populate_fin(rep.fin)
         self._populate_recovery(rep.recovery)
