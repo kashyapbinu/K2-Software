@@ -810,3 +810,38 @@ a { color: inherit; }
   .section { padding-top: 80px; }
   .dl-card { padding: 50px 22px; }
 }
+
+/* ── Developer's Talk page ──────────────────────────────────── */
+.nav-links a.active { color: var(--text); }
+.devtalk-head { padding-top: 130px; padding-bottom: 10px; }
+.devtalk-section { max-width: 820px; margin: 0 auto; padding-top: 24px; }
+.devtalk-h {
+  font-family: var(--font-display, 'Space Grotesk', sans-serif);
+  font-size: 1.5rem; font-weight: 700; color: var(--text);
+  margin: 0 0 18px; padding-bottom: 10px;
+  border-bottom: 1px solid var(--border, #21262d);
+}
+.dev-prose { color: var(--muted); font-size: 1.02rem; line-height: 1.75; }
+.dev-prose p { margin: 0 0 16px; }
+.dev-prose h4 { color: var(--text); font-size: 1.1rem; margin: 26px 0 10px; }
+.dev-prose a { color: #58a6ff; }
+
+.dev-updates { display: flex; flex-direction: column; gap: 18px; }
+.dev-entry {
+  display: flex; gap: 20px;
+  background: rgba(22, 27, 34, 0.55);
+  border: 1px solid var(--border, #21262d);
+  border-radius: 10px; padding: 18px 20px;
+}
+.dev-date {
+  flex: 0 0 110px; font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  font-size: 0.8rem; letter-spacing: 0.04em; color: #58a6ff; padding-top: 3px;
+}
+.dev-body { flex: 1; min-width: 0; }
+.dev-body h4 { color: var(--text); font-size: 1.05rem; font-weight: 600; margin: 0 0 6px; }
+.dev-body p { color: var(--muted); font-size: 0.96rem; line-height: 1.65; margin: 0 0 8px; }
+.dev-body p:last-child { margin-bottom: 0; }
+@media (max-width: 620px) {
+  .dev-entry { flex-direction: column; gap: 6px; }
+  .dev-date { flex-basis: auto; }
+}
