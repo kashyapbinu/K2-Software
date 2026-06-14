@@ -26,6 +26,10 @@ from cfd.solvers.base import CFDSolver, CFDConfig, CFDResult, isa_conditions
 
 logger = logging.getLogger("K2.CFD.SU2")
 
+# Suppress the console window when launching the (console) solver from the
+# windowed frozen app — otherwise a terminal flashes on every Run.
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0   # CREATE_NO_WINDOW
+
 # ── Locate the bundled SU2 binary ────────────────────────────────────────────
 _ROOT = Path(__file__).resolve().parents[2]   # K2 Software root
 _BIN_DIR = _ROOT / "bin"
@@ -541,6 +545,7 @@ class SU2Solver(CFDSolver):
             errors="replace",
             bufsize=1,
             env=env,
+            creationflags=_NO_WINDOW,
         )
         self._proc = proc
 

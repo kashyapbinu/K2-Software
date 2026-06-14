@@ -187,6 +187,7 @@ class SolverThread(QThread):
             text=True,
             encoding="utf-8",
             errors="replace",
+            creationflags=(0x08000000 if sys.platform == "win32" else 0),
         )
         proc = self._mesh_proc
 
@@ -539,6 +540,7 @@ class SweepThread(QThread):
             cmd,
             cwd=k2_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace",
+            creationflags=(0x08000000 if sys.platform == "win32" else 0),
         )
         proc = self._mesh_proc
         mesh_ok = False

@@ -13,8 +13,12 @@ Physics:
 Mirrors the SU2 solver architecture (cfd/solvers/su2_solver.py).
 """
 from __future__ import annotations
-import csv, logging, math, os, re, shutil, subprocess, time
+import csv, logging, math, os, re, shutil, subprocess, sys, time
 from pathlib import Path
+
+# Suppress the console window when launching ccx (a console app) from the
+# windowed frozen build — otherwise a terminal flashes on every Run.
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0   # CREATE_NO_WINDOW
 from typing import Optional
 from structures.solvers.base import (
     FEMSolver, FEMConfig, FEMResult, ModalResult,
@@ -352,6 +356,7 @@ class CalculiXSolver(FEMSolver):
             cmd, cwd=str(self.config.work_dir),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
+            creationflags=_NO_WINDOW,
         )
 
         step_pattern = re.compile(r"step\s+(\d+)", re.IGNORECASE)
