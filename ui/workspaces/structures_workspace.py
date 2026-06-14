@@ -1317,24 +1317,26 @@ class StructuresWorkspace(QWidget):
         return hist if (hist and len(hist) > 0) else None
 
     def reset_workspace(self):
-        """Blank all structural results (called on New Project)."""
+        """Blank all structural results + plots (called on New Project)."""
         self._fem_result = None
         self._modal_result = None
         self._thermal_result = None
         self._wks_report = None
         self._last_bc = None
         self._has_run = False
+        from ui.workspace_reset import clear_visuals
+        clear_visuals(self)        # clears stress/temp/fin plots + 3D viewers
         try:
             self.lbl_score.setText("RUN ANALYSIS")
             self.lbl_score.setStyleSheet("font-weight:800;font-size:16px;padding:10px;"
                                          "border-radius:6px;background:#161b22;color:#484f58;")
         except Exception:
             pass
-        for v in ("_stress3d", "_defo_view"):
-            w = getattr(self, v, None)
-            if w is not None and hasattr(w, "show_empty"):
+        for lbl in ("_defl_summary",):
+            w = getattr(self, lbl, None)
+            if w is not None:
                 try:
-                    w.show_empty()
+                    w.setText("—")
                 except Exception:
                     pass
         try:

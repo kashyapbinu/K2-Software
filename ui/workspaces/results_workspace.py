@@ -149,6 +149,8 @@ class ResultsWorkspace(QWidget):
 
     def reset_workspace(self):
         """Clear results to the empty state (called on New Project)."""
+        from ui.workspace_reset import clear_visuals
+        clear_visuals(self)
         self.refresh_plots()   # history is already cleared → shows the empty state
 
     def refresh_plots(self):

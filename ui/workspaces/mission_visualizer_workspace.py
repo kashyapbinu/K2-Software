@@ -1840,9 +1840,11 @@ class MissionVisualizerWorkspace(QWidget):
             pass
 
     def reset_workspace(self):
-        """Reset the visualizer (called on New Project)."""
+        """Reset the visualizer + plots (called on New Project)."""
         self._last_text = None
         self._last_col = None
+        from ui.workspace_reset import clear_visuals
+        clear_visuals(self)
         for m in ("_clear_flight", "_reset_flight", "clear_scene"):
             fn = getattr(self, m, None)
             if callable(fn):

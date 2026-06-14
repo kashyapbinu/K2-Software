@@ -2576,19 +2576,14 @@ class OptimizationWorkspace(QWidget):
     # ═════════════════════════════════════════════════════════════════════════
 
     def reset_workspace(self):
-        """Blank optimization results (called on New Project)."""
+        """Blank optimization results + plots (called on New Project)."""
         self._result = None
         self._selected_design = None
         self._active_objectives = []
-        for ax_name in ("_ax_conv", "_ax_multi", "_ax_pareto", "_ax_dse",
-                        "_ax_trade"):
-            ax = getattr(self, ax_name, None)
-            if ax is not None:
-                try:
-                    ax.clear()
-                    ax.figure.canvas.draw_idle()
-                except Exception:
-                    pass
+        from ui.workspace_reset import clear_visuals
+        clear_visuals(self)
+        # The DOE / sensitivity tabs hold a row of axes on one shared figure;
+        # clear_visuals handles the single-axis canvases, this clears those rows.
         for ax_pair in ("_ax_doe", "_ax_sens"):
             axs = getattr(self, ax_pair, None)
             if axs is not None:

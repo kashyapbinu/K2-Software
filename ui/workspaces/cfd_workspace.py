@@ -3713,8 +3713,10 @@ class CFDWorkspace(QWidget):
             self._refresh_vis()
 
     def reset_workspace(self):
-        """Blank CFD results (called on New Project)."""
+        """Blank CFD results + plots/3D view (called on New Project)."""
         self._result = None
+        from ui.workspace_reset import clear_visuals
+        clear_visuals(self)
         try:
             if hasattr(self, "_log_box"):
                 self._log_box.clear()

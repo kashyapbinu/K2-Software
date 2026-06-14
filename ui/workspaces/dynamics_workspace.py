@@ -950,11 +950,13 @@ class DynamicsWorkspace(QWidget):
         self._update_warnings(vmax, mmax)
 
     def reset_workspace(self):
-        """Blank all dynamics results (called on New Project)."""
+        """Blank all dynamics results + plots (called on New Project)."""
         self._flutter_result = None
         self._vib_result = None
         self._aero_result = None
         self._modal_result = None
+        from ui.workspace_reset import clear_visuals
+        clear_visuals(self)
         try:
             self.lbl_overall.setText("RUN ASSESSMENT")
             self.lbl_overall.setStyleSheet("font-weight:800;font-size:16px;padding:10px;"
