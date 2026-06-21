@@ -21,10 +21,14 @@ class CpPlotWidget(QWidget):
         self.figure = Figure(figsize=(5, 3), dpi=100)
         self.figure.patch.set_facecolor("#0d1117")
         self.canvas = FigureCanvas(self.figure)
+        # Let wheel events bubble to an enclosing QScrollArea instead of being
+        # swallowed by the canvas — keeps scroll panels smooth over the plot.
+        self.canvas.wheelEvent = lambda e: e.ignore()
         self.ax = self.figure.add_subplot(111)
         self._annotation = None
         self._x_data = None
         self._y_data = None
+        self._hover_idx = None
         self._style_axis()
 
         layout = QVBoxLayout(self)
@@ -63,6 +67,8 @@ class CpPlotWidget(QWidget):
         """
         self.ax.clear()
         self._style_axis()
+        self._annotation = None
+        self._hover_idx = None
 
         if len(x_norm) == 0:
             self.canvas.draw()
@@ -105,13 +111,23 @@ class CpPlotWidget(QWidget):
     def _on_hover(self, event):
         """Show local Cp value on hover."""
         if event.inaxes != self.ax or self._x_data is None:
-            if self._annotation is not None:
+            # Only redraw when actually hiding a visible annotation; scrolling
+            # spams motion events outside the axes — skip the full redraw.
+            if self._annotation is not None and self._annotation.get_visible():
                 self._annotation.set_visible(False)
+                self._hover_idx = None
                 self.canvas.draw_idle()
             return
 
         x = event.xdata
-        idx = np.argmin(np.abs(self._x_data - x))
+        idx = int(np.argmin(np.abs(self._x_data - x)))
+
+        # Same point still under cursor and already shown → nothing to redraw.
+        if idx == self._hover_idx and self._annotation is not None \
+                and self._annotation.get_visible():
+            return
+        self._hover_idx = idx
+
         cp_val = self._y_data[idx]
         x_val = self._x_data[idx]
 

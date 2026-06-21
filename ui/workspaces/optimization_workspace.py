@@ -1069,6 +1069,19 @@ class OptimizationWorkspace(QWidget):
         gb.setLayout(fb)
         lay.addWidget(gb)
 
+        # Apply the currently-displayed design (best / Pareto pick / DSE pick)
+        # back to the rocket state so the rest of the app uses it.
+        self.btn_apply_design = QPushButton(
+            app_icon("import", color="#fff"), "Apply to Design")
+        self.btn_apply_design.setStyleSheet(_BTN_SUCCESS)
+        self.btn_apply_design.setMinimumHeight(34)
+        self.btn_apply_design.setEnabled(False)
+        self.btn_apply_design.setToolTip(
+            "Write this design's variables into the rocket state so the "
+            "Simulation and other workspaces use the optimized values.")
+        self.btn_apply_design.clicked.connect(self._on_apply_design)
+        lay.addWidget(self.btn_apply_design)
+
         # ── Performance ──
         gp = QGroupBox("Performance")
         gp.setStyleSheet(_GRP)
@@ -1464,6 +1477,58 @@ class OptimizationWorkspace(QWidget):
 
         logger.info(f"Optimization complete: {n} evals, {t:.1f}s, "
                      f"best fitness={result.best_design.fitness:.3f}")
+
+    def _on_apply_design(self):
+        """Write the currently-displayed design's variables into the rocket
+        state so the Design/Simulation/other workspaces use the optimized
+        values. Mirrors build_candidate_config's variable→attribute mapping;
+        only keys the optimizer actually varied are present, so absent keys
+        are left untouched (never zeroed)."""
+        design = getattr(self, "_displayed_design", None)
+        v = getattr(design, "variables", None) if design is not None else None
+        if not v:
+            QMessageBox.information(self, "No Design",
+                "Run an optimization (or pick a Pareto/DSE design) first.")
+            return
+
+        updates = {}
+        for key in ("diameter", "length", "nose_length", "fin_root_chord",
+                    "fin_tip_chord", "fin_count", "fin_sweep_angle", "dry_mass",
+                    "wall_thickness", "propellant_mass", "drogue_cd_area",
+                    "main_cd_area"):
+            if v.get(key) is not None:
+                updates[key] = v[key]
+        # fin_span drives both fin_span and fin_height (AeroModel uses both).
+        if v.get("fin_span") is not None:
+            updates["fin_span"] = v["fin_span"]
+            updates["fin_height"] = v["fin_span"]
+
+        # Motor: pull the catalog props so thrust/impulse/mass follow the pick.
+        motor = v.get("motor_designation")
+        if motor and motor != "N/A":
+            updates["motor_designation"] = motor
+            try:
+                from core.optimization_engine import _MOTOR_PROPS
+                if motor in _MOTOR_PROPS:
+                    imp, bt, pm, at, mt, isp = _MOTOR_PROPS[motor]
+                    updates.update(
+                        motor_total_impulse=imp, motor_burn_time=bt,
+                        propellant_mass=pm, propellant_mass_initial=pm,
+                        motor_avg_thrust=at, motor_max_thrust=mt, motor_isp=isp,
+                        custom_thrust_curve=[])
+            except Exception:
+                logger.debug("Motor props lookup failed for %s", motor)
+
+        if not updates:
+            QMessageBox.information(self, "Nothing to Apply",
+                "This design has no applicable variables.")
+            return
+
+        self.engine.update(**updates)
+        logger.info("Applied optimized design to state: %s", sorted(updates))
+        QMessageBox.information(self, "Design Applied",
+            "Optimized design written to the rocket state.\n\nThe Simulation "
+            "and other workspaces now use these values.")
 
     def _on_failed(self, error_msg: str):
         self.btn_run.setEnabled(True)
@@ -2306,6 +2371,12 @@ class OptimizationWorkspace(QWidget):
         v = design.variables
         o = design.objectives
         mc = design.mc_stats or {}
+
+        # Remember the design currently shown so "Apply to Design" writes it
+        # back to the rocket state, and enable that button now there's a pick.
+        self._displayed_design = design
+        if hasattr(self, "btn_apply_design"):
+            self.btn_apply_design.setEnabled(True)
 
         # Parameters
         self.lbl_best_diameter.setText(f"{v.get('diameter', 0):.4f} m")

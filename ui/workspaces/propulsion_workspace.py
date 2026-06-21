@@ -6,10 +6,16 @@ import json, logging
 from pathlib import Path
 from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QGroupBox,
     QFormLayout, QLabel, QComboBox, QSplitter, QFrame, QScrollArea, QCheckBox,
-    QPushButton)
+    QPushButton, QDoubleSpinBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from ui.widgets.plot_widget import PlotWidget
 from physics.propulsion import compute_isp, compute_mass_flow_rate, estimate_chamber_pressure, generate_thrust_curve
+from core.staging import build_stages_config
+
+# Motor parameter keys stored per-stage (mirror of the scalar state fields).
+_MOTOR_KEYS = ("motor_designation", "motor_avg_thrust", "motor_max_thrust",
+               "motor_total_impulse", "motor_burn_time", "propellant_mass",
+               "motor_dry_mass", "motor_length", "custom_thrust_curve")
 
 logger = logging.getLogger("K2.PropulsionWS")
 
@@ -48,9 +54,17 @@ class PropulsionWorkspace(QWidget):
         self._motors = self._load_motors()
         self._curve_fetcher = None
         self._wanted_motor_id = ""
+        self._loading_stage = False     # guard re-entrant combo/spinbox signals
+        self._multistage = False        # True when editing a multi-stage rocket
         self._setup_ui()
         self.engine.state_changed.connect(self._on_state_changed)
         self._update_display()
+        self._refresh_stage_combo()
+
+    def showEvent(self, e):
+        # Stages may have been added/removed in the Design tab since last shown.
+        super().showEvent(e)
+        self._refresh_stage_combo()
 
     def _load_motors(self):
         p = Path(__file__).parent.parent.parent / "data" / "motors.json"
@@ -119,6 +133,33 @@ class PropulsionWorkspace(QWidget):
         ll.setContentsMargins(12, 12, 12, 12)
         ll.setSpacing(12)
 
+        # --- Staging (per-stage motor assignment) ---
+        # Shown only for multistage rockets. The stage combo picks which stage
+        # the motor selection below applies to; delays drive the separation +
+        # next-stage ignition timeline.
+        self.stage_group = QGroupBox("Staging")
+        sgl = QFormLayout(); sgl.setSpacing(6)
+        self.stage_combo = QComboBox()
+        self.stage_combo.currentIndexChanged.connect(self._on_stage_changed)
+        sgl.addRow("Edit stage:", self.stage_combo)
+
+        self.sep_delay_spin = QDoubleSpinBox()
+        self.sep_delay_spin.setRange(0, 60); self.sep_delay_spin.setDecimals(2)
+        self.sep_delay_spin.setSuffix(" s")
+        self.sep_delay_spin.setToolTip("Coast time after this stage's burnout before it separates")
+        self.sep_delay_spin.valueChanged.connect(self._on_sep_delay_changed)
+        sgl.addRow("Separation delay:", self.sep_delay_spin)
+
+        self.ign_delay_spin = QDoubleSpinBox()
+        self.ign_delay_spin.setRange(0, 60); self.ign_delay_spin.setDecimals(2)
+        self.ign_delay_spin.setSuffix(" s")
+        self.ign_delay_spin.setToolTip("Delay after separation before this stage's motor lights")
+        self.ign_delay_spin.valueChanged.connect(self._on_ign_delay_changed)
+        sgl.addRow("Ignition delay:", self.ign_delay_spin)
+
+        self.stage_group.setLayout(sgl)
+        ll.addWidget(self.stage_group)
+
         g = QGroupBox("Motor Selection")
         fl = QFormLayout()
 
@@ -161,6 +202,11 @@ class PropulsionWorkspace(QWidget):
         self.btn_custom_motor.clicked.connect(self._open_custom_motor_dialog)
         fl.addRow("", self.btn_custom_motor)
 
+        self.btn_liquid_engine = QPushButton("Design Liquid Engine")
+        self.btn_liquid_engine.setStyleSheet("background-color: #6e40c9; color: white; padding: 5px; margin-top: 2px;")
+        self.btn_liquid_engine.clicked.connect(self._open_liquid_engine_dialog)
+        fl.addRow("", self.btn_liquid_engine)
+
         g.setLayout(fl)
         ll.addWidget(g)
 
@@ -197,6 +243,108 @@ class PropulsionWorkspace(QWidget):
         splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter)
 
+    # ── Staging helpers ──────────────────────────────────────────────
+    def _assembly(self):
+        return getattr(self.engine, "_assembly", None)
+
+    def _ignition_order_stages(self):
+        """Stages bottom→top (ignition order). [] when single-stage."""
+        asm = self._assembly()
+        if asm is None or len(getattr(asm, "stages", [])) < 2:
+            return []
+        return list(reversed(asm.stages))
+
+    def _current_stage(self):
+        return self.stage_combo.currentData() if self._multistage else None
+
+    def _refresh_stage_combo(self):
+        stages = self._ignition_order_stages()
+        multistage = bool(stages)
+        self._multistage = multistage
+        self.stage_group.setVisible(multistage)
+        if not multistage:
+            # Dropped back to a single stage — clear any stale multistage config
+            # so the sim uses the scalar single-motor path.
+            if getattr(self.engine.state, "stages_config", None):
+                self.engine.update(stages_config=[], emit=False)
+            return
+        prev = self.stage_combo.currentData()
+        self._loading_stage = True
+        self.stage_combo.clear()
+        sel = 0
+        for i, st in enumerate(stages):
+            self.stage_combo.addItem(f"{i + 1}. {st.name}", st)
+            if st is prev:
+                sel = i
+        self.stage_combo.setCurrentIndex(sel)
+        self._loading_stage = False
+        self._on_stage_changed()
+        # Re-extract geometry (the design may have changed since last shown).
+        self._rebuild_stages_config()
+
+    @staticmethod
+    def _none_motor():
+        return dict(motor_designation="None", motor_avg_thrust=0, motor_max_thrust=0,
+                    motor_total_impulse=0, motor_burn_time=0, propellant_mass=0,
+                    propellant_mass_initial=0, motor_dry_mass=0, motor_length=0,
+                    custom_thrust_curve=[])
+
+    def _on_stage_changed(self, *_):
+        """Load the selected stage's motor + delays into the editor."""
+        st = self._current_stage()
+        if st is None:
+            return
+        self._loading_stage = True
+        self.sep_delay_spin.setValue(getattr(st, "separation_delay", 0.0) or 0.0)
+        self.ign_delay_spin.setValue(getattr(st, "ignition_delay", 0.0) or 0.0)
+        # Reflect this stage's motor in the scalar state so the motor combo,
+        # property panel, and thrust plot all show the selected stage.
+        params = self._none_motor()
+        if getattr(st, "motor", None):
+            params.update(st.motor)
+            params["propellant_mass_initial"] = params.get("propellant_mass", 0)
+        self._loading_stage = False
+        self.engine.update(**params)   # triggers _on_state_changed → combo + display
+
+    def _on_sep_delay_changed(self, v):
+        if self._loading_stage:
+            return
+        st = self._current_stage()
+        if st is not None:
+            st.separation_delay = float(v)
+            self._rebuild_stages_config()
+
+    def _on_ign_delay_changed(self, v):
+        if self._loading_stage:
+            return
+        st = self._current_stage()
+        if st is not None:
+            st.ignition_delay = float(v)
+            self._rebuild_stages_config()
+
+    def _rebuild_stages_config(self):
+        asm = self._assembly()
+        if asm is None:
+            return
+        self.engine.update(stages_config=build_stages_config(asm), emit=False)
+
+    def _apply_motor(self, params: dict):
+        """Apply a motor selection to scalar state and, in multistage mode, to
+        the currently-edited stage (then rebuild stages_config)."""
+        self.engine.update(**params)
+        st = self._current_stage()
+        if st is not None:
+            st.motor = {k: params.get(k) for k in _MOTOR_KEYS}
+            self._rebuild_stages_config()
+
+    def _open_liquid_engine_dialog(self):
+        # Liquid engines emit the same result schema as the solid builder, so
+        # they reuse _on_custom_motor_created (single-stage + multistage).
+        from ui.dialogs.liquid_engine_dialog import LiquidEngineDialog
+        dlg = LiquidEngineDialog(self)
+        dlg.motor_created.connect(self._on_custom_motor_created)
+        dlg.exec()
+
     def _open_custom_motor_dialog(self):
         from ui.dialogs.custom_motor_dialog import CustomMotorDialog
         dlg = CustomMotorDialog(self)
@@ -232,8 +380,8 @@ class PropulsionWorkspace(QWidget):
         self.motor_combo.setCurrentIndex(0)
         self.motor_combo.blockSignals(False)
 
-        # Update engine
-        self.engine.update(
+        # Update engine (+ per-stage in multistage mode)
+        self._apply_motor(dict(
             motor_designation=sim_data.get("motor_name", "Custom Motor"),
             motor_avg_thrust=avg_thrust,
             motor_max_thrust=max_thrust,
@@ -243,8 +391,8 @@ class PropulsionWorkspace(QWidget):
             propellant_mass_initial=prop_mass,
             motor_dry_mass=case_mass,
             motor_length=motor_length,
-            custom_thrust_curve=list(zip(t.tolist(), f.tolist()))
-        )
+            custom_thrust_curve=list(zip(t.tolist(), f.tolist())),
+        ))
         self._update_display()
 
     def _on_motor_selected(self, idx):
@@ -253,20 +401,18 @@ class PropulsionWorkspace(QWidget):
         # the OLD custom motor under the newly selected motor's name.
         if idx == 0:
             self._wanted_motor_id = ""
-            self.engine.update(motor_designation="None", motor_avg_thrust=0, motor_max_thrust=0,
-                motor_total_impulse=0, motor_burn_time=0, propellant_mass=0, propellant_mass_initial=0,
-                motor_dry_mass=0, motor_length=0, custom_thrust_curve=[])
+            self._apply_motor(self._none_motor())
         else:
             m = self._filtered[idx - 1]
             prop, dry = self._sanitized_masses(m)
-            self.engine.update(
+            self._apply_motor(dict(
                 motor_designation=m["designation"], motor_avg_thrust=m["avg_thrust"],
                 motor_max_thrust=m.get("max_thrust", m["avg_thrust"] * 1.4),
                 motor_total_impulse=m["total_impulse"], motor_burn_time=m["burn_time"],
                 propellant_mass=prop, propellant_mass_initial=prop,
                 motor_dry_mass=dry,
                 motor_length=m.get("length", 0.0),
-                custom_thrust_curve=[])
+                custom_thrust_curve=[]))
             self._load_real_curve(m.get("motor_id", ""), m["total_impulse"])
         self._update_display()
 
@@ -287,7 +433,7 @@ class PropulsionWorkspace(QWidget):
         except Exception:
             cached = None
         if cached:
-            self.engine.update(custom_thrust_curve=[list(p) for p in cached])
+            self._apply_curve([list(p) for p in cached])
             return
         self._curve_fetcher = _CurveFetcher(motor_id, expected_impulse, self)
         self._curve_fetcher.done.connect(self._on_curve_fetched)
@@ -297,8 +443,16 @@ class PropulsionWorkspace(QWidget):
         # Ignore stale results if the user switched motors meanwhile
         if not curve or motor_id != self._wanted_motor_id:
             return
-        self.engine.update(custom_thrust_curve=curve)
+        self._apply_curve(curve)
         self._update_display()
+
+    def _apply_curve(self, curve):
+        """Apply a measured thrust curve to scalar state + the current stage."""
+        self.engine.update(custom_thrust_curve=curve)
+        st = self._current_stage()
+        if st is not None and getattr(st, "motor", None):
+            st.motor["custom_thrust_curve"] = curve
+            self._rebuild_stages_config()
 
     @staticmethod
     def _sanitized_masses(m) -> tuple:

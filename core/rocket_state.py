@@ -104,6 +104,7 @@ class RocketState:
     # ── Dynamics / Flutter ────────────────────────────────────────
     flutter_speed: float = 0.0
     flutter_margin: float = 0.0
+    flutter_exceeded: bool = False        # set True if flight V ever exceeded flutter speed
     divergence_speed: float = 0.0
     modal_freq_1: float = 0.0
     modal_freq_2: float = 0.0
@@ -157,6 +158,21 @@ class RocketState:
     main_deploy_altitude: float = 300.0   # meters AGL
     drogue_cd_area: float = 0.5           # Cd × A for drogue (m²)
     main_cd_area: float = 3.0             # Cd × A for main chute (m²)
+    recovery_inflation_time: float = 0.6  # canopy fill time (s); main scaled 2×
+
+    # ── Multistage (empty → single-stage flight from the scalar fields) ───
+    # Ordered ignition-order list of per-stage dicts (see core.staging.StageConfig).
+    # Index 0 = first motor lit (bottom booster); last = sustainer with the nose.
+    stages_config: list = field(default_factory=list)
+
+    # ── Recovery Results (filled at landing) ──────────────────────
+    recovery_shock_force: float = 0.0     # peak opening-shock drag force (N)
+    drogue_descent_rate: float = 0.0      # |vz| at end of drogue phase (m/s)
+    main_descent_rate: float = 0.0        # touchdown descent rate (m/s)
+    landing_x: float = 0.0                # downrange landing position (m)
+    landing_y: float = 0.0                # crossrange landing position (m)
+    landing_drift: float = 0.0            # horizontal drift radius from pad (m)
+    descent_time: float = 0.0             # apogee → landing duration (s)
 
     # ── Atmosphere Snapshot (updated each tick) ───────────────────
     ground_temperature: float = 288.15    # launch-site temp (K) → ISA+ΔT offset

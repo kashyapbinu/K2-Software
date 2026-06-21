@@ -15,7 +15,7 @@ import matplotlib
 matplotlib.use("QtAgg")
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from matplotlib.patches import Ellipse
+from matplotlib.patches import Ellipse, Circle
 from scipy import stats
 
 from PyQt6.QtWidgets import (
@@ -264,6 +264,19 @@ class MonteCarloWorkspace(QWidget):
         self.spin_max_mach.setDecimals(1)
         self.spin_max_mach.setValue(2.0)
         f6.addRow("Max Mach:", self.spin_max_mach)
+        # Recovery range-safety: landings outside this radius from the pad are a
+        # hazard. 0 disables the circle. Re-draws the dispersion plot live.
+        self.spin_safety_radius = QDoubleSpinBox()
+        self.spin_safety_radius.setRange(0, 50000)
+        self.spin_safety_radius.setSuffix(" m")
+        self.spin_safety_radius.setDecimals(0)
+        self.spin_safety_radius.setSingleStep(100)
+        self.spin_safety_radius.setValue(1000)
+        self.spin_safety_radius.setToolTip(
+            "Range-safety radius from the pad. Landings outside are flagged. "
+            "0 = off.")
+        self.spin_safety_radius.valueChanged.connect(self._on_safety_radius_changed)
+        f6.addRow("Safety Radius:", self.spin_safety_radius)
         g6.setLayout(f6)
         lay.addWidget(g6)
 
@@ -502,6 +515,7 @@ class MonteCarloWorkspace(QWidget):
         self.lbl_r_mach     = _vl(); fr.addRow("P(Mach<Limit):",    self.lbl_r_mach)
         self.lbl_r_accel    = _vl(); fr.addRow("P(Accel<100G):",    self.lbl_r_accel)
         self.lbl_r_stab     = _vl(); fr.addRow("P(Stability>Min):", self.lbl_r_stab)
+        self.lbl_r_unstable = _vl(); fr.addRow("Unstable Runs:",    self.lbl_r_unstable)
         self.lbl_r_rail     = _vl(); fr.addRow("P(RailV>Min):",     self.lbl_r_rail)
         self.lbl_r_beta     = _vl(); fr.addRow("Reliability (beta):", self.lbl_r_beta)
         self.lbl_r_ci       = _vl(); fr.addRow("Mission 95% CI:",   self.lbl_r_ci)
@@ -620,10 +634,13 @@ class MonteCarloWorkspace(QWidget):
         n_valid = getattr(results, 'n_valid', n)
         n_outliers = getattr(results, 'n_outliers', 0)
         n_phys_bad = getattr(results, 'n_physics_invalid', 0)
+        n_unstable = getattr(results, 'n_unstable', 0)
 
         parts = [f"Complete — {n} simulations"]
         if n_phys_bad > 0:
             parts.append(f"{n_phys_bad} physics-invalid")
+        if n_unstable > 0:
+            parts.append(f"⚠ {n_unstable} unstable ({n_unstable / n * 100:.0f}%)")
         if n_outliers > 0:
             parts.append(f"{n_outliers} outliers")
         parts.append(f"{n_valid} used for stats")
@@ -633,7 +650,8 @@ class MonteCarloWorkspace(QWidget):
         self._update_statistics(results)
 
         logger.info(f"Monte Carlo finished: {n} runs "
-                    f"({n_phys_bad} physics-invalid, {n_outliers} outliers), "
+                    f"({n_phys_bad} physics-invalid, {n_unstable} unstable, "
+                    f"{n_outliers} outliers), "
                     f"apogee={results.apogee_mean:.1f}±{results.apogee_std:.1f}m")
 
     def _on_cancelled(self):
@@ -698,6 +716,12 @@ class MonteCarloWorkspace(QWidget):
         ax.axvline(r.apogee_ci_high, color="#f0883e", linestyle="--",
                    linewidth=1, alpha=0.7)
 
+        # Unstable runs as a red rug along the bottom (apogee of each tumbling run).
+        u_ap = getattr(r, "unstable_apogee_values", None)
+        if u_ap:
+            ax.scatter(u_ap, [0] * len(u_ap), marker="|", c="#f85149", s=120,
+                       linewidths=1.3, zorder=6, label=f"Unstable ({len(u_ap)})")
+
         ax.legend(facecolor="#161b22", edgecolor="#30363d",
                   labelcolor="#c9d1d9", fontsize=8, loc="upper right")
 
@@ -733,6 +757,46 @@ class MonteCarloWorkspace(QWidget):
             )
             ax.add_patch(ellipse)
 
+        # ── Containment radii from the pad (range-safety metric) ──
+        # R95/R99 = radius from the launch point enclosing 95%/99% of landings.
+        if len(xs):
+            d_pad = np.sqrt(xs ** 2 + ys ** 2)
+            r95 = float(np.percentile(d_pad, 95))
+            r99 = float(np.percentile(d_pad, 99))
+            for radius, col, lbl in [(r95, "#d29922", f"R95 = {r95:.0f} m"),
+                                     (r99, "#f0883e", f"R99 = {r99:.0f} m")]:
+                ax.add_patch(Circle((0, 0), radius, fill=False, edgecolor=col,
+                                    linewidth=1.3, linestyle=":", label=lbl, zorder=4))
+
+            # ── Pad safety radius: pass/fail on containment ──
+            safe_r = float(self.spin_safety_radius.value())
+            if safe_r > 0:
+                n_out = int(np.sum(d_pad > safe_r))
+                pct_in = 100.0 * (len(d_pad) - n_out) / len(d_pad)
+                ok = n_out == 0
+                col = "#3fb950" if ok else "#f85149"
+                ax.add_patch(Circle((0, 0), safe_r, fill=False, edgecolor=col,
+                                    linewidth=2.0, linestyle="-",
+                                    label=f"Safety {safe_r:.0f} m "
+                                          f"({pct_in:.1f}% in)", zorder=4))
+                # highlight violating landings
+                if n_out:
+                    out_mask = d_pad > safe_r
+                    ax.scatter(xs[out_mask], ys[out_mask], c="#f85149", s=14,
+                               marker="x", zorder=6, label=f"Outside ({n_out})")
+                verdict = "PASS" if ok else "FAIL"
+                ax.set_title(f"Landing Dispersion — Safety {verdict} "
+                             f"({pct_in:.1f}% within {safe_r:.0f} m)",
+                             color=col, fontsize=10)
+
+        # ── Unstable runs (static margin below required caliber) in red ──
+        uxs = getattr(r, "unstable_landing_x", None)
+        uys = getattr(r, "unstable_landing_y", None)
+        if uxs and uys:
+            ax.scatter(uxs, uys, c="#f85149", s=26, marker="D",
+                       edgecolors="#ffffff", linewidths=0.5, zorder=7,
+                       label=f"Unstable ({len(uxs)})")
+
         # Launch point crosshair
         ax.axhline(0, color="#484f58", linewidth=0.5, alpha=0.5)
         ax.axvline(0, color="#484f58", linewidth=0.5, alpha=0.5)
@@ -745,6 +809,11 @@ class MonteCarloWorkspace(QWidget):
 
         self._ax_landing.figure.tight_layout()
         self._canvas_landing.draw()
+
+    def _on_safety_radius_changed(self, _v):
+        """Re-draw the dispersion plot when the safety radius changes."""
+        if self._results is not None:
+            self._plot_landing_dispersion(self._results)
 
     # ── Tab 3: Landing Distance ──────────────────────────────────────────────
 
@@ -878,6 +947,17 @@ class MonteCarloWorkspace(QWidget):
         self._set_rate_label(self.lbl_r_mach, r.p_mach_below_limit * 100, " %")
         self._set_rate_label(self.lbl_r_accel, r.p_accel_below_limit * 100, " %")
         self._set_rate_label(self.lbl_r_stab, r.p_stability_above_limit * 100, " %")
+
+        # Unstable run count (flew but static margin below the required caliber).
+        n_runs = len(r.runs)
+        n_uns = getattr(r, "n_unstable", 0)
+        pct = (n_uns / n_runs * 100.0) if n_runs else 0.0
+        self.lbl_r_unstable.setText(f"{n_uns} / {n_runs}  ({pct:.1f}%)")
+        uns_color = "#7ee787" if n_uns == 0 else ("#d29922" if pct < 5 else "#f85149")
+        self.lbl_r_unstable.setStyleSheet(
+            f"color:{uns_color};font-family:'Cascadia Code',monospace;font-size:13px;"
+            f"font-weight:600;padding:2px 6px;background:#161b22;border-radius:4px;"
+        )
         self._set_rate_label(self.lbl_r_rail, r.p_rail_exit_above_min * 100, " %")
 
         beta = r.reliability_index_beta
@@ -1116,6 +1196,15 @@ class MonteCarloWorkspace(QWidget):
             ("Success rate", f"{r.success_percentage:.1f} %"),
             ("P(target altitude)", f"{r.prob_target_altitude * 100:.1f} %"),
             ("P(mission success)", f"{r.mission_success_probability * 100:.1f} %"),
+        ]
+        # Stability / instability reporting
+        n_uns = getattr(r, "n_unstable", 0)
+        n_phys = getattr(r, "n_physics_invalid", 0)
+        uns_pct = (n_uns / n * 100.0) if n else 0.0
+        kv += [
+            ("Unstable runs", f"{n_uns} / {n}  ({uns_pct:.1f} %)"),
+            ("P(stability > min)", f"{r.p_stability_above_limit * 100:.1f} %"),
+            ("Physics-invalid runs", f"{n_phys}"),
         ]
         figs = [getattr(self, a).figure for a in
                 ("_ax_apogee", "_ax_landing", "_ax_dist", "_ax_tornado")

@@ -26,8 +26,9 @@ from structures.solvers.base import (
 )
 logger = logging.getLogger("K2.FEM.CCX")
 
+from core.paths import bin_dir
 _ROOT = Path(__file__).resolve().parents[2]
-_BIN_DIR = _ROOT / "bin"
+_BIN_DIR = bin_dir()   # platform-aware: bin/mac-<arch> on macOS, bin/ on Windows
 
 def _find_ccx() -> Optional[Path]:
     """Find ccx: bundled bin/ first, then PATH."""

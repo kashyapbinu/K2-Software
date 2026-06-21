@@ -6,7 +6,7 @@ import logging
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
     QFormLayout, QLabel, QPushButton, QDoubleSpinBox, QComboBox,
     QFrame, QGridLayout, QProgressBar, QScrollArea, QStackedWidget,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView)
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QMessageBox)
 from PyQt6.QtCore import Qt
 from core.flight_phases import FlightPhase, PHASE_COLORS
 from ui.icons import icon
@@ -57,6 +57,7 @@ class SimulationWorkspace(QWidget):
         self.engine.state_changed.connect(self._on_state_changed)
         self.sim_engine.sim_started.connect(self._on_sim_started)
         self.sim_engine.sim_finished.connect(self._on_sim_finished)
+        self.sim_engine.sim_failed.connect(self._on_sim_failed)
 
     def _setup_ui(self):
         scroll = QScrollArea()
@@ -277,6 +278,16 @@ class SimulationWorkspace(QWidget):
         self.main_cda_spin.valueChanged.connect(
             lambda v: self.engine.update(main_cd_area=v))
         rf.addRow("Main Cd×A:", self.main_cda_spin)
+
+        self.inflation_spin = QDoubleSpinBox()
+        self.inflation_spin.setRange(0.05, 5.0); self.inflation_spin.setValue(0.6)
+        self.inflation_spin.setSuffix(" s"); self.inflation_spin.setDecimals(2)
+        self.inflation_spin.setToolTip(
+            "Canopy fill time. Main canopy is scaled 2×. Drives the opening-"
+            "shock transient — shorter fill = sharper snatch load.")
+        self.inflation_spin.valueChanged.connect(
+            lambda v: self.engine.update(recovery_inflation_time=v))
+        rf.addRow("Inflation Time:", self.inflation_spin)
 
         rec_group.setLayout(rf)
         left_col.addWidget(rec_group)
@@ -525,6 +536,22 @@ class SimulationWorkspace(QWidget):
         self.angle_spin.setEnabled(True)
         self.integrator_combo.setEnabled(True)
         self.progress.setValue(100)
+
+    def _on_sim_failed(self, title, detail):
+        """Flight diverged / unstable / bad config — restore controls and show
+        the diagnosed problem so the user knows what to fix."""
+        self._on_sim_finished()              # restore Run/Pause/Stop buttons
+        # Light the ABORTED phase if it has a lamp; otherwise just flag prelaunch.
+        for light in self.phase_lights.values():
+            light.set_active(False)
+        if FlightPhase.ABORTED in self.phase_lights:
+            self.phase_lights[FlightPhase.ABORTED].set_active(True)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Critical)
+        box.setWindowTitle("Simulation Aborted")
+        box.setText(f"<b>{title}</b>")
+        box.setInformativeText(detail)
+        box.exec()
 
     def reset_workspace(self):
         """Blank the live readouts + phase lights (called on New Project)."""

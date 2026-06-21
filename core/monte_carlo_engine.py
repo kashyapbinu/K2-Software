@@ -136,6 +136,10 @@ class MonteCarloResults:
     n_valid: int = 0
     n_outliers: int = 0
     n_physics_invalid: int = 0
+    n_unstable: int = 0          # flew but static margin < required caliber (would tumble)
+    unstable_landing_x: list = field(default_factory=list)   # landing East (m) of unstable runs
+    unstable_landing_y: list = field(default_factory=list)   # landing North (m) of unstable runs
+    unstable_apogee_values: list = field(default_factory=list)  # apogee (m) of unstable runs
 
     # Sensitivity analysis
     sensitivity_correlations: dict = field(default_factory=dict)
@@ -802,6 +806,18 @@ class MonteCarloEngine(QObject):
             sum(1 for r in pv_runs if r.rail_exit_velocity >= mc.min_rail_exit_velocity)
         ) / npv if npv > 0 else 0.0
 
+        # Unstable runs: flew (apogee > 1 m) but the minimum static margin dropped
+        # below the required caliber, i.e. they would weathercock / tumble.
+        # Counted across ALL runs (distinct from the numerically-diverged runs
+        # already tallied in n_physics_invalid).
+        unstable_runs = [r for r in runs
+                         if r.min_stability_margin < mc.min_stability_cal
+                         and r.apogee > 1.0]
+        n_unstable = len(unstable_runs)
+        unstable_landing_x = [getattr(r, "landing_x", 0.0) for r in unstable_runs]
+        unstable_landing_y = [getattr(r, "landing_y", 0.0) for r in unstable_runs]
+        unstable_apogee_values = [r.apogee for r in unstable_runs]
+
         # Reliability index beta = (mean - limit) / sigma
         if apogee_std > 1e-6 and target > 0:
             beta_idx = (apogee_mean - target) / apogee_std
@@ -878,6 +894,10 @@ class MonteCarloEngine(QObject):
             n_valid=n_valid,
             n_outliers=n_outliers,
             n_physics_invalid=n_physics_invalid,
+            n_unstable=n_unstable,
+            unstable_landing_x=unstable_landing_x,
+            unstable_landing_y=unstable_landing_y,
+            unstable_apogee_values=unstable_apogee_values,
             sensitivity_correlations=sensitivity,
 
             # Extended distribution metrics
@@ -901,8 +921,8 @@ class MonteCarloEngine(QObject):
 
         logger.info(
             f"Monte Carlo complete — {n} runs "
-            f"({n_physics_invalid} physics-invalid, {n_outliers} outliers, "
-            f"{n_valid} clean) | "
+            f"({n_physics_invalid} physics-invalid, {n_unstable} unstable, "
+            f"{n_outliers} outliers, {n_valid} clean) | "
             f"Apogee: {apogee_mean:.1f} ± {apogee_std:.1f} m | "
             f"Success: {success_pct:.1f}% | "
             f"P(target): {prob_target:.1%} | "

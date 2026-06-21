@@ -531,6 +531,10 @@ class DynamicsWorkspace(QWidget):
     # Renders
     # ===============================================================
     def _render_flutter(self, r):
+        # Push the computed flutter speed into shared state so the flight sim
+        # can flag in-flight flutter exceedance (margin < 1).
+        if r.flutter_speed_mps < 1e6:
+            self.engine.update(flutter_speed=r.flutter_speed_mps, emit=False)
         self.lbl_fspd.setText(f"{r.flutter_speed_mps:.0f} m/s" if r.flutter_speed_mps < 1e6 else "∞")
         self.lbl_fmach.setText(f"{r.flutter_mach:.2f}" if r.flutter_mach < 100 else "∞")
         vmax = self.sp_vmax.value()

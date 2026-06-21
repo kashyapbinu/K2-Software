@@ -742,6 +742,8 @@ class Stage(RocketComponent):
         self.color = "#58a6ff"
         self.separation_delay = 0.0
         self.separation_event = "burnout"
+        self.ignition_delay = 0.0          # delay after separation before this stage lights
+        self.motor = None                  # per-stage motor params dict (see propulsion WS)
 
     def component_length(self):
         # Total length of a stage is the sum of its structural components
@@ -760,7 +762,9 @@ class Stage(RocketComponent):
 
     def _props_dict(self):
         return {"separation_delay": self.separation_delay,
-                "separation_event": self.separation_event}
+                "separation_event": self.separation_event,
+                "ignition_delay": self.ignition_delay,
+                "motor": self.motor}
 
 
 # Component type registry for deserialization
@@ -1028,6 +1032,11 @@ class RocketAssembly:
         for sd in data.get("stages", []):
             stage = Stage(sd.get("name", "Stage"))
             stage.id = sd.get("id", stage.id)
+            # Restore the stage's own properties (separation/ignition delays,
+            # per-stage motor) — previously dropped on load.
+            for k, v in sd.get("properties", {}).items():
+                if hasattr(stage, k) and not callable(getattr(stage, k, None)):
+                    setattr(stage, k, v)
             _load_children(stage, sd.get("children", []))
             asm.stages.append(stage)
         if not asm.stages:

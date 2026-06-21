@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
 from PyQt6.QtCore import Qt
 from ui.icons import icon
 from ui.widgets.plot_widget import PlotWidget
+from core.flight_log import parse_flight_log_file, compare_apogee
 
 logger = logging.getLogger("K2.ResultsWS")
 
@@ -30,6 +31,7 @@ class ResultsWorkspace(QWidget):
         self.engine = engine
         self.sim_engine = sim_engine
         self._history = None
+        self._flight_log = None      # imported real flight log for sim-vs-real overlay
         self._setup_ui()
         self.engine.state_changed.connect(self._check_data)
 
@@ -52,6 +54,19 @@ class ResultsWorkspace(QWidget):
         self.btn_export = QPushButton(icon("export"), "Export CSV")
         self.btn_export.clicked.connect(self._export_csv)
         top.addWidget(self.btn_export)
+
+        # Import a real flight log (altimeter/GPS CSV) to overlay on the sim.
+        self.btn_import_log = QPushButton(icon("import"), "Import Flight Log")
+        self.btn_import_log.setToolTip(
+            "Overlay a real altimeter/GPS CSV (time + altitude, optional "
+            "velocity/accel) on the simulated trajectory for validation.")
+        self.btn_import_log.clicked.connect(self._import_flight_log)
+        top.addWidget(self.btn_import_log)
+
+        self.btn_clear_log = QPushButton("Clear Log")
+        self.btn_clear_log.clicked.connect(self._clear_flight_log)
+        self.btn_clear_log.setVisible(False)
+        top.addWidget(self.btn_clear_log)
         layout.addLayout(top)
 
         # Summary
@@ -131,6 +146,10 @@ class ResultsWorkspace(QWidget):
         self.dyn_press_plot = PlotWidget(title="Dynamic Pressure vs Time", xlabel="Time (s)", ylabel="q (Pa)")
         self.tabs.addTab(self.dyn_press_plot, "Dyn. Pressure")
 
+        # Top-down landing footprint: pad, main vehicle, spent boosters.
+        self.landing_plot = PlotWidget(title="Landing Footprint", xlabel="Downrange X (m)", ylabel="Crossrange Y (m)")
+        self.tabs.addTab(self.landing_plot, "Landing")
+
         layout.addWidget(self.tabs, 1)
 
     def _check_data(self, state):
@@ -169,14 +188,14 @@ class ResultsWorkspace(QWidget):
         self.scrub_slider.setValue(len(t_vals) - 1)
 
         # Plot all
-        self.alt_plot.update_plot(t_vals, history.get_values("altitude"),
-            "Altitude vs Time", "Time (s)", "Altitude (m)", "#58a6ff")
+        self._plot_with_overlay(self.alt_plot, t_vals, history.get_values("altitude"),
+            "altitude", "Altitude vs Time", "Time (s)", "Altitude (m)", "#58a6ff")
 
-        self.vel_plot.update_plot(t_vals, history.get_values("velocity"),
-            "Velocity vs Time", "Time (s)", "Velocity (m/s)", "#7ee787")
+        self._plot_with_overlay(self.vel_plot, t_vals, history.get_values("velocity"),
+            "velocity", "Velocity vs Time", "Time (s)", "Velocity (m/s)", "#7ee787")
 
-        self.accel_plot.update_plot(t_vals, history.get_values("acceleration"),
-            "Acceleration vs Time", "Time (s)", "Accel (m/s²)", "#f0883e")
+        self._plot_with_overlay(self.accel_plot, t_vals, history.get_values("acceleration"),
+            "acceleration", "Acceleration vs Time", "Time (s)", "Accel (m/s²)", "#f0883e")
 
         self.thrust_plot.multi_plot([
             (t_vals, history.get_values("thrust"), "#f0883e", "Thrust"),
@@ -195,6 +214,8 @@ class ResultsWorkspace(QWidget):
         self.dyn_press_plot.update_plot(t_vals, history.get_values("dynamic_pressure"),
             "Dynamic Pressure vs Time", "Time (s)", "q (Pa)", "#79c0ff")
 
+        self._plot_landing()
+
         # Summary
         s = self.engine.state
         self.summary_label.setText(
@@ -204,6 +225,107 @@ class ResultsWorkspace(QWidget):
         )
         self.summary_label.setStyleSheet("color: #7ee787; font-size: 13px; padding: 8px; "
             "background-color: #161b22; border: 1px solid #21262d; border-radius: 6px; font-weight: 600;")
+
+        # Append sim-vs-measured comparison when a flight log is loaded.
+        if self._flight_log:
+            cmp = compare_apogee(s.max_altitude, self._flight_log)
+            self.summary_label.setText(
+                self.summary_label.text() +
+                f"\n📈 Log '{self._flight_log['source']}' — "
+                f"Measured apogee: {cmp['measured_apogee']:.1f} m  |  "
+                f"Sim error: {cmp['error_m']:+.1f} m ({cmp['error_pct']:+.1f}%)")
+
+    def _plot_with_overlay(self, plot, t, y, meas_key, title, xlabel, ylabel, color):
+        """Plot the sim series, overlaying the imported measured channel if present."""
+        log = self._flight_log
+        if log and log.get(meas_key):
+            plot.multi_plot([
+                (t, y, color, "Simulated"),
+                (log["time"], log[meas_key], "#f778ba", "Measured"),
+            ], title, xlabel, ylabel)
+        else:
+            plot.update_plot(t, y, title, xlabel, ylabel, color)
+
+    def _plot_landing(self):
+        """Top-down landing footprint: pad at origin, main vehicle touchdown,
+        and every spent-stage ballistic impact (range safety)."""
+        import math as _m
+        from matplotlib.patches import Circle
+
+        plot = self.landing_plot
+        ax = plot.ax
+        ax.clear()
+        plot._style_axis("Landing Footprint", "Downrange X (m)", "Crossrange Y (m)")
+
+        s = self.engine.state
+
+        # Collected impact points: (x, y, label, color, impact_velocity).
+        points = [(0.0, 0.0, "Pad", "#8b949e", None)]
+
+        main_x = getattr(s, "landing_x", 0.0)
+        main_y = getattr(s, "landing_y", 0.0)
+        main_v = getattr(s, "main_descent_rate", 0.0) or getattr(s, "touchdown_rate", 0.0)
+        if getattr(s, "landing_drift", 0.0) or main_x or main_y:
+            points.append((main_x, main_y, "Main vehicle", "#7ee787", main_v))
+
+        # Spent stages (multistage only). Names come from the snapshots; the
+        # ballistic results carry the landing position + impact speed.
+        results = getattr(self.sim_engine, "spent_stage_results", None) or []
+        snaps = getattr(self.sim_engine, "spent_stages", None) or []
+        palette = ["#f0883e", "#f85149", "#d29922", "#bc8cff"]
+        for i, r in enumerate(results):
+            name = snaps[i].get("name") if i < len(snaps) else None
+            name = name or f"Stage {r.get('stage', i)}"
+            points.append((r.get("landing_x", 0.0), r.get("landing_y", 0.0),
+                           name, palette[i % len(palette)],
+                           r.get("impact_velocity", 0.0)))
+
+        # Range rings sized to the farthest impact.
+        max_r = max((_m.hypot(x, y) for x, y, *_ in points), default=0.0)
+        if max_r > 0:
+            step = max(10.0, round(max_r / 3.0 / 10.0) * 10.0)
+            ring = step
+            while ring <= max_r * 1.15 + step:
+                ax.add_patch(Circle((0, 0), ring, fill=False, ls="--",
+                                    ec="#30363d", lw=0.8, alpha=0.7))
+                ax.text(ring * 0.7071, ring * 0.7071, f"{ring:.0f} m",
+                        color="#484f58", fontsize=7, ha="center", va="center")
+                ring += step
+
+        for x, y, label, color, vimp in points:
+            ax.scatter([x], [y], c=color, s=90, edgecolors="#0d1117",
+                       linewidths=1.2, zorder=5, label=label)
+            tag = label if vimp is None else f"{label}\n{vimp:.0f} m/s"
+            ax.annotate(tag, (x, y), textcoords="offset points", xytext=(8, 6),
+                        color="#c9d1d9", fontsize=8, zorder=6)
+
+        ax.set_aspect("equal", adjustable="datalim")
+        ax.legend(facecolor="#161b22", edgecolor="#30363d",
+                  labelcolor="#c9d1d9", fontsize=8, loc="best")
+        plot.figure.tight_layout()
+        plot.canvas.draw()
+
+    def _import_flight_log(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Flight Log", str(Path.home() / "Documents"),
+            "Flight Log (*.csv *.txt);;All Files (*)")
+        if not path:
+            return
+        try:
+            self._flight_log = parse_flight_log_file(path)
+        except Exception as exc:
+            self.engine.log_message.emit(f"Flight log import failed: {exc}")
+            return
+        self.btn_clear_log.setVisible(True)
+        self.engine.log_message.emit(
+            f"Imported flight log '{self._flight_log['source']}' "
+            f"({self._flight_log['n_points']} pts, apogee {self._flight_log['apogee']:.0f} m)")
+        self.refresh_plots()
+
+    def _clear_flight_log(self):
+        self._flight_log = None
+        self.btn_clear_log.setVisible(False)
+        self.refresh_plots()
 
     def _on_scrub(self, index):
         """Update cursor readouts when scrubber moves."""

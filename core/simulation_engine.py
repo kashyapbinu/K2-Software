@@ -38,6 +38,8 @@ from physics.aerodynamics import (AeroModel, compute_drag_coefficient,
 from environment.wind_model import WindModel, MultiLevelWindModel
 from vehicle.builder import build_vehicle
 from vehicle.motor import Motor
+from recovery.parachute_dynamics import RecoverySystem
+from core.staging import StageManager, StageConfig
 
 logger = logging.getLogger("K2.SimEngine")
 
@@ -52,6 +54,7 @@ class SimulationEngine(QObject):
     sim_paused = pyqtSignal()
     sim_resumed = pyqtSignal()
     sim_finished = pyqtSignal()
+    sim_failed = pyqtSignal(str, str)   # (title, detail) — flight diverged/unstable or bad config
     sim_tick = pyqtSignal(float)  # current sim time
 
     def __init__(self, state_engine):
@@ -87,13 +90,27 @@ class SimulationEngine(QObject):
         self._drogue_deployed = False
         self._main_deployed = False
 
+        # ── Staging ──
+        self.stage_mgr = None           # StageManager (per-stage motors + separation)
+        self.spent_stages = []          # separation-state snapshots of dropped stages
+        self.spent_stage_results = []   # ballistic landing results for dropped stages
+        self._flutter_warned = False    # one-shot in-flight flutter warning
+
+        # ── Recovery ──
+        self.recovery = None            # RecoverySystem (inflation-aware drag)
+        self._recovery_shock_peak = 0.0  # max opening-shock drag force (N)
+        self._last_descent_vz = 0.0      # |vz| of most recent descent tick
+        self._drogue_descent_rate = 0.0  # captured at main deploy
+
     # ── Public API ────────────────────────────────────────────────
 
     def start(self):
         """Start or restart the simulation."""
         s = self.engine.state
 
-        if s.motor_designation == "None":
+        # Multistage flights carry their motors in stages_config; only require a
+        # scalar motor when no stage config is present (single-stage path).
+        if s.motor_designation == "None" and not getattr(s, 'stages_config', None):
             logger.warning("No motor selected — cannot simulate")
             self.engine.log_message.emit("No motor selected. Please select a motor in the Design tab.")
             return
@@ -145,8 +162,23 @@ class SimulationEngine(QObject):
             )
             self.vehicle.stages[-1].set_motor(sim_motor)
 
-        # Build AeroModel from current state geometry
-        self.aero_model = AeroModel.from_state(s)
+        # Build the staging manager. With no stages_config this wraps the
+        # single scalar motor as one stage (numerically identical to the legacy
+        # single-body path); with a config it drives true multistage flight.
+        stages_cfg = getattr(s, 'stages_config', None)
+        if stages_cfg:
+            self.stage_mgr = StageManager(
+                [StageConfig.from_dict(d) for d in stages_cfg])
+            logger.info(f"Multistage: {self.stage_mgr.num_stages} stages")
+        else:
+            self.stage_mgr = StageManager.from_state(s)
+
+        # Build AeroModel. Multistage rebuilds it from the active stack geometry
+        # (and again at each separation); single-stage uses the full state.
+        if self.stage_mgr.is_multistage:
+            self.aero_model = AeroModel.from_state(self.stage_mgr.aero_config())
+        else:
+            self.aero_model = AeroModel.from_state(s)
         logger.info(
             f"AeroModel: CN_alpha={self.aero_model.cn_alpha_total:.2f}, "
             f"CP={self.aero_model.cp_subsonic():.3f}m, "
@@ -183,8 +215,42 @@ class SimulationEngine(QObject):
         self._main_deployed = False
         self._state_vec = None
 
+        # Build inflation-aware recovery model from the configured Cd×A values.
+        # Replaces the old instant-full-drag CdA constants: a real canopy fills
+        # over ~0.5–1 s, so the drag (and the structural opening shock) ramps in.
+        self.recovery = RecoverySystem.from_cd_areas(
+            drogue_cd_area=getattr(s, 'drogue_cd_area', 0.5),
+            main_cd_area=getattr(s, 'main_cd_area', 3.0),
+            main_deploy_altitude=getattr(s, 'main_deploy_altitude', 300.0),
+            drogue_delay=getattr(s, 'drogue_deploy_delay', 1.0),
+            inflation_time=getattr(s, 'recovery_inflation_time', 0.6),
+        )
+        self._recovery_shock_peak = 0.0
+        self._last_descent_vz = 0.0
+        self._drogue_descent_rate = 0.0
+        self.spent_stages = []
+        self.spent_stage_results = []
+        self._flutter_warned = False
+        self.engine.update(flutter_exceeded=False, emit=False)
+
+        # ── Flight-sanity monitor accumulators ──
+        self._unstable_time = 0.0       # sustained negative-static-margin time (s)
+        self._tumble_time = 0.0         # sustained high-body-rate time (s)
+        self._aborted = False           # one-shot guard so abort fires once
+
         self._initial_prop_mass = s.propellant_mass_initial
         self._build_thrust_curve()
+
+        # Pre-flight config check — catch unflyable setups before the timer runs
+        # (negative liftoff thrust-to-weight, etc.) so the user gets a clear
+        # reason instead of a rocket that sits on the pad or tumbles instantly.
+        ok, title, detail = self._validate_config(s)
+        if not ok:
+            logger.warning(f"Config rejected: {title} — {detail}")
+            self.engine.update(sim_running=False, emit=False)
+            self.engine.log_message.emit(f"❌ {title}: {detail}")
+            self.sim_failed.emit(title, detail)
+            return
 
         # Fire SIM_START event
         self.event_mgr.fire(SimEvent.SIM_START, {
@@ -246,6 +312,123 @@ class SimulationEngine(QObject):
     @property
     def is_running(self):
         return self._running
+
+    # ── Flight sanity / abort ─────────────────────────────────────────
+    # Thresholds for declaring a flight broken. Sustained-time gates avoid
+    # false aborts from a single transient gust tick.
+    _TUMBLE_RATE = 15.0          # body pitch/yaw rate (rad/s) ⇒ tumbling (~860°/s)
+    _TUMBLE_HOLD = 0.20          # sustained s above _TUMBLE_RATE to abort
+    _UNSTABLE_HOLD = 0.30        # sustained s of negative static margin to abort
+    _MIN_AIRSPEED_STAB = 8.0     # below this, static margin/AoA is meaningless
+    _VEL_DIVERGE = 8000.0        # |v| (m/s) past which the integration has run away
+
+    def _validate_config(self, s) -> tuple:
+        """Pre-flight check for unflyable setups. Returns (ok, title, detail)."""
+        # Liftoff thrust-to-weight. Use the first burning stage's average thrust
+        # vs the full stacked liftoff weight — T/W ≤ 1 never leaves the pad.
+        from core.constants import G_EARTH
+        try:
+            mass0 = self.stage_mgr.total_mass()
+            thr0 = self.stage_mgr.stages[0].motor_avg_thrust
+        except Exception:
+            mass0 = s.total_mass()
+            thr0 = getattr(s, 'motor_avg_thrust', 0.0)
+        weight0 = mass0 * G_EARTH
+        if thr0 <= 0:
+            return (False, "No thrust",
+                    "The selected motor produces zero average thrust. "
+                    "Pick a real motor or check the custom-motor inputs.")
+        if weight0 > 0 and (thr0 / weight0) < 1.0:
+            return (False, "Thrust-to-weight below 1.0",
+                    f"Liftoff thrust {thr0:.0f} N cannot lift the "
+                    f"{mass0:.2f} kg rocket (weight {weight0:.0f} N, "
+                    f"T/W = {thr0 / weight0:.2f}). Use a more powerful motor "
+                    f"or reduce dry mass.")
+        return (True, "", "")
+
+    def _abort(self, t, title, detail):
+        """Halt the sim on a diverged/unstable flight with a clear diagnosis."""
+        if self._aborted:
+            return
+        self._aborted = True
+        self._timer.stop()
+        self._running = False
+        self._paused = False
+        self._phase = FlightPhase.ABORTED
+        self.engine.update(sim_running=False,
+                           sim_phase=FlightPhase.ABORTED.value, emit=False)
+        self.event_mgr.fire(SimEvent.SIM_ABORT, {
+            "time": t, "title": title, "detail": detail,
+        })
+        logger.error(f"Flight ABORTED at T+{t:.2f}s — {title}: {detail}")
+        self.engine.log_message.emit(f"❌ ABORTED at T+{t:.2f}s — {title}: {detail}")
+        self.sim_failed.emit(f"{title} (T+{t:.2f}s)", detail)
+        self.sim_finished.emit()
+
+    def _check_flight_sanity(self, t, new_vec, new_altitude, new_velocity,
+                             aero, mach) -> bool:
+        """Inspect the just-computed step for divergence / loss of control.
+
+        Returns True if the flight was aborted (caller must stop the step).
+        Only the ascent (powered + coast to apogee) is policed: under canopy the
+        body rates are legitimately odd and post-apogee airspeed is too low for
+        a meaningful static margin."""
+        # 1) Numerical divergence — non-finite state or runaway speed.
+        if not all(math.isfinite(x) for x in new_vec):
+            self._abort(t, "Numerical divergence",
+                        "The integrator produced a non-finite state (NaN/Inf). "
+                        "Try a smaller time step or the RK4 integrator.")
+            return True
+        if abs(new_velocity) > self._VEL_DIVERGE:
+            self._abort(t, "Velocity diverged",
+                        f"Speed reached {abs(new_velocity):.0f} m/s — the "
+                        "integration has run away (unstable step). Reduce the "
+                        "time step or check for a bad motor/mass configuration.")
+            return True
+
+        # Only police attitude during the ascent, above a usable airspeed.
+        ascent = self._phase in (FlightPhase.BOOST, FlightPhase.COAST)
+        if not ascent or self._drogue_deployed or self._main_deployed:
+            self._unstable_time = 0.0
+            self._tumble_time = 0.0
+            return False
+
+        dt = self._prev_dt
+        speed = abs(new_velocity)
+
+        # 2) Tumbling — sustained very high body pitch/yaw rate.
+        body_rate = max(abs(new_vec[9]), abs(new_vec[10]))   # pitch_rate, yaw_rate
+        if body_rate > self._TUMBLE_RATE and speed > self._MIN_AIRSPEED_STAB:
+            self._tumble_time += dt
+        else:
+            self._tumble_time = 0.0
+        if self._tumble_time >= self._TUMBLE_HOLD:
+            self._abort(t, "Rocket tumbling",
+                        f"Body rate {math.degrees(body_rate):.0f}°/s sustained — "
+                        "the rocket has lost attitude control and is tumbling. "
+                        "Usually a stability problem: move the CP aft (larger / "
+                        "further-aft fins) or the CG forward (nose ballast).")
+            return True
+
+        # 3) Static instability — CP ahead of CG (negative margin) during ascent.
+        margin = aero.get("stab_margin", None)
+        if margin is not None and math.isfinite(margin) \
+                and speed > self._MIN_AIRSPEED_STAB:
+            if margin < 0.0:
+                self._unstable_time += dt
+            else:
+                self._unstable_time = 0.0
+            if self._unstable_time >= self._UNSTABLE_HOLD:
+                cp = aero.get("cp", 0.0)
+                cg = self.engine.state.cg
+                self._abort(t, "Statically unstable",
+                            f"Static margin is negative ({margin:.2f} cal): the "
+                            f"centre of pressure (CP {cp:.3f} m) is ahead of the "
+                            f"centre of gravity (CG {cg:.3f} m), so any disturbance "
+                            "diverges and the rocket weathercocks out of control. "
+                            "Add fin area / move fins aft, or add nose mass.")
+                return True
+        return False
 
     @property
     def is_paused(self):
@@ -370,12 +553,18 @@ class SimulationEngine(QObject):
         else:
             beta_angle = 0.0
 
+        # Reference geometry. Multistage shrinks with each separation, so take
+        # the active-stack diameter/CG from the stage manager; single-stage
+        # uses the static design values (identical numbers).
+        ms = self.stage_mgr is not None and self.stage_mgr.is_multistage
+        ref_diameter = self.stage_mgr.active_diameter() if ms else s.diameter
+
         # Dynamic pressure
         q_dyn = 0.5 * rho * v_rel**2
-        ref_area = math.pi * (s.diameter / 2)**2
+        ref_area = math.pi * (ref_diameter / 2)**2
 
         # Aerodynamic model
-        cg = s.cg
+        cg = self.stage_mgr.active_cg() if ms else s.cg
         if self.aero_model is not None:
             aero = self.aero_model.compute(alpha, mach, q_dyn, pitch_rate, v_rel, cg)
             F_drag = aero["F_drag"]
@@ -406,12 +595,15 @@ class SimulationEngine(QObject):
             cp = s.cp
             stab_margin = (cp - cg) / max(s.diameter, 0.01)
 
-        # Recovery drag override
-        if self._drogue_deployed and not self._main_deployed and vz < 0:
-            F_drag = 0.5 * rho * v_rel**2 * getattr(s, 'drogue_cd_area', 0.4)
-            F_normal = M_pitch = M_yaw = 0.0
-        elif self._main_deployed and vz < 0:
-            F_drag = 0.5 * rho * v_rel**2 * getattr(s, 'main_cd_area', 1.5)
+        # Recovery drag override. Drag now comes from the inflation-aware
+        # RecoverySystem (cubic fill curve), so the canopy ramps from zero to
+        # full CdA over its inflation time instead of snapping on instantly.
+        # Body aero (normal force, moments) is zeroed: under canopy the airframe
+        # hangs and no longer weathercocks. Drag still opposes v_rel (which
+        # includes wind), so the descent drifts downwind.
+        if (self._drogue_deployed or self._main_deployed) and vz < 0 \
+                and self.recovery is not None:
+            F_drag = self.recovery.get_drag_force(rho, v_rel, t)
             F_normal = M_pitch = M_yaw = 0.0
 
         # Roll damping (simple model)
@@ -435,8 +627,10 @@ class SimulationEngine(QObject):
         M_pitch += gust_amp * gp
         M_yaw += gust_amp * gy
 
-        # Thrust
-        thrust = self._get_thrust(t)
+        # Thrust — from the active (burning) stage. The stage state machine is
+        # advanced once per accepted step in _step, so within this RK4 sub-eval
+        # the burning stage and ignition time are constant.
+        thrust = self.stage_mgr.thrust(t)
         tx = thrust * math.cos(pitch) * math.cos(yaw)
         ty = thrust * math.cos(pitch) * math.sin(yaw)
         tz = thrust * math.sin(pitch)
@@ -484,7 +678,13 @@ class SimulationEngine(QObject):
         if on_rail:
             pitch_accel = yaw_accel = roll_accel = 0.0
         else:
-            if self.vehicle is not None:
+            if ms:
+                # Multistage: the canonical vehicle isn't stage-synced, so take
+                # pitch inertia from the active stack (drops sharply at
+                # separation); roll from a solid-cylinder estimate.
+                inertia = self.stage_mgr.pitch_inertia()
+                ixx = self._estimate_roll_inertia(mass, s)
+            elif self.vehicle is not None:
                 ixx_v, iyy, _ = self.vehicle.inertia_tensor()
                 inertia = iyy if iyy > 0.1 else self._estimate_inertia(mass, s)
                 # Real roll inertia from the vehicle; fall back to a solid-
@@ -503,18 +703,18 @@ class SimulationEngine(QObject):
             yaw_accel = max(-MAX_ROT, min(MAX_ROT, yaw_accel))
             roll_accel = max(-MAX_ROT, min(MAX_ROT, roll_accel))
 
-        # Mass flow — Isp is defined against standard g0, not local gravity
-        isp = getattr(s, 'motor_isp', 0.0)
-        if isp <= 0:
-            total_impulse = getattr(s, 'motor_total_impulse', 0.0)
-            prop_mass = getattr(s, 'propellant_mass_initial', 0.0)
-            if total_impulse > 0 and prop_mass > 0:
-                isp = total_impulse / (prop_mass * G_EARTH)
-        if thrust > 0 and (mass - (s.dry_mass + s.motor_dry_mass)) > 1e-3:
+        # Mass flow — Isp is defined against standard g0, not local gravity.
+        # Isp and the burnout-mass floor come from the active (burning) stage,
+        # so propellant depletes against the correct stage and the floor tracks
+        # the active stack (single-stage values are identical to before).
+        isp = self.stage_mgr.active_isp()
+        burnout_floor = self.stage_mgr.active_burnout_mass()
+        if thrust > 0 and (mass - burnout_floor) > 1e-3:
             if isp > 10:
                 dm_dt = -thrust / (isp * G_EARTH)
-            elif s.motor_burn_time > 0:
-                dm_dt = -self._initial_prop_mass / s.motor_burn_time
+            elif self.stage_mgr.active_burn_time() > 0:
+                dm_dt = -self.stage_mgr.active_propellant_mass() \
+                    / self.stage_mgr.active_burn_time()
             else:
                 dm_dt = 0.0
         else:
@@ -585,7 +785,7 @@ class SimulationEngine(QObject):
                 0.0,               # pitch_rate
                 0.0,               # yaw_rate
                 0.0,               # roll_rate
-                s.total_mass(),    # mass
+                self.stage_mgr.total_mass(),   # mass (all stages stacked)
             ]
             self._prev_dt = dt
 
@@ -608,9 +808,20 @@ class SimulationEngine(QObject):
         q_dyn = aero.get("q_dyn", 0.0)
         if q_dyn > 0 and self.aero_model is not None:
             cna = getattr(self.aero_model, "cn_alpha_total", 2.0)
-            A_ref = math.pi * (s.diameter / 2.0) ** 2
-            margin = abs(aero.get("cp", s.cp) - s.cg)
-            I_est = max(self._state_vec[12] * s.length ** 2 / 12.0, 1e-6)
+            # Use the ACTIVE-stack geometry/inertia for multistage — the scalar
+            # state values describe the whole stacked rocket, which gives the
+            # wrong attitude natural frequency and lets the pitch mode go
+            # under-resolved (numerical tumble → divergence) after the model is
+            # rebuilt for a shorter, lighter stack.
+            ms_dt = self.stage_mgr is not None and self.stage_mgr.is_multistage
+            ref_d = self.stage_mgr.active_diameter() if ms_dt else s.diameter
+            cg_dt = self.stage_mgr.active_cg() if ms_dt else s.cg
+            A_ref = math.pi * (ref_d / 2.0) ** 2
+            margin = abs(aero.get("cp", s.cp) - cg_dt)
+            if ms_dt:
+                I_est = self.stage_mgr.pitch_inertia()
+            else:
+                I_est = max(self._state_vec[12] * s.length ** 2 / 12.0, 1e-6)
             K = cna * q_dyn * A_ref * margin
             if K > 0:
                 wn = math.sqrt(K / I_est)
@@ -662,14 +873,50 @@ class SimulationEngine(QObject):
         new_pitch_rate = new_vec[9]
         new_yaw_rate   = new_vec[10]
         new_roll_rate  = new_vec[11]
-        burnout_mass   = s.dry_mass + s.motor_dry_mass
+        burnout_mass   = self.stage_mgr.active_burnout_mass()
         new_mass       = max(burnout_mass, new_vec[12])
-        new_prop_mass  = max(0.0, new_mass - burnout_mass)
 
-        # Update canonical vehicle propellant consumption
+        # Sync propellant depletion to the burning stage (+ canonical vehicle).
+        consumed = max(0.0, old_mass - new_mass)
+        self.stage_mgr.consume_propellant(consumed)
         if self.vehicle is not None:
-            consumed = max(0.0, old_mass - new_mass)
             self.vehicle.consume_propellant(consumed)
+
+        # ── Staging state machine ──
+        # Advanced once per accepted step. On separation the spent stage's mass
+        # leaves the stack — resync the integrator mass and rebuild the aero
+        # model for the now-shorter active stack (CP/CG/drag all change).
+        for ev, idx in self.stage_mgr.update(t + adaptive_dt):
+            if ev == "separation":
+                # Snapshot the dropped stage's state so its ballistic descent
+                # can be tracked to the ground (range safety).
+                dropped_cfg = self.stage_mgr.stages[idx]
+                self.spent_stages.append({
+                    "stage": idx, "name": dropped_cfg.name,
+                    "t": t + adaptive_dt,
+                    "x": new_x, "y": new_y, "z": new_vec[2],
+                    "vx": new_vx, "vy": new_vy, "vz": new_vz,
+                    "mass": dropped_cfg.total_mass(),
+                    "length": dropped_cfg.length, "diameter": dropped_cfg.diameter,
+                })
+                new_mass = self.stage_mgr.total_mass()
+                self._state_vec[12] = new_mass
+                burnout_mass = self.stage_mgr.active_burnout_mass()
+                self.aero_model = AeroModel.from_state(self.stage_mgr.aero_config())
+                self.event_mgr.fire(SimEvent.STAGE_SEPARATION, {
+                    "time": t + adaptive_dt, "stage": idx,
+                    "altitude": new_vec[2], "new_mass": new_mass,
+                })
+                logger.info(f"Stage {idx} separated at {new_vec[2]:.1f}m, "
+                            f"mass now {new_mass:.2f}kg")
+            elif ev == "ignition":
+                self.event_mgr.fire(SimEvent.STAGE_IGNITION, {
+                    "time": t + adaptive_dt, "stage": idx,
+                    "altitude": new_vec[2],
+                })
+                logger.info(f"Stage {idx} ignition at {new_vec[2]:.1f}m")
+
+        new_prop_mass  = max(0.0, new_mass - burnout_mass)
 
         # Signed velocity magnitude
         new_velocity = math.sqrt(new_vx**2 + new_vy**2 + new_vz**2)
@@ -677,7 +924,7 @@ class SimulationEngine(QObject):
             new_velocity = -new_velocity
 
         # ── Derived quantities ──
-        thrust       = self._get_thrust(t)
+        thrust       = self.stage_mgr.thrust(t + adaptive_dt)
         atm_temp     = self.atmosphere.temperature(new_altitude)
         atm_press    = self.atmosphere.pressure(new_altitude)
         atm_rho      = self.atmosphere.density(new_altitude)
@@ -691,10 +938,18 @@ class SimulationEngine(QObject):
         ref_area   = math.pi * (s.diameter / 2) ** 2
         drag_force = aero.get('F_drag', 0.5 * atm_rho * new_velocity**2 * cd * ref_area)
 
-        if self._main_deployed and new_velocity < 0:
-            drag_force = 0.5 * atm_rho * new_velocity ** 2 * getattr(s, 'main_cd_area', 1.5)
-        elif self._drogue_deployed and new_velocity < 0:
-            drag_force = 0.5 * atm_rho * new_velocity ** 2 * getattr(s, 'drogue_cd_area', 0.4)
+        # Recovery drag for reporting/structures — mirror the inflation-aware
+        # force used in the integrator (_derivatives) so the two stay consistent.
+        if (self._drogue_deployed or self._main_deployed) and new_velocity < 0 \
+                and self.recovery is not None:
+            drag_force = self.recovery.get_drag_force(
+                atm_rho, abs(new_velocity), t + adaptive_dt)
+            # Opening shock: the inflation transient produces a transient drag
+            # spike (peaks near full fill at the highest descent speed). Track
+            # the peak for the structural margin on the recovery harness/bulkhead.
+            if drag_force > self._recovery_shock_peak:
+                self._recovery_shock_peak = drag_force
+            self._last_descent_vz = abs(new_vz)
 
         # Rate of change of SPEED (unsigned) — using the signed pseudo-magnitude
         # here produced a spurious spike at apogee, where the sign convention
@@ -731,6 +986,9 @@ class SimulationEngine(QObject):
 
             if self._phase == FlightPhase.DROGUE_DESCENT and not self._drogue_deployed:
                 self._drogue_deployed = True
+                if self.recovery is not None:
+                    self.recovery.drogue.deploy(t + adaptive_dt)
+                    self.recovery.drogue_deployed = True
                 self.event_mgr.fire(SimEvent.DROGUE_DEPLOY, {
                     "time": t + adaptive_dt, "altitude": new_altitude,
                 })
@@ -738,10 +996,23 @@ class SimulationEngine(QObject):
 
             if self._phase == FlightPhase.MAIN_DESCENT and not self._main_deployed:
                 self._main_deployed = True
+                # Descent rate reached under the drogue (touchdown velocity is
+                # captured separately at landing). |vz| just before the main fills.
+                self._drogue_descent_rate = abs(new_vz)
+                if self.recovery is not None:
+                    self.recovery.main.deploy(t + adaptive_dt)
+                    self.recovery.main_deployed = True
                 self.event_mgr.fire(SimEvent.MAIN_DEPLOY, {
                     "time": t + adaptive_dt, "altitude": new_altitude,
                 })
                 logger.info(f"Main chute deployed at {new_altitude:.1f}m")
+
+        # ── Flight-sanity / divergence guard ──
+        # Abort early (before the heavy structural solve) if the flight has gone
+        # numerically divergent or lost attitude control, with a clear reason.
+        if self._check_flight_sanity(t + adaptive_dt, new_vec, new_altitude,
+                                     new_velocity, aero, mach):
+            return
 
         # Max-Q tracking
         if dyn_pressure > self._max_q:
@@ -805,8 +1076,13 @@ class SimulationEngine(QObject):
         bending_moment = F_struct * bend_arm
 
         # Calculate full analytical stress state
+        # During recovery the dominant axial load is the parachute opening
+        # shock (drag_force), reacted through the harness — include it so the
+        # descent structural margin reflects the snatch load, not just weight.
         struct_res = compute_all(
-            force=max(abs(net_force), abs(thrust), new_mass * gravity_at_altitude(new_altitude)),
+            force=max(abs(net_force), abs(thrust),
+                      new_mass * gravity_at_altitude(new_altitude),
+                      drag_force if (self._drogue_deployed or self._main_deployed) else 0.0),
             diameter=s.diameter,
             wall_thickness=getattr(s, 'wall_thickness', 0.002),
             length=s.length,
@@ -820,6 +1096,22 @@ class SimulationEngine(QObject):
         
         # Calculate flutter margin (simplified for simulation loop)
         flutter_margin = getattr(s, 'flutter_speed', float('inf')) / new_velocity if new_velocity > 0 else float('inf')
+
+        # Live flutter check: if the fin flutter speed (from the Dynamics
+        # workspace) is exceeded in flight, fire a one-shot warning. Only active
+        # when a finite flutter speed has been computed and pushed to state.
+        f_speed = getattr(s, 'flutter_speed', 0.0)
+        if (f_speed > 0 and abs(new_velocity) > f_speed
+                and not self._flutter_warned):
+            self._flutter_warned = True
+            self.event_mgr.fire(SimEvent.FLUTTER_WARNING, {
+                "time": t + adaptive_dt, "velocity": abs(new_velocity),
+                "flutter_speed": f_speed, "altitude": new_altitude, "mach": mach,
+            })
+            self.engine.update(flutter_exceeded=True, emit=False)
+            self.engine.log_message.emit(
+                f"⚠ FLUTTER at T+{t+adaptive_dt:.2f}s — V={abs(new_velocity):.0f} m/s "
+                f"exceeds fin flutter speed {f_speed:.0f} m/s (Mach {mach:.2f})")
 
         # ── Update state (6DOF) ──
         self.engine.update_sim_tick(
@@ -925,12 +1217,32 @@ class SimulationEngine(QObject):
         if self._phase == FlightPhase.LANDED:
             self._timer.stop()
             self._running = False
-            self.engine.update(sim_running=False, sim_phase=FlightPhase.LANDED.value)
+
+            # Recovery summary: landing point, drift radius, descent rates,
+            # opening shock, descent duration (apogee → touchdown).
+            landing_drift = math.sqrt(new_x ** 2 + new_y ** 2)
+            touchdown_rate = self._last_descent_vz
+            descent_time = max(0.0, (t + adaptive_dt) - self._apogee_time) \
+                if self._apogee_time > 0 else 0.0
+            self.engine.update(
+                sim_running=False, sim_phase=FlightPhase.LANDED.value,
+                landing_x=new_x, landing_y=new_y, landing_drift=landing_drift,
+                drogue_descent_rate=self._drogue_descent_rate,
+                main_descent_rate=touchdown_rate,
+                recovery_shock_force=self._recovery_shock_peak,
+                descent_time=descent_time,
+            )
             self.event_mgr.fire(SimEvent.LANDING, {
                 "time": t + dt, "flight_time": t + dt,
                 "max_altitude": s.max_altitude,
                 "max_velocity": s.max_velocity,
                 "max_mach": s.max_mach,
+                "landing_x": new_x, "landing_y": new_y,
+                "landing_drift": landing_drift,
+                "drogue_descent_rate": self._drogue_descent_rate,
+                "touchdown_rate": touchdown_rate,
+                "recovery_shock_force": self._recovery_shock_peak,
+                "descent_time": descent_time,
             })
             self.event_mgr.fire(SimEvent.SIM_END, {
                 "time": t + dt, "reason": "landed",
@@ -948,6 +1260,25 @@ class SimulationEngine(QObject):
                 f"Max Mach: {s.max_mach:.3f} | "
                 f"Flight Time: {t+dt:.2f}s | "
                 f"Events: {len(self.event_mgr.event_log)}"
+            )
+            # Spent-stage ballistic tracking: propagate each dropped stage from
+            # its separation state to the ground for a landing footprint.
+            if self.spent_stages:
+                from core.spent_stage import propagate_all
+                from core.constants import gravity_at_altitude as _g
+                self.spent_stage_results = propagate_all(
+                    self.spent_stages, self.atmosphere, self.wind_model, _g)
+                for snap, r in zip(self.spent_stages, self.spent_stage_results):
+                    self.engine.log_message.emit(
+                        f"Spent stage '{snap.get('name','')}' landed "
+                        f"{r['drift']:.0f}m from pad @ {r['impact_velocity']:.0f}m/s")
+
+            self.engine.log_message.emit(
+                f"Recovery — Touchdown: {touchdown_rate:.1f}m/s | "
+                f"Drogue descent: {self._drogue_descent_rate:.1f}m/s | "
+                f"Drift: {landing_drift:.0f}m | "
+                f"Opening shock: {self._recovery_shock_peak:.0f}N | "
+                f"Descent time: {descent_time:.1f}s"
             )
 
         # Safety timeout in SIM time. Must exceed the slow drogue descent of a

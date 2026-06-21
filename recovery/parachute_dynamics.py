@@ -28,6 +28,18 @@ class ParachuteDynamics:
         self.deployed       = False
         self._deploy_time   = None
 
+    @classmethod
+    def from_cd_area(cls, cd_area: float, inflation_time: float = 0.5):
+        """Build directly from a Cd×A product (m²).
+
+        The K2 UI stores recovery sizing as a single drag area (Cd×A) rather
+        than separate Cd + diameter, so reconstruct an equivalent canopy with
+        cd=1.0 and a diameter that yields the requested area. Drag depends only
+        on cd_area_nominal, so the cd/diameter split is cosmetic here.
+        """
+        diameter = math.sqrt(max(cd_area, 0.0) * 4.0 / math.pi)
+        return cls(cd=1.0, diameter=diameter, inflation_time=inflation_time)
+
     def deploy(self, t: float):
         self.deployed    = True
         self._deploy_time = t
@@ -77,6 +89,27 @@ class RecoverySystem:
         self._apogee_time         = None
         self.drogue_deployed      = False
         self.main_deployed        = False
+
+    @classmethod
+    def from_cd_areas(cls, drogue_cd_area: float, main_cd_area: float,
+                      main_deploy_altitude: float = 300.0,
+                      drogue_delay: float = 0.0,
+                      inflation_time: float = 0.5):
+        """Build from Cd×A products (the form the K2 state engine stores).
+
+        The main canopy is much larger than the drogue, so its inflation
+        transient is scaled up proportionally (2× base) — the shock-loading
+        peak is dominated by the main, and a too-fast main fill exaggerates it.
+        """
+        sys = cls.__new__(cls)
+        sys.drogue = ParachuteDynamics.from_cd_area(drogue_cd_area, inflation_time)
+        sys.main   = ParachuteDynamics.from_cd_area(main_cd_area, inflation_time * 2)
+        sys.main_deploy_altitude = main_deploy_altitude
+        sys.drogue_delay         = drogue_delay
+        sys._apogee_time         = None
+        sys.drogue_deployed      = False
+        sys.main_deployed        = False
+        return sys
 
     def update(self, t: float, altitude: float, velocity_z: float, phase: str):
         """Check deployment conditions and deploy chutes."""

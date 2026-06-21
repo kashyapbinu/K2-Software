@@ -31,8 +31,9 @@ logger = logging.getLogger("K2.CFD.SU2")
 _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0   # CREATE_NO_WINDOW
 
 # ── Locate the bundled SU2 binary ────────────────────────────────────────────
+from core.paths import bin_dir
 _ROOT = Path(__file__).resolve().parents[2]   # K2 Software root
-_BIN_DIR = _ROOT / "bin"
+_BIN_DIR = bin_dir()   # platform-aware: bin/mac-<arch> on macOS, bin/ on Windows
 
 def _find_su2() -> Optional[Path]:
     """Find SU2_CFD: bundled bin/ first, then system PATH."""

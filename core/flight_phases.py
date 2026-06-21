@@ -26,6 +26,7 @@ class FlightPhase(Enum):
     LANDED         = "Landed"
     TERMINATED     = "Terminated"
     TIMEOUT        = "Timeout"
+    ABORTED        = "Aborted"      # flight diverged / unstable — sim halted
 
     @property
     def is_ascending(self) -> bool:
@@ -57,6 +58,7 @@ class FlightPhase(Enum):
             FlightPhase.LANDED: "LANDED",
             FlightPhase.TERMINATED: "IDLE",
             FlightPhase.TIMEOUT: "IDLE",
+            FlightPhase.ABORTED: "FAULT",
         }.get(self, "IDLE")
 
 
@@ -72,6 +74,7 @@ PHASE_COLORS = {
     FlightPhase.LANDED:         "#3fb950",
     FlightPhase.TERMINATED:     "#f85149",
     FlightPhase.TIMEOUT:        "#f85149",
+    FlightPhase.ABORTED:        "#da3633",
 }
 
 
@@ -132,7 +135,13 @@ class PhaseManager:
                 logger.info(f"Phase: BOOST → COAST (burnout at t={t:.2f}s, alt={altitude:.1f}m)")
 
         elif phase == FlightPhase.COAST:
-            if velocity <= 0 and self._prev_velocity > 0:
+            # Multistage re-ignition: an upper stage lighting during the coast
+            # returns us to BOOST until its own burnout. Checked before apogee
+            # so a sustainer burn isn't mistaken for the descent.
+            if thrust > 0 and velocity > 0:
+                new_phase = FlightPhase.BOOST
+                logger.info("Phase: COAST → BOOST (stage re-ignition)")
+            elif velocity <= 0 and self._prev_velocity > 0:
                 new_phase = FlightPhase.APOGEE
                 logger.info(f"Phase: COAST → APOGEE (alt={altitude:.1f}m)")
 

@@ -21,14 +21,18 @@ class SimEvent(Enum):
     """Simulation events that subsystems can subscribe to."""
     SIM_START      = "sim_start"
     SIM_END        = "sim_end"
+    SIM_ABORT      = "sim_abort"       # flight diverged/unstable — sim halted
     MOTOR_IGNITION = "motor_ignition"
     MOTOR_BURNOUT  = "motor_burnout"
+    STAGE_SEPARATION = "stage_separation"
+    STAGE_IGNITION = "stage_ignition"
     APOGEE         = "apogee"
     DROGUE_DEPLOY  = "drogue_deploy"
     MAIN_DEPLOY    = "main_deploy"
     LANDING        = "landing"
     PHASE_CHANGE   = "phase_change"
     MAX_Q          = "max_q"           # Maximum dynamic pressure
+    FLUTTER_WARNING = "flutter_warning"  # flight speed exceeded fin flutter speed
 
 
 class EventManager:

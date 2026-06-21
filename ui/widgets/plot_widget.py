@@ -16,6 +16,9 @@ class PlotWidget(QWidget):
         self.figure = Figure(figsize=(6, 4), dpi=100)
         self.figure.patch.set_facecolor("#0d1117")
         self.canvas = FigureCanvas(self.figure)
+        # Let wheel events bubble to an enclosing QScrollArea instead of being
+        # swallowed by the canvas — keeps scroll panels smooth over the plot.
+        self.canvas.wheelEvent = lambda e: e.ignore()
         self.ax = self.figure.add_subplot(111)
         self.cursor_line = None
         self._style_axis(title, xlabel, ylabel)
