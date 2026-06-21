@@ -1,0 +1,78 @@
+name: Build Windows installer
+
+# Manual trigger + on version tags. A pushed tag `v0.1.2` builds the installer
+# AND publishes a GitHub Release with K2-Setup.exe attached as an asset — which
+# is exactly what the in-app updater (core/updater.py) downloads.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # needed to create the Release + upload the asset
+
+env:
+  # Release that holds the prebuilt native solver binaries (SU2_CFD.exe,
+  # ccx.exe, glut64.dll). They're too large for git, so CI pulls them from a
+  # pinned release in this repo. Create it once:
+  #   gh release create solver-binaries bin/SU2_CFD.exe bin/ccx.exe bin/glut64.dll \
+  #     --title "Solver binaries" --notes "Bundled SU2 + CalculiX for CI builds"
+  # If the release/assets are missing the build still succeeds, but the
+  # installer ships without solvers (app launches, pre/post-processing works).
+  SOLVER_RELEASE_TAG: solver-binaries
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      # Native solvers — best-effort. Pull from the pinned release; never fail
+      # the build if they're absent.
+      - name: Stage solver binaries
+        shell: bash
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "$SOLVER_RELEASE_TAG" \
+            --pattern "SU2_CFD.exe" --pattern "ccx.exe" --pattern "glut64.dll" \
+            --dir bin --clobber \
+            || echo "::warning::solver binaries not found at release '$SOLVER_RELEASE_TAG' — installer will ship without solvers"
+
+      - name: Build app (PyInstaller)
+        run: pyinstaller K2.spec --noconfirm
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Compile installer
+        shell: bash
+        run: |
+          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" installer.iss
+          ls -la installer_output
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: K2-Setup
+          path: installer_output/K2-Setup.exe
+
+      # Tag builds only: publish the Release with the installer attached so the
+      # in-app updater can find a *.exe asset on releases/latest.
+      - name: Publish Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installer_output/K2-Setup.exe
+          fail_on_unmatched_files: true
+          generate_release_notes: true

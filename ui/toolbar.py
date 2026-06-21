@@ -72,6 +72,9 @@ class MainToolbar(QToolBar):
         # ── Settings ──
         self.action_settings = QAction(icon("settings"), "Settings", self)
         self.action_settings.setToolTip("Application settings")
+
+        self.action_check_updates = QAction(icon("update"), "Update", self)
+        self.action_check_updates.setToolTip("Check for software updates")
     
     def _build_toolbar(self):
         """Add actions to toolbar with separators."""
@@ -94,5 +97,6 @@ class MainToolbar(QToolBar):
             QSizePolicy.Policy.Preferred
         )
         self.addWidget(spacer)
-        
+
+        self.addAction(self.action_check_updates)
         self.addAction(self.action_settings)

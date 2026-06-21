@@ -72,6 +72,10 @@ class MainWindow(QMainWindow):
         # ── Initial state push ──
         QTimer.singleShot(200, self._initial_state_push)
 
+        # ── Silent update check shortly after launch (frozen builds only) ──
+        if getattr(sys, "frozen", False):
+            QTimer.singleShot(3000, self._startup_update_check)
+
         logger.info("K2 AeroSim initialized — 11 workspaces ready")
 
     def _setup_toolbar(self):
@@ -162,6 +166,7 @@ class MainWindow(QMainWindow):
         tb.action_stop_sim.triggered.connect(self._on_stop_sim)
         tb.action_reset.triggered.connect(self._on_reset)
         tb.action_reset_view.triggered.connect(self._on_reset_view)
+        tb.action_check_updates.triggered.connect(self._on_check_updates)
 
         self.engine.state_changed.connect(self._on_state_changed)
 
@@ -387,6 +392,21 @@ class MainWindow(QMainWindow):
 
     def _on_reset_view(self):
         self.design_ws.reset_camera()
+
+    def _on_check_updates(self):
+        """Toolbar 'Update' — check GitHub Releases, prompt if newer."""
+        from ui.dialogs.update_dialog import check_for_updates
+        # keep a ref so the worker thread isn't GC'd mid-flight
+        self._update_worker = check_for_updates(self, silent=False)
+
+    def _startup_update_check(self):
+        """Silent check on launch — only speaks up if an update exists.
+        Wrapped in try/except so an updater problem never blocks startup."""
+        try:
+            from ui.dialogs.update_dialog import check_for_updates
+            self._update_worker = check_for_updates(self, silent=True)
+        except Exception:
+            logger.debug("startup update check skipped", exc_info=True)
 
     def _update_title(self):
         name = self.engine.state.name

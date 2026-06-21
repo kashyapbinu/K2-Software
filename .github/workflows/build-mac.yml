@@ -1,0 +1,52 @@
+name: Build macOS app
+
+# Manual trigger ONLY. Windows is the focus — version tags (v*) build the
+# Windows installer (build-windows.yml). Run this by hand from the Actions tab
+# when a mac build is wanted.
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14   # Apple Silicon (arm64)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      # Native solvers. CI cannot host the large SU2/ccx binaries in git;
+      # fetch them from a release asset or brew here. Until wired, the .app
+      # builds but solvers are absent (app still launches + does pre/post).
+      - name: Stage mac solver binaries
+        run: |
+          mkdir -p "bin/mac-$(uname -m)"
+          # TODO: download SU2_CFD + ccx for $(uname -m) into bin/mac-$(uname -m)/
+          # e.g. brew install calculix-ccx ; cp "$(command -v ccx)" "bin/mac-$(uname -m)/ccx"
+          echo "solver staging is a TODO — see packaging/mac/README.md"
+
+      - name: Build .app
+        run: bash packaging/mac/build_mac.sh
+
+      - name: Make .dmg
+        run: bash packaging/mac/make_dmg.sh
+
+      # Signing/notarization only runs when the repo secrets are present.
+      # No secrets (current state) -> step is a no-op, artifact is unsigned.
+      - name: Sign + notarize
+        if: ${{ secrets.DEV_ID_APP != '' }}
+        env:
+          DEV_ID_APP: ${{ secrets.DEV_ID_APP }}
+          AC_PROFILE: ${{ secrets.AC_PROFILE }}
+        run: bash packaging/mac/sign_notarize.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: K2-macos-${{ runner.arch }}
+          path: dist/K2.dmg

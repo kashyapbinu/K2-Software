@@ -63,6 +63,7 @@ _MAP = {
     "refresh":       "fa5s.sync-alt",
     "reset_view":    "fa5s.expand",
     "settings":      "fa5s.cog",
+    "update":        "fa5s.cloud-download-alt",
 
     # ── Generic actions ──
     "add":           "fa5s.plus",

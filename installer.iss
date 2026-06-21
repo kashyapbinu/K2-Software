@@ -33,6 +33,11 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 SetupIconFile=bin\k2.ico
 UninstallDisplayIcon={app}\K2.exe
+; In-app auto-update launches this installer /SILENT while K2 may still be
+; closing. Auto-close any running instance and overwrite its files instead of
+; failing with "file in use".
+CloseApplications=force
+RestartApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

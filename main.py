@@ -82,10 +82,11 @@ def main():
     except Exception:
         pass  # WebEngine optional — Cinematic tab shows an install hint instead
 
+    from core.version import __version__ as K2_VERSION
     app = QApplication(sys.argv)
     app.setApplicationName("K2 AeroSim")
     app.setOrganizationName("K2 AeroSim")
-    app.setApplicationVersion("0.1.1")
+    app.setApplicationVersion(K2_VERSION)
 
     # ── App / window / taskbar icon ──────────────────────────────────────────
     # Resolve the bundled icon (under bin/, kept relative in the frozen bundle).
