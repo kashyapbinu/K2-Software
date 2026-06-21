@@ -10,6 +10,56 @@ import math
 from scipy.optimize import fsolve
 from typing import List
 
+G0 = 9.80665
+P_ATM = 101325.0
+
+
+def nozzle_cf(pc: float, eps: float, gamma: float, ambient: float = P_ATM) -> tuple[float, float]:
+    """Ideal nozzle thrust coefficient Cf and exit pressure Pe (Pa) for a given
+    chamber pressure, area ratio and ambient, with a simple over-expansion
+    (flow-separation) clamp. Mirrors the in-loop logic of MotorSimulator."""
+    g = max(gamma, 1.01)
+    if eps <= 1.0 or pc <= 0:
+        return 0.0, pc
+    # Pe/Pc from the area ratio (supersonic branch) via bisection.
+    def area_ratio(pe_pc):
+        t1 = ((g + 1) / 2.0) ** (1.0 / (g - 1.0))
+        t2 = pe_pc ** (1.0 / g)
+        t3 = math.sqrt(max((g + 1) / (g - 1) * (1 - pe_pc ** ((g - 1) / g)), 1e-12))
+        return t1 / (t2 * t3)
+    lo, hi = 1e-6, 0.999999
+    for _ in range(120):
+        mid = 0.5 * (lo + hi)
+        if area_ratio(mid) < eps:   # area_ratio decreases as pe_pc rises
+            hi = mid
+        else:
+            lo = mid
+    pe_pc = 0.5 * (lo + hi)
+    pe = pe_pc * pc
+    term1 = (2 * g * g) / (g - 1)
+    term2 = (2 / (g + 1)) ** ((g + 1) / (g - 1))
+    term3 = max(1 - pe_pc ** ((g - 1) / g), 0.0)
+    cf_mom = math.sqrt(term1 * term2 * term3)
+    if pe < ambient:   # over-expanded → separated, treat as perfectly expanded to Pa
+        ideal_pe_pc = min(ambient / pc, 1.0)
+        it3 = max(1 - ideal_pe_pc ** ((g - 1) / g), 0.0)
+        return math.sqrt(term1 * term2 * it3), pe
+    return cf_mom + (pe - ambient) / pc * eps, pe
+
+
+def optimum_expansion_ratio(ambient: float, pc: float, gamma: float) -> float:
+    """Area ratio that perfectly expands chamber pc to the given ambient."""
+    if ambient <= 0:
+        return 80.0
+    if ambient >= pc:
+        return 1.0
+    g = max(gamma, 1.01)
+    pe_pc = ambient / pc
+    t1 = ((g + 1) / 2.0) ** (1.0 / (g - 1.0))
+    t2 = pe_pc ** (1.0 / g)
+    t3 = math.sqrt(max((g + 1) / (g - 1) * (1 - pe_pc ** ((g - 1) / g)), 1e-12))
+    return max(1.5, min(200.0, t1 / (t2 * t3)))
+
 class Propellant:
     def __init__(self, a: float, n: float, density: float, c_star: float, gamma: float = 1.2):
         self.a = a
@@ -360,4 +410,93 @@ class MotorSimulator:
                 "total_impulse": total_impulse,
                 "delivered_isp": delivered_isp
             }
+        }
+
+    # ── conceptual nozzle / chamber / performance design summary ───────────
+    def design_summary(self, res: dict, chamber_diameter: float,
+                       rocket_total_mass: float = 0.0,
+                       struct_frac: float = 0.5) -> dict:
+        """First-order nozzle geometry, ideal-vs-delivered performance,
+        chamber metrics, Δv / TWR and engineering validation warnings for a
+        completed solid-motor simulation. `chamber_diameter` is the grain
+        outer / casing inner diameter (m)."""
+        g = max(self.propellant.gamma, 1.01)
+        m = res["metrics"]
+        pressures = [p for p in res["pressure"] if p > self.ambient_pressure * 1.01]
+        pc_mean = sum(pressures) / len(pressures) if pressures else m["max_pc"]
+        thrusts = res["thrust"]
+        max_thrust = max(thrusts) if thrusts else 0.0
+        burn_time = res["time"][-1] if res["time"] else 0.0
+        avg_thrust = m["total_impulse"] / burn_time if burn_time > 0 else 0.0
+
+        throat_d = 2.0 * math.sqrt(self.throat_area / math.pi)
+        exit_d = 2.0 * math.sqrt(self.exit_area / math.pi)
+
+        cf_sl, pe = nozzle_cf(pc_mean, self.eps, g, P_ATM)
+        cf_vac, _ = nozzle_cf(pc_mean, self.eps, g, 0.0)
+        cstar = self.propellant.c_star
+        isp_ideal = cf_sl * cstar / G0
+        isp_vac = cf_vac * cstar / G0 * self.efficiency
+        isp_delivered = m["delivered_isp"]
+        efficiency = isp_delivered / isp_ideal if isp_ideal > 0 else 0.0
+
+        # Geometry / chamber metrics.
+        chamber_area = math.pi * (chamber_diameter / 2.0) ** 2
+        chamber_len = m["prop_len"]
+        chamber_vol = chamber_area * chamber_len
+        contraction = chamber_area / self.throat_area if self.throat_area > 0 else 0.0
+        l_star = chamber_vol / self.throat_area if self.throat_area > 0 else 0.0
+        nozzle_len = (exit_d - throat_d) / 2.0 / math.tan(math.radians(15.0))
+        residence = l_star / cstar if cstar > 0 else 0.0   # t_s ≈ L*/c*
+        opt_eps = optimum_expansion_ratio(self.ambient_pressure, pc_mean, g)
+
+        # Masses / Δv / TWR.
+        prop_mass = res["prop_mass"]
+        dry_mass = prop_mass * struct_frac
+        wet_mass = prop_mass + dry_mass
+        mass_ratio = wet_mass / dry_mass if dry_mass > 0 else 0.0
+        delta_v = isp_delivered * G0 * math.log(mass_ratio) if mass_ratio > 1 else 0.0
+        twr_engine = max_thrust / (wet_mass * G0) if wet_mass > 0 else 0.0
+        twr_liftoff = twr_burnout = 0.0
+        if rocket_total_mass > 0:
+            twr_liftoff = max_thrust / (rocket_total_mass * G0)
+            burnout = max(rocket_total_mass - prop_mass, 1e-6)
+            twr_burnout = max_thrust / (burnout * G0)
+
+        warnings = []
+        ptt = m["port_to_throat"]
+        if 0 < ptt < 2.0:
+            warnings.append(f"Port-to-throat {ptt:.2f} < 2 — erosive burning / pressure spike risk at ignition. Use a larger core or smaller throat.")
+        if m["peak_mass_flux"] > 1400.0:
+            warnings.append(f"Peak mass flux {m['peak_mass_flux']:.0f} kg/m²s exceeds ~1400 — erosive burning likely.")
+        if m["max_pc"] / 1e5 > 100.0:
+            warnings.append(f"Max chamber pressure {m['max_pc']/1e5:.0f} bar is high — verify case & closure strength (MEOP margin).")
+        if m["max_pc"] / 1e5 < 10.0:
+            warnings.append(f"Max chamber pressure {m['max_pc']/1e5:.1f} bar is low — burn rate exponent regime may be unstable.")
+        if self.ambient_pressure > 0 and pe < 0.35 * self.ambient_pressure:
+            warnings.append(f"Overexpanded: Pe={pe/1e5:.2f} bar ≪ ambient — flow separation at sea level. Reduce exit diameter (ε≈{opt_eps:.1f}).")
+        if self.ambient_pressure > 0 and pe > 4.0 * self.ambient_pressure:
+            warnings.append(f"Underexpanded — a larger exit (ε≈{opt_eps:.1f}) would recover thrust.")
+        if m["core_l_d"] > 8.0:
+            warnings.append(f"Core L/D {m['core_l_d']:.1f} is very high — risk of erosive burning down the bore.")
+        if m["vol_loading"] > 95.0:
+            warnings.append(f"Volumetric loading {m['vol_loading']:.0f}% leaves little port area — high initial Kn.")
+        if efficiency > 1.0:
+            warnings.append("Delivered Isp exceeds ideal — check c*/efficiency inputs.")
+
+        return {
+            "throat_diameter": throat_d, "exit_diameter": exit_d,
+            "chamber_diameter": chamber_diameter, "chamber_length": chamber_len,
+            "expansion_ratio": self.eps, "contraction_ratio": contraction,
+            "l_star": l_star, "nozzle_length": nozzle_len,
+            "residence_time": residence, "exit_pressure": pe,
+            "pc_mean": pc_mean, "opt_expansion": opt_eps,
+            "isp_ideal": isp_ideal, "isp_delivered": isp_delivered, "isp_vac": isp_vac,
+            "cf_sl": cf_sl, "cf_vac": cf_vac, "efficiency": efficiency,
+            "thrust_ideal": max_thrust / self.efficiency if self.efficiency > 0 else max_thrust,
+            "thrust_delivered": max_thrust, "avg_thrust": avg_thrust,
+            "prop_mass": prop_mass, "dry_mass": dry_mass, "wet_mass": wet_mass,
+            "mass_ratio": mass_ratio, "delta_v": delta_v,
+            "twr_engine": twr_engine, "twr_liftoff": twr_liftoff, "twr_burnout": twr_burnout,
+            "warnings": warnings,
         }
