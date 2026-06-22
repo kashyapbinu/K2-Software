@@ -70,8 +70,6 @@
   <h3 class="devtalk-h">Features Currently Under Development</h3>
   <div class="dev-prose">
     <ul class="dev-list">
-      <li><strong>Liquid Propellant Simulation</strong> — support for liquid and hybrid rocket propulsion systems with injector and feed-system modeling.</li>
-      <li><strong>Multi-Stage Rocket Simulation</strong> — full stage separation, ignition sequencing, and stage-wise trajectory analysis.</li>
       <li><strong>AI-Powered Optimization Engine</strong> — automatic optimization of geometry, propulsion, stability, and performance parameters.</li>
       <li><strong>Enhanced Parallel Computing</strong> — progressive parallelization of additional modules through dependency-aware architectural refactoring for improved performance.</li>
     </ul>
@@ -104,7 +102,12 @@
 <section class="section devtalk-section" id="updates">
   <h3 class="devtalk-h">Updates</h3>
   <div class="dev-prose">
-    <p class="dev-empty">No updates yet — this space will be updated as new releases land.</p>
+    <ul class="dev-list">
+      <li><strong>Liquid Propellant Simulation</strong> — liquid and hybrid rocket propulsion now supported, with a dedicated engine designer covering bi-propellant and monopropellant systems, injector and feed-system modeling, and full integration into both single-stage and multi-stage builds.</li>
+      <li><strong>Multi-Stage Rocket Simulation</strong> — full multistage flight with stage separation, ignition sequencing, and stage-wise trajectory analysis through the staging manager.</li>
+      <li><strong>Flight Sanity Barrier</strong> — a built-in safety monitor that watches every simulation in real time and aborts physically impossible flights instead of reporting garbage results. It catches diverged trajectories, tumbling and unstable rockets, and bad configurations, then reports a plain-language diagnosis of <em>why</em> the flight failed (e.g. insufficient stability margin, runaway gust torque, under-powered motor) so the problem can be fixed at the source.</li>
+      <li><strong>Improved Solid Motor Customization</strong> — the solid motor builder now exposes many more parameters and a more accurate internal model, giving finer control over grain geometry and thrust behavior and producing thrust curves and performance numbers that track real motor data more closely.</li>
+    </ul>
   </div>
 </section>
 
