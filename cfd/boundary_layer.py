@@ -461,14 +461,14 @@ def compute_skin_friction_streamlines(
     # ---- Fallback: arrow glyphs -----------------------------------------
     logger.info("Falling back to arrow glyphs for skin-friction visualisation.")
     try:
-        sampled = work.extract_points(
-            np.linspace(0, work.n_points - 1, min(n_seeds, work.n_points), dtype=int)
-        )
+        # extract_points() returns every point of the touched cells, which
+        # breaks the 1:1 pairing with the sampled shear vectors — build the
+        # seed cloud directly instead.
+        idx = np.linspace(0, work.n_points - 1, min(n_seeds, work.n_points), dtype=int)
+        sampled = pv.PolyData(np.asarray(work.points)[idx])
         if sampled.n_points == 0:
             return pv.PolyData()
-        sampled["ShearVec"] = shear_vec[
-            np.linspace(0, work.n_points - 1, min(n_seeds, work.n_points), dtype=int)
-        ].astype(np.float32)
+        sampled["ShearVec"] = shear_vec[idx].astype(np.float32)
         sampled.set_active_vectors("ShearVec")
         arrows = sampled.glyph(orient="ShearVec", scale=False, factor=max_length * 0.05)
         return arrows

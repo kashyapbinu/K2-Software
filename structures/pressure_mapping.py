@@ -110,14 +110,52 @@ def _vec_cross(a: tuple, b: tuple) -> tuple:
 
 # ── Simple VTU Parser ────────────────────────────────────────────────────────
 
+_PRESSURE_ARRAY_NAMES = ('pressure', 'p', 'cp')
+
+
+def _parse_vtu_via_pyvista(
+    vtu_path: Path,
+) -> Tuple[List[Tuple[float, float, float]], List[float]]:
+    """Read points + pressure through a full VTK reader (handles the
+    appended-binary VTU files SU2 writes). Returns ([], []) when pyvista
+    is unavailable or the file cannot be read.
+    """
+    try:
+        import pyvista as pv
+    except ImportError:
+        return [], []
+    try:
+        mesh = pv.read(str(vtu_path))
+    except Exception as exc:
+        logger.debug("pyvista could not read %s: %s", vtu_path, exc)
+        return [], []
+
+    points = [tuple(map(float, p)) for p in mesh.points]
+
+    pressures: List[float] = []
+    for name in mesh.point_data.keys():
+        if name.lower() in _PRESSURE_ARRAY_NAMES:
+            pressures = [float(v) for v in mesh.point_data[name]]
+            break
+    else:
+        # Pressure stored per-cell — interpolate to points.
+        for name in mesh.cell_data.keys():
+            if name.lower() in _PRESSURE_ARRAY_NAMES:
+                interp = mesh.cell_data_to_point_data()
+                pressures = [float(v) for v in interp.point_data[name]]
+                break
+    return points, pressures
+
+
 def _parse_vtu_points_and_pressure(
     vtu_path: Path,
 ) -> Tuple[List[Tuple[float, float, float]], List[float]]:
-    """Extract point coordinates and pressure from a VTU XML file.
+    """Extract point coordinates and pressure from a VTU file.
 
-    Parses the ``<Points>`` and ``<PointData>`` sections of a basic
-    VTK Unstructured-Grid (``.vtu``) file.  Only ASCII / raw-text
-    encoding is supported (not appended-binary).
+    Tries a full VTK reader first (SU2 writes ``format="appended"``
+    binary VTU, which plain XML parsing cannot handle), then falls back
+    to parsing the ``<Points>`` and ``<PointData>`` sections of an
+    ASCII / raw-text ``.vtu`` file.
 
     Parameters
     ----------
@@ -130,6 +168,12 @@ def _parse_vtu_points_and_pressure(
     pressures : list of float
         Pressure at each point (Pa).  Empty if no pressure array found.
     """
+    points, pressures = _parse_vtu_via_pyvista(vtu_path)
+    if points and pressures:
+        logger.debug("VTU parse (pyvista): %d points, %d pressure values",
+                     len(points), len(pressures))
+        return points, pressures
+
     tree = ET.parse(str(vtu_path))
     root = tree.getroot()
 
@@ -154,7 +198,7 @@ def _parse_vtu_points_and_pressure(
     for pd in root.iter('PointData'):
         for da in pd.iter('DataArray'):
             name = (da.get('Name') or '').lower()
-            if name in ('pressure', 'p', 'cp'):
+            if name in _PRESSURE_ARRAY_NAMES:
                 text = (da.text or '').strip()
                 if text:
                     pressures = [float(v) for v in text.split()]
