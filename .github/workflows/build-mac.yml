@@ -39,8 +39,9 @@ jobs:
 
       # Signing/notarization only runs when the repo secrets are present.
       # No secrets (current state) -> step is a no-op, artifact is unsigned.
+      # secrets.* cannot be referenced in step `if:` — route through env.
       - name: Sign + notarize
-        if: ${{ secrets.DEV_ID_APP != '' }}
+        if: env.DEV_ID_APP != ''
         env:
           DEV_ID_APP: ${{ secrets.DEV_ID_APP }}
           AC_PROFILE: ${{ secrets.AC_PROFILE }}
