@@ -12,7 +12,7 @@ Keep these in sync with the same number:
   - the git tag              (v<version>)
 """
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 # GitHub repo that hosts the public Releases the updater pulls from.
 # Form: "owner/name".
