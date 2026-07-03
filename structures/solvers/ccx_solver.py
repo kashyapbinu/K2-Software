@@ -236,6 +236,16 @@ class CalculiXSolver(FEMSolver):
 
     # ── CFD surface-pressure mapping ──────────────────────────────────────────
 
+    @staticmethod
+    def _isa_pressure(altitude_m: float) -> float:
+        """ISA static pressure (Pa) at the given altitude."""
+        T0, P0, L, R, g = 288.15, 101325.0, 0.0065, 287.05, 9.80665
+        h = max(0.0, float(altitude_m))
+        if h <= 11000.0:
+            return P0 * (1.0 - L * h / T0) ** (g / (R * L))
+        p11 = P0 * (1.0 - L * 11000.0 / T0) ** (g / (R * L))
+        return p11 * math.exp(-g * (h - 11000.0) / (R * 216.65))
+
     def _build_fem_stations(self):
         """Parse the structural mesh into per-element stations for pressure
         mapping: ``(elem_id, axial, area_m2, outward_axial_normal)``.
@@ -281,14 +291,25 @@ class CalculiXSolver(FEMSolver):
             mag = float(np.linalg.norm(nrm))
             area = 0.5 * mag
             centroid = sum(p) / len(p)
-            if mag > 1e-15:
-                unit = nrm / mag
-                # Outward = away from the Z body axis (radial in x,y)
-                if float(unit[0] * centroid[0] + unit[1] * centroid[1]) < 0.0:
-                    unit = -unit
-                n_axial = float(unit[2])
-            else:
-                n_axial = 0.0
+            if mag <= 1e-15:
+                continue
+            unit = nrm / mag
+            # Only body-of-revolution elements can take the mapped pressure:
+            # the IDW field is azimuthally averaged and the outward-normal
+            # disambiguation below needs a radial normal. Fin faces (normal
+            # circumferential) and base plates (normal axial, radial dot ~0)
+            # get an arbitrary sign and meaningless magnitude — skip them so
+            # they keep the analytic loads instead.
+            r_c = math.hypot(float(centroid[0]), float(centroid[1]))
+            if r_c < 1e-9:
+                continue
+            radial_dot = (unit[0] * centroid[0] + unit[1] * centroid[1]) / r_c
+            if abs(radial_dot) < 0.35:
+                continue
+            # Outward = away from the Z body axis (radial in x,y)
+            if radial_dot < 0.0:
+                unit = -unit
+            n_axial = float(unit[2])
             stations.append((eid, float(centroid[2]), area, n_axial))
         return stations
 
@@ -315,6 +336,26 @@ class CalculiXSolver(FEMSolver):
                 return
             # Remap body axis (z) into the x slot to match the IDW metric.
             cfd_pts = [(z, x, y) for (x, y, z) in cfd_pts]
+            # SU2 writes absolute static pressure; the airframe only feels
+            # the gauge component (interior vented to ambient). A Cp field
+            # (values near 0) must not have p_amb subtracted, so only treat
+            # the data as absolute when it sits near atmospheric magnitude.
+            lc = getattr(cfg, "load_case", None) or LoadCase()
+            p_amb = self._isa_pressure(getattr(lc, "altitude_m", 0.0))
+            med = sorted(cfd_pres)[len(cfd_pres) // 2]
+            if med > 0.5 * p_amb:
+                cfd_pres = [p - p_amb for p in cfd_pres]
+                logger.info("CFD pressure converted to gauge (p_amb=%.0f Pa "
+                            "at %.0f m)", p_amb, getattr(lc, "altitude_m", 0.0))
+            elif max(abs(p) for p in cfd_pres) < 50.0:
+                q = getattr(lc, "dynamic_pressure", 0.0)
+                if q > 0.0:
+                    cfd_pres = [p * q for p in cfd_pres]
+                    logger.info("CFD Cp field scaled by q=%.0f Pa", q)
+                else:
+                    logger.warning("CFD field looks like Cp but no dynamic "
+                                   "pressure in load case — skipping map")
+                    return
             stations = self._build_fem_stations()
             if not stations:
                 logger.warning("No FEM stations built — skipping CFD pressure map")
