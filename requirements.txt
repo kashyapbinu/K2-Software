@@ -10,6 +10,13 @@ scikit-learn>=1.3
 matplotlib>=3.7
 qtawesome>=1.3
 reportlab>=4.0
+# CFD volumetric meshing (cfd/meshing.py). Required in CI builds: K2.spec
+# collect_all("gmsh") silently bundles nothing if it's absent from the venv,
+# and the installed app then fails at mesh time (v0.1.3 regression).
+gmsh>=4.11
+# Imported directly (structures/report.py) — don't rely on it arriving
+# transitively via matplotlib.
+pillow>=10
 requests>=2.32
 # requests supports chardet <6 only; newer chardet triggers
 # RequestsDependencyWarning and unsupported decode paths.
