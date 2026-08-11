@@ -48,8 +48,7 @@ def gaussian_prefilter(
     scalar_name : str
         Name of the point-data scalar array to smooth.
     sigma : float, optional
-        Standard deviation (in mesh length units) for the Gaussian kernel.
-        Default is 1.5.
+        Kernel width as a MULTIPLE OF LOCAL MESH SPACING (default 1.5).
 
     Returns
     -------
@@ -61,6 +60,15 @@ def gaussian_prefilter(
     ------
     RuntimeError
         If scipy is not installed.
+
+    Notes
+    -----
+    ``sigma`` was previously an absolute length. With the default of 1.5 m
+    against neighbour spacings of ~1e-3 m, every weight ``exp(-0.5*(d/σ)²)``
+    evaluated to 1.0 and the filter collapsed into an unweighted 17-point
+    box mean — sigma had no effect at any value a caller passed. Scaling by
+    each point's own mean neighbour distance restores an actual Gaussian and
+    makes the amount of smoothing independent of mesh units and refinement.
     """
     if KDTree is None:
         raise RuntimeError(
@@ -79,7 +87,12 @@ def gaussian_prefilter(
     k = min(16, n_pts - 1)
     tree = KDTree(points)
     dists, idxs = tree.query(points, k=k + 1)   # includes self at column 0
-    weights = np.exp(-0.5 * (dists / max(sigma, 1e-12)) ** 2)
+    # Per-point kernel width = sigma * local mean neighbour spacing
+    # (column 0 is the point itself at d=0, so average columns 1..k).
+    local_h = dists[:, 1:].mean(axis=1)
+    local_h = np.where(local_h < 1e-30, 1.0, local_h)
+    sigma_local = (max(sigma, 1e-3) * local_h)[:, None]
+    weights = np.exp(-0.5 * (dists / sigma_local) ** 2)
     smoothed = (weights * values[idxs]).sum(axis=1) / weights.sum(axis=1)
 
     mesh[scalar_name] = smoothed.astype(np.float32)
@@ -88,6 +101,40 @@ def gaussian_prefilter(
         scalar_name, sigma, k,
     )
     return mesh
+
+
+def _prefiltered_velocity_field(volume_mesh, sigma: float = 1.5) -> str:
+    """Write a smoothed copy of ``Velocity`` and return the array name to use.
+
+    Returns ``"Velocity"`` unchanged when scipy is unavailable, otherwise
+    ``"_Vel_tmp"``. The caller is responsible for deleting ``_Vel_tmp``.
+
+    Notes
+    -----
+    Each component is smoothed independently. The previous approach smoothed
+    only the velocity MAGNITUDE and then rescaled the raw vector by
+    ``smoothed_mag / raw_mag`` to "scale the components proportionally". That
+    ratio is unbounded exactly where the sensors are read: on a no-slip wall
+    the raw speed goes to zero while the neighbourhood mean does not, so
+    near-wall vectors were rescaled by a measured p99 of 20x and a peak of
+    79x. Both sensors differentiate this field, so the entire boundary layer
+    was handed a fabricated velocity gradient and lit up as "shock" at any
+    Mach number. Smoothing components sidesteps the division entirely and is
+    what a Gaussian filter on a vector field means anyway.
+    """
+    if KDTree is None or "Velocity" not in volume_mesh.array_names:
+        return "Velocity"
+
+    vel = np.asarray(volume_mesh["Velocity"], dtype=np.float64)
+    smoothed = np.empty_like(vel)
+    for c in range(vel.shape[1]):
+        volume_mesh["_VelComp_tmp"] = vel[:, c].astype(np.float32)
+        gaussian_prefilter(volume_mesh, "_VelComp_tmp", sigma=sigma)
+        smoothed[:, c] = np.asarray(volume_mesh["_VelComp_tmp"], dtype=np.float64)
+    del volume_mesh.point_data["_VelComp_tmp"]
+
+    volume_mesh["_Vel_tmp"] = smoothed.astype(np.float32)
+    return "_Vel_tmp"
 
 
 # ---------------------------------------------------------------------------
@@ -189,21 +236,7 @@ def ducros_shock_sensor(
     # (the workspace reuses the same volume mesh for slice/streamline views).
     vel_field = "Velocity"
     if prefilter and KDTree is not None:
-        vmag = np.linalg.norm(
-            np.asarray(volume_mesh["Velocity"]), axis=1
-        ).astype(np.float32)
-        volume_mesh["_VelMag_tmp"] = vmag
-        gaussian_prefilter(volume_mesh, "_VelMag_tmp", sigma=sigma)
-        # Scale velocity components proportionally
-        raw_mag = np.linalg.norm(
-            np.asarray(volume_mesh["Velocity"]), axis=1, keepdims=True
-        )
-        raw_mag = np.where(raw_mag < 1e-30, 1.0, raw_mag)
-        scale = (volume_mesh["_VelMag_tmp"] / raw_mag.ravel()).astype(np.float32)
-        vel_smooth = np.asarray(volume_mesh["Velocity"]) * scale[:, None]
-        volume_mesh["_Vel_tmp"] = vel_smooth.astype(np.float32)
-        del volume_mesh.point_data["_VelMag_tmp"]
-        vel_field = "_Vel_tmp"
+        vel_field = _prefiltered_velocity_field(volume_mesh, sigma=sigma)
 
     # Compute divergence (∇·V) and vorticity (ω)
     deriv = volume_mesh.compute_derivative(
@@ -264,20 +297,7 @@ def dilatation_shock_sensor(
     # Smooth a TEMPORARY copy — never overwrite the cached 'Velocity' array.
     vel_field = "Velocity"
     if prefilter and KDTree is not None:
-        vmag = np.linalg.norm(
-            np.asarray(volume_mesh["Velocity"]), axis=1
-        ).astype(np.float32)
-        volume_mesh["_VelMag_tmp"] = vmag
-        gaussian_prefilter(volume_mesh, "_VelMag_tmp", sigma=sigma)
-        raw_mag = np.linalg.norm(
-            np.asarray(volume_mesh["Velocity"]), axis=1, keepdims=True
-        )
-        raw_mag = np.where(raw_mag < 1e-30, 1.0, raw_mag)
-        scale = (volume_mesh["_VelMag_tmp"] / raw_mag.ravel()).astype(np.float32)
-        vel_smooth = np.asarray(volume_mesh["Velocity"]) * scale[:, None]
-        volume_mesh["_Vel_tmp"] = vel_smooth.astype(np.float32)
-        del volume_mesh.point_data["_VelMag_tmp"]
-        vel_field = "_Vel_tmp"
+        vel_field = _prefiltered_velocity_field(volume_mesh, sigma=sigma)
 
     deriv = volume_mesh.compute_derivative(
         scalars=vel_field,

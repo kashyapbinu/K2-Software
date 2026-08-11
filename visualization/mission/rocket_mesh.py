@@ -23,7 +23,8 @@ except Exception:
     _PV_OK = False
 
 from visualization.viewer_3d import (
-    _ogive_profile, _make_surface_of_revolution, _make_tube, _make_frustum)
+    _ogive_profile, nose_profile, _make_surface_of_revolution, _make_tube,
+    _make_frustum)
 from core.components import (NoseCone, BodyTube, Transition,
                              TrapezoidalFinSet, LaunchLug, Nozzle)
 
@@ -42,19 +43,14 @@ _COLORS = {
 
 
 def _nose_profile(shape, length, radius, n=40):
-    """(zs, rs) profile from base (z=0, r=radius) to tip (z=length, r≈0)."""
-    shape = (shape or "Ogive").lower()
-    zs = np.linspace(0.0, length, n)
-    if shape.startswith("conic"):
-        rs = radius * (1.0 - zs / length)
-    elif shape.startswith("ellip"):
-        rs = radius * np.sqrt(np.maximum(0.0, 1.0 - (zs / length) ** 2))
-    elif shape.startswith("parab"):
-        rs = radius * (1.0 - (zs / length) ** 2)
-    else:  # ogive / haack — reuse the design-viewer ogive
-        return _ogive_profile(length, radius, n=n)
-    rs = np.clip(rs, 0.0, radius)
-    return zs, rs
+    """(zs, rs) profile from base (z=0, r=radius) to tip (z=length, r≈0).
+
+    Delegates to the shared shape-aware builder in ``visualization.viewer_3d``
+    so the mission view, the design viewer, the stress viewer and the CFD mesh
+    all draw the same nose. This used to be a near-copy that handled conical,
+    elliptical and parabolic but silently drew Haack as an ogive.
+    """
+    return nose_profile(shape, length, radius, n=n)
 
 
 def _colored(mesh, key):

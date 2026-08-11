@@ -25,7 +25,8 @@ logger = logging.getLogger("K2.CFD.GeoExport")
 
 try:
     from visualization.viewer_3d import (
-        _ogive_profile, _make_surface_of_revolution, _make_tube, _make_frustum
+        _ogive_profile, _make_surface_of_revolution, _make_tube, _make_frustum,
+        nose_profile as _shared_nose_profile,
     )
 except ImportError:
     # Fallback stubs if viewer is not importable (headless environment)
@@ -46,6 +47,34 @@ except ImportError:
         rs = np.sqrt(np.maximum(rho ** 2 - zs ** 2, 0)) - (rho - radius)
         rs = np.clip(rs, 0, radius)
         return zs, rs
+
+    def _shared_nose_profile(shape, length, radius, n=50):
+        """Headless twin of visualization.viewer_3d.nose_profile.
+
+        Must stay shape-aware: the CFD mesh is built from this in a subprocess
+        where the viewer (and Qt) may not import, and a cone silently becoming
+        an ogive there would move the geometry the solver actually solves.
+        """
+        if radius <= 0 or length <= 0:
+            return np.array([0.0, length]), np.array([radius, 0.0])
+        key = (shape or "Ogive").strip().lower()
+        if key.startswith("conic"):
+            return np.array([0.0, length]), np.array([radius, 0.0])
+        zs = np.linspace(0.0, length, max(int(n), 2))
+        t = zs / length
+        if key.startswith("ellip"):
+            rs = radius * np.sqrt(np.maximum(1.0 - t ** 2, 0.0))
+        elif key.startswith("parab"):
+            rs = radius * (1.0 - t ** 2)
+        elif key.startswith("haack") or "karman" in key or "kármán" in key:
+            x = np.clip(1.0 - t, 0.0, 1.0)
+            theta = np.arccos(np.clip(1.0 - 2.0 * x, -1.0, 1.0))
+            rs = (radius / np.sqrt(np.pi)) * np.sqrt(
+                np.maximum(theta - 0.5 * np.sin(2.0 * theta), 0.0)
+            )
+        else:
+            return _ogive_profile(length, radius, n)
+        return zs, np.clip(rs, 0.0, radius)
 
     def _make_surface_of_revolution(zs, rs, n_theta=64):
         thetas = np.linspace(0, 2 * np.pi, n_theta, endpoint=False)
@@ -134,21 +163,54 @@ def extract_cfd_geometry(assembly) -> dict:
     if body_L <= 0:
         body_r = nose_r
 
-    # Pick the largest fin set (most aerodynamically significant)
+    # Pick the largest fin set (most aerodynamically significant).
+    #
+    # A finless design reports fin_count 0 — it must NOT invent four fins. The
+    # old fallback did exactly that, so a finless airframe was meshed and solved
+    # with four fins it does not have; and on a body-less design (a pure cone,
+    # e.g. the Taylor-Maccoll case) the fabricated root chord came out as
+    # body_L*0.25 = 0 and the mesher died on "Degenerate box". The benchmark
+    # only got through by passing fin_count=0 explicitly.
     fin_data = max(fins, key=lambda f: f["height"]) if fins else {
-        "count": 4, "height": body_r * 0.8,
-        "root_chord": body_L * 0.25, "tip_chord": body_L * 0.1,
-        "sweep_deg": 0.0, "thick": 0.003, "z_base_k2": 0.0,
+        "count": 0, "height": 0.0,
+        "root_chord": 0.0, "tip_chord": 0.0,
+        "sweep_deg": 0.0, "thick": 0.0, "z_base_k2": 0.0,
     }
+    if not fins:
+        logger.info("No fin set in the assembly — meshing a finless body.")
 
     # Nose length falls back to 30% of total if not parsed
     if nose_L <= 0:
         nose_L = total_L * 0.30
     actual_body_L = total_L - nose_L
 
+    # Full outer mold line, so the mesher can build transitions/boattails and a
+    # shape-correct nose instead of inferring cone + cylinder from the scalars
+    # below (which silently straightened every transition into body tube).
+    try:
+        profile = cfd_profile(assembly)
+    except Exception as e:
+        profile = []
+        logger.warning(f"Axial profile extraction failed ({e}) — the mesher will "
+                       f"fall back to the cone + cylinder approximation.")
+
+    nose_shape = "Ogive"
+    for stage in assembly.stages:
+        for comp in stage.children:
+            if isinstance(comp, NoseCone):
+                nose_shape = getattr(comp, "shape", "Ogive")
+                break
+
+    if len(fins) > 1:
+        logger.warning(
+            f"{len(fins)} fin sets found; the CFD mesh carries only the largest "
+            f"(h={fin_data['height']:.3f} m). Canards/secondary sets are omitted."
+        )
+
     logger.info(
         f"CFD geometry from assembly: L={total_L:.3f} m  "
-        f"body_r={body_r:.4f} m  nose_L={nose_L:.3f} m  "
+        f"body_r={body_r:.4f} m  nose_L={nose_L:.3f} m ({nose_shape})  "
+        f"profile: {len(profile)} stations  "
         f"fins: {fin_data['count']}× h={fin_data['height']:.3f} m  "
         f"Cr={fin_data['root_chord']:.3f} m  Ct={fin_data['tip_chord']:.3f} m  "
         f"sweep={fin_data['sweep_deg']:.1f}°"
@@ -156,6 +218,9 @@ def extract_cfd_geometry(assembly) -> dict:
 
     return {
         "length":       total_L,
+        # [(x_from_nose, radius), …] ascending in x. Empty ⇒ mesher falls back.
+        "profile":      [[float(x), float(r)] for x, r in profile],
+        "nose_shape":   nose_shape,
         # Body (max) diameter drives the CFD reference area. Provide it
         # explicitly so SU2 normalises forces by the true body frontal area
         # instead of guessing from the STL bounding box — which wrongly picks up
@@ -258,6 +323,17 @@ def _component_axial_length(comp) -> float:
     return 0.0
 
 
+def _nose_profile(shape: str, length: float, radius: float, n: int = 50):
+    """Meridian (zs, rs) of a nose cone of the given shape.
+
+    Thin wrapper over the shared builder in ``visualization.viewer_3d`` so the
+    exported STL, the CFD solid and every on-screen view use one curve. Kept as
+    a module-level name because the headless fallback below has to be able to
+    substitute it when the viewer is unimportable.
+    """
+    return _shared_nose_profile(shape, length, radius, n)
+
+
 def _assembly_profile(assembly):
     """Walk the stack nose→tail and return (zs, rs) of the outer mold line.
 
@@ -271,7 +347,9 @@ def _assembly_profile(assembly):
         for comp in stage.children:
             if isinstance(comp, NoseCone):
                 r = comp.diameter / 2
-                pz, pr = _ogive_profile(comp.length, r)   # pz: 0(base,r=R)→L(tip,r≈0)
+                # pz: 0(base,r=R)→L(tip,r≈0)
+                pz, pr = _nose_profile(getattr(comp, "shape", "Ogive"),
+                                       comp.length, r)
                 for zz, rr in zip(pz[::-1], pr[::-1]):    # tip first so z descends
                     zs.append(z - (comp.length - zz))
                     rs.append(float(rr))
@@ -289,6 +367,95 @@ def _assembly_profile(assembly):
                 zs.append(z - comp.length); rs.append(comp.aft_diameter / 2)
                 z -= comp.length
     return zs, rs
+
+
+def _simplify_profile(prof: list, tol: float) -> list:
+    """Drop profile stations that lie within ``tol`` of the chord they sit on.
+
+    Douglas–Peucker. A straight cone described by 50 sampled stations collapses
+    back to its two endpoints, so the CFD solid is one exact frustum rather than
+    a 50-facet polyline — which both keeps the Taylor–Maccoll cone geometry
+    exact and stops the mesher from resolving 48 imaginary creases.
+    """
+    if len(prof) < 3:
+        return list(prof)
+
+    keep = [False] * len(prof)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(prof) - 1)]
+    while stack:
+        i0, i1 = stack.pop()
+        if i1 <= i0 + 1:
+            continue
+        x0, r0 = prof[i0]
+        x1, r1 = prof[i1]
+        dx, dr = x1 - x0, r1 - r0
+        seg = math.hypot(dx, dr)
+        worst, worst_i = -1.0, -1
+        for i in range(i0 + 1, i1):
+            x, r = prof[i]
+            if seg < 1e-15:
+                d = math.hypot(x - x0, r - r0)
+            else:
+                d = abs(dr * (x - x0) - dx * (r - r0)) / seg
+            if d > worst:
+                worst, worst_i = d, i
+        if worst > tol and worst_i > 0:
+            keep[worst_i] = True
+            stack.append((i0, worst_i))
+            stack.append((worst_i, i1))
+    return [p for p, k in zip(prof, keep) if k]
+
+
+def cfd_profile(assembly, n_max: int = 60) -> list:
+    """Outer mold line as ``[(x_from_nose, radius), …]`` in the CFD frame.
+
+    x runs 0 (nose tip) → total_length (base), the frame ``cfd/meshing.py``
+    meshes in. This is what lets the mesher build transitions, boattails and
+    shaped noses instead of the cone + cylinder it previously assumed — a
+    boattailed rocket was meshed as a straight tube, which turns its boattail
+    into a flat base and inflates base drag.
+
+    Radii are floored just above zero: an exactly-zero station makes the OCC
+    revolve degenerate, the same reason the old cone was built with a 1 mm tip.
+    Coincident stations (a diameter step between two tubes) are separated by a
+    hair so the step becomes a very short frustum rather than a zero-length edge.
+    """
+    zs, rs = _assembly_profile(assembly)
+    if len(zs) < 2:
+        return []
+
+    total_L = float(assembly.total_length())
+    if total_L <= 0:
+        return []
+
+    prof = sorted(((total_L - z, max(float(r), 0.0)) for z, r in zip(zs, rs)),
+                  key=lambda p: p[0])
+
+    r_min = max(total_L * 1e-4, 1e-6)
+    eps_x = max(total_L * 1e-6, 1e-9)
+
+    out: list = []
+    for x, r in prof:
+        x = min(max(x, 0.0), total_L)
+        r = max(r, r_min)
+        if out and x - out[-1][0] < eps_x:
+            if abs(r - out[-1][1]) <= r_min:
+                continue                      # true duplicate station
+            x = out[-1][0] + eps_x            # diameter step → tiny frustum
+        out.append((x, r))
+
+    if len(out) < 2:
+        return []
+
+    out = _simplify_profile(out, tol=r_min)
+    if len(out) > n_max:
+        # Tighten until it fits: cheaper than meshing 200 near-collinear facets.
+        tol = r_min
+        while len(out) > n_max and tol < total_L:
+            tol *= 2.0
+            out = _simplify_profile(out, tol=tol)
+    return out
 
 
 def _profile_radius_at(zs, rs, z_query: float) -> float:
@@ -369,7 +536,7 @@ def _component_to_mesh(comp, z_top, parent_r, meshes):
             r_sh = getattr(comp, "shoulder_diameter", comp.diameter) / 2 or r * 0.95
             meshes.append(_make_tube(z_base, L_sh, r_sh))
 
-        pz, pr = _ogive_profile(L_nose, r)
+        pz, pr = _nose_profile(getattr(comp, "shape", "Ogive"), L_nose, r)
         pz = pz + z_og
         meshes.append(_make_surface_of_revolution(pz, pr))
         return z_base, r

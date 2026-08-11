@@ -158,6 +158,19 @@ LINEAR_SOLVER_ITER= 20
 
 % ── Convergence ───────────────────────────────────────────
 ITER= {max_iter}
+% CONV_FIELD is what selects the criteria, and it was never set — so SU2 fell
+% back to its default of RMS_DENSITY alone and the CONV_CAUCHY_* pair below
+% sat inert for every run ever made. Listing DRAG activates them.
+%
+% SU2 requires ALL listed fields to converge, which is the behaviour we want:
+% the density residual alone is a poor stopping rule here. Residuals are
+% DIMENSIONAL (see REF_DIMENSIONALIZATION), so their starting magnitude
+% depends on the flow scale rather than on the solution quality — a measured
+% M=0.8 case began at rms[Rho]=-3.04 and rms[RhoE]=+2.44, which makes a fixed
+% -6 floor mean "3 decades" for one equation and "8 decades" for another.
+% Requiring the drag coefficient to also go stationary pins convergence to the
+% quantity the polars actually report.
+CONV_FIELD= (RMS_DENSITY, DRAG)
 CONV_RESIDUAL_MINVAL= -{conv_order}
 CONV_STARTITER= {conv_startiter}
 CONV_CAUCHY_ELEMS= 100
@@ -184,13 +197,63 @@ SURFACE_FILENAME= surface_flow
 OUTPUT_FILES= (RESTART, PARAVIEW, SURFACE_PARAVIEW)
 OUTPUT_WRT_FREQ= 250
 
-% Volume fields: solution + derived
-VOLUME_OUTPUT= COORDINATES, SOLUTION, PRIMITIVE, PRESSURE_COEFFICIENT, MACH, VORTICITY, Q_CRITERION, LAMBDA2, Y_PLUS
+% Volume fields: solution + derived.
+% VORTICITY and LAMBDA2 were requested here for a long time but this SU2
+% build emits neither — verified absent from flow.vtu on every run. They are
+% recomputed from the velocity gradient in cfd/post_processing.py
+% (compute_derived_fields) instead, so keeping them in the list only made the
+% config claim more than it delivered. Q_CRITERION *is* written and is kept.
+VOLUME_OUTPUT= COORDINATES, SOLUTION, PRIMITIVE, PRESSURE_COEFFICIENT, MACH, Q_CRITERION, Y_PLUS
 % Surface fields: wall quantities for post-processing
 % SURFACE_OUTPUT is not supported in all SU2 versions; surface VTK inherits from VOLUME_OUTPUT
 % SURFACE_OUTPUT= COORDINATES, SOLUTION, PRESSURE_COEFFICIENT, SKIN_FRICTION, Y_PLUS
 """
 
+
+
+def _wall_spacing_from_su2_mesh(mesh_path: Path) -> Optional[float]:
+    """Median edge length of the ``rocket_wall`` triangles in a .su2 mesh.
+
+    Used to predict y+ before the solve. Returns None if the file cannot be
+    parsed — this is diagnostics, so it must never take a run down with it.
+    """
+    try:
+        import numpy as np
+        with open(mesh_path, "r") as fh:
+            lines = fh.read().split("\n")
+
+        points = None
+        tris: list[tuple[int, int, int]] = []
+        i = 0
+        while i < len(lines):
+            head = lines[i].strip()
+            if head.startswith("NPOIN="):
+                n = int(head.split("=")[1].split()[0])
+                points = np.empty((n, 3), dtype=float)
+                for j in range(n):
+                    points[j] = [float(v) for v in lines[i + 1 + j].split()[:3]]
+                i += n
+            elif head.startswith("MARKER_TAG=") and "rocket_wall" in head:
+                n = int(lines[i + 1].split("=")[1])
+                for j in range(n):
+                    parts = lines[i + 2 + j].split()
+                    if parts and parts[0] == "5":       # VTK triangle
+                        tris.append((int(parts[1]), int(parts[2]), int(parts[3])))
+                i += n + 1
+            i += 1
+
+        if points is None or not tris:
+            return None
+        tri = points[np.asarray(tris)]
+        edges = np.concatenate([
+            np.linalg.norm(tri[:, 1] - tri[:, 0], axis=1),
+            np.linalg.norm(tri[:, 2] - tri[:, 1], axis=1),
+            np.linalg.norm(tri[:, 0] - tri[:, 2], axis=1),
+        ])
+        return float(np.median(edges))
+    except Exception as exc:
+        logger.debug(f"Wall-spacing probe failed on {mesh_path}: {exc}")
+        return None
 
 
 def _integrate_surface_forces(
@@ -299,6 +362,12 @@ class SU2Solver(CFDSolver):
             geometry_dict=cfg.geometry_dict,   # exact dims if available
             custom_wall_size=cfg.custom_wall_size,
             target_element_count=cfg.target_element_count,
+            external_cad=cfg.external_cad,     # arbitrary imported body
+            flow_axis=cfg.flow_axis,
+            cad_info=cfg.cad_info,
+            cad_units=cfg.cad_units,
+            cad_wrap=cfg.cad_wrap,
+            cad_wrap_resolution=cfg.cad_wrap_resolution,
         )
         self._mesh_path = out_mesh
         logger.info(f"Mesh written to {out_mesh}")
@@ -318,9 +387,24 @@ class SU2Solver(CFDSolver):
         # Reference values
         ref_length = 1.0
         ref_area = 0.1
-        
+
+        # Priority 0: external CAD — measured projected frontal area and
+        # flow-wise bbox extent. An arbitrary body has no "body diameter" to
+        # infer a reference from, so it is measured off the tessellation.
+        if cfg.external_cad and cfg.cad_info:
+            _ci = cfg.cad_info
+            _fa = float(_ci.get("frontal_area", 0.0) or 0.0)
+            if _fa > 0:
+                ref_area = _fa
+            else:
+                logger.warning("CAD frontal area is zero — keeping the default "
+                               "reference area; coefficients will be off.")
+            ref_length = float(_ci.get("length", 1.0) or 1.0)
+            logger.info(f"Reference values from imported CAD: "
+                        f"A={ref_area:.6f} m² (projected frontal)  "
+                        f"L={ref_length:.4f} m (flow-axis extent)")
         # Priority 1: Use exact geometry dict parameters (avoids fin span bug)
-        if cfg.geometry_dict and "max_diameter" in cfg.geometry_dict:
+        elif cfg.geometry_dict and "max_diameter" in cfg.geometry_dict:
             max_d = cfg.geometry_dict["max_diameter"]
             ref_area = math.pi * (max_d / 2.0) ** 2
             ref_length = cfg.geometry_dict.get("length", 1.0)
@@ -348,6 +432,16 @@ class SU2Solver(CFDSolver):
                             f"ref_A={ref_area:.6f} m² (body_d={body_diam:.4f} m)")
             except Exception as e:
                 logger.warning(f"Could not read STL bounds: {e}. Using defaults.")
+
+        # Explicit user overrides win over every automatic source above. Applied
+        # last (and independently) so setting only one of the two keeps the
+        # measured value for the other.
+        if cfg.ref_area_override and cfg.ref_area_override > 0:
+            ref_area = float(cfg.ref_area_override)
+            logger.info(f"Reference area overridden by user: {ref_area:.6f} m²")
+        if cfg.ref_length_override and cfg.ref_length_override > 0:
+            ref_length = float(cfg.ref_length_override)
+            logger.info(f"Reference length overridden by user: {ref_length:.4f} m")
 
         Re = rho * V_inf * ref_length / mu
         q_inf = 0.5 * rho * V_inf ** 2
@@ -383,10 +477,36 @@ class SU2Solver(CFDSolver):
         is_rans = turb_cfg["solver"] == "RANS"
 
         # Wall BC: Euler uses slip wall, viscous uses no-slip heatflux.
-        # NOTE: no wall functions — SU2's STANDARD_WALL_FUNCTION diverges
-        # (T_Wall < 0 → NaN) from a freestream cold start on this tet-only
-        # mesh with strongly varying y+. Without a wall model, skin
-        # friction is under-resolved at y+ >> 1 (known accuracy limit).
+        #
+        # NO wall functions. This is a measured decision, not caution — do not
+        # add MARKER_WALL_FUNCTIONS here without re-running the numbers below.
+        #
+        # STANDARD_WALL_FUNCTION diverges (T_Wall < 0 -> NaN) from a freestream
+        # cold start. From a CONVERGED restart it does run to completion, which
+        # looks like the fix and is not: SU2's wall-coefficient Newton solve
+        # failed on 5554 of 6318 wall points (88%) on a measured M=0.8 case. On
+        # those points SU2 pins y+ at exactly 30.0 -- the value is a fallback,
+        # not a solution -- and skin friction collapses to a median 3.1e-8,
+        # i.e. no wall shear at all. On the 12% where it did converge Cf came
+        # out at 1.46e-3 against a flat-plate 1.9e-3, so the model is right
+        # where it works and silently absent where it does not. Total drag
+        # rose 0.079 -> 0.137 and the wall-temperature violation fell from
+        # 19.1% to 4.2%, both of which read like improvements and are partly
+        # just the missing viscous heating on 88% of the surface.
+        #
+        # Tuning it makes it worse, not better: WALLMODEL_MAXITER= 1000 with
+        # WALLMODEL_RELFAC= 0.1 and WALLMODEL_MINYPLUS= 2.0 raised the failure
+        # rate to 6222/6318 (98.5%), and it sat there rather than working its
+        # way down as the restart advanced.
+        #
+        # Root cause is the mesh, not the model. A wall function is only valid
+        # for 30 < y+ < 300; the first cell here sits near y+ 3500 (see
+        # predict_wall_yplus below), far outside the band the Newton solve can
+        # invert. Both a low-Re model and a wall function fail on the same
+        # cause -- no prism layers, blocked by the OCC boolean-cut domain (see
+        # cfd/meshing.py step 7). Until that is solved, wall shear from RANS is
+        # not trustworthy on this mesh and total drag should come from the
+        # hybrid Euler + analytic-friction mode instead.
         if is_viscous:
             wall_bc = "MARKER_HEATFLUX= ( rocket_wall, 0.0 )"
         else:
@@ -396,6 +516,35 @@ class SU2Solver(CFDSolver):
         turb_numerics = "CONV_NUM_METHOD_TURB= SCALAR_UPWIND\nMUSCL_TURB= NO" if is_rans else ""
         turb_time_discre = "TIME_DISCRE_TURB= EULER_IMPLICIT" if is_rans else ""
         turb_hist_fields = "RMS_TKE, " if is_rans else ""
+
+        # ── Predict wall resolution before spending minutes on the solve ─────
+        # A tet-only mesh cannot put a cell close enough to the wall for a
+        # low-Re turbulence model, but nothing downstream says so: the Y+ view
+        # renders a smooth field and the polars report a confident Cd whether
+        # or not the boundary layer was resolved. Say it up front instead.
+        if is_viscous and self._mesh_path and Path(self._mesh_path).is_file():
+            spacing = _wall_spacing_from_su2_mesh(Path(self._mesh_path))
+            if spacing:
+                from cfd.boundary_layer import predict_wall_yplus
+                yp = predict_wall_yplus(
+                    wall_spacing=spacing, velocity=V_inf, density=rho,
+                    viscosity=mu, ref_length=ref_length,
+                )
+                msg = (
+                    f"Predicted wall y+ ≈ {yp['y_plus']:.0f} ({yp['regime']}) "
+                    f"from a {spacing*1000:.2f} mm wall spacing. "
+                    f"y+ = 1 would need {yp['spacing_for_yplus_1']*1e6:.2f} µm."
+                )
+                if yp["y_plus"] > 30:
+                    logger.warning(
+                        msg + " Skin friction, wall shear and wall heat transfer "
+                        "from this run are NOT trustworthy — the boundary layer "
+                        "is unresolved and there is no wall model. Pressure drag "
+                        "and Cp are still usable; for total drag prefer the "
+                        "hybrid Euler + analytic-friction mode."
+                    )
+                else:
+                    logger.info(msg)
 
         config_text = _SU2_CONFIG_TEMPLATE.format(
             solver_type=turb_cfg["solver"],
@@ -653,7 +802,14 @@ class SU2Solver(CFDSolver):
             # land anywhere in the cycle. Averaging the tail gives the
             # cycle-mean force; the window spread doubles as a force-convergence
             # check independent of the (never-satisfied) residual floor.
-            tail_n = min(50, len(rows))
+            # Never let the window reach back into the startup transient: on a
+            # fast-converging case (small clean body, warm start, imported CAD)
+            # the whole run can be ~50 iterations, and the first few carry
+            # order-of-magnitude garbage — a sphere that settles at CD=0.244
+            # peaks at CD=7.1 around iteration 4, and a flat 50-row mean
+            # reported 0.877. Capping at half the run leaves long solves
+            # (thousands of iterations) on the original 50-row window.
+            tail_n = max(1, min(50, len(rows) // 2))
 
             def _get_tail(key):
                 """Mean of a column over the last tail_n rows (case-insensitive)."""
@@ -707,26 +863,100 @@ class SU2Solver(CFDSolver):
                 aoa_deg=self.config.angle_of_attack_deg,
             )
             if split is not None:
-                result.cd_pressure = abs(split["cd_pressure"])
+                # Signed, not abs(): cd_base is computed by the same integral
+                # over a subset of the same cells, so folding the sign here
+                # would break cd_base + cd_forebody_pressure == cd_pressure.
+                # A negative pressure drag is physically wrong anyway — it means
+                # the surface solution or the wall normals are bad, and hiding
+                # that behind abs() turned it into a plausible-looking number.
+                result.cd_pressure = split["cd_pressure"]
                 result.cd_friction = abs(split["cd_friction"])
                 result.yplus_mean = split["yplus_mean"]
+                if result.cd_pressure < 0:
+                    logger.warning(
+                        f"Integrated pressure drag is negative "
+                        f"(Cd_p={result.cd_pressure:.5f}) — check the wall "
+                        f"normals and that the solution converged. The base/"
+                        f"wave split below inherits the problem."
+                    )
             else:
                 result.cd_pressure = 0.0
                 result.cd_friction = 0.0
-            # Estimate base drag and wave drag from total
-            if result.cd > 0 and result.cd_pressure + result.cd_friction > 0:
-                accounted = result.cd_pressure + result.cd_friction
-                remainder = max(0.0, result.cd - accounted)
-                if self.config.mach > 0.8:
-                    result.cd_wave = remainder * 0.7
-                    result.cd_base = remainder * 0.3
-                else:
-                    result.cd_base = remainder
-            elif result.cd > 0:
-                # SU2 didn't output decomposition — estimate
-                result.cd_pressure = result.cd * 0.55
-                result.cd_friction = result.cd * 0.30
-                result.cd_base = result.cd * 0.15
+                logger.warning(
+                    "Surface force integration unavailable — the pressure/"
+                    "friction split is reported as zero rather than guessed."
+                )
+
+            # ── Base and wave drag: both solved, neither apportioned ──────────
+            # These are COMPONENTS OF cd_pressure, not additions to it: the
+            # total is always cd = cd_pressure + cd_friction. The previous code
+            # took (cd - cd_pressure - cd_friction), which is ~0 for a converged
+            # solve, and split that residue 70/30 wave/base — so both numbers
+            # were an artefact of integration error, not physics.
+            from cfd.drag_decomposition import (
+                base_drag_from_surface, split_pressure_drag,
+            )
+            _p_inf = _meta.get("P", 101325.0)
+            _q_inf = _meta.get("dynamic_pressure", 1.0)
+            _A_ref = _meta.get("ref_area", 0.1)
+            _L_ref = _meta.get("ref_length", 1.0)
+
+            base = base_drag_from_surface(
+                surf_vtk, p_inf=_p_inf, q_inf=_q_inf, ref_area=_A_ref,
+                # Same wind axis _integrate_surface_forces used above, so the
+                # forebody remainder below is a like-for-like subtraction.
+                aoa_deg=self.config.angle_of_attack_deg,
+            )
+            if base is not None:
+                result.cd_base = base["cd_base"]
+                result.base_area_m2 = base["base_area"]
+                logger.info(
+                    f"Base drag (integrated over {base['n_cells']} rearward-facing "
+                    f"cells, {base['base_area']:.6f} m² projected): "
+                    f"Cd_base={result.cd_base:.5f}  mean Cp={base['base_cp_mean']:.4f}"
+                )
+            else:
+                result.cd_base = 0.0
+
+            fore = split_pressure_drag(
+                result.cd_pressure, result.cd_base, self.config.mach
+            )
+            result.cd_forebody_pressure = fore["cd_forebody_pressure"]
+            result.cd_wave = fore["cd_wave"]
+            result.drag_decomposition_method = fore["method"]
+            logger.info(
+                f"Pressure split: Cd_p={result.cd_pressure:.5f} = "
+                f"base {result.cd_base:.5f} + forebody "
+                f"{result.cd_forebody_pressure:.5f}  →  "
+                f"Cd_wave={result.cd_wave:.5f} [{fore['method']}]"
+            )
+
+            # Oswatitsch entropy-production integral — mesh-quality diagnostic
+            # only (see cfd/drag_decomposition.py); never reported, and skipped
+            # unless someone has turned DEBUG on, since it re-reads the volume
+            # mesh and differentiates it.
+            if logger.isEnabledFor(logging.DEBUG):
+                try:
+                    from cfd.drag_decomposition import wave_drag_from_volume
+                    import pyvista as _pv
+                    _bb = _pv.read(str(surf_vtk)).bounds if surf_vtk.is_file() else None
+                    _osw = wave_drag_from_volume(
+                        vol_vtk, p_inf=_p_inf, rho_inf=_meta.get("rho", 1.225),
+                        T_inf=_meta.get("T", 288.15),
+                        u_inf=_meta.get("v_inf", 1.0),
+                        q_inf=_q_inf, ref_area=_A_ref, ref_length=_L_ref,
+                        mach=self.config.mach, body_bounds=_bb,
+                    )
+                    if _osw:
+                        logger.debug(
+                            f"[diagnostic] Oswatitsch Cd_wave={_osw['cd_wave']:.5f} "
+                            f"over {_osw['n_shock_cells']} shock cells vs "
+                            f"surface-integral {result.cd_wave:.5f} — ratio "
+                            f"{_osw['cd_wave']/max(result.cd_wave,1e-9):.2f} "
+                            f"(≫1 means heavy numerical entropy)"
+                        )
+                except Exception as e:
+                    logger.debug(f"Oswatitsch diagnostic unavailable: {e}")
 
             # Force components — use coefficients * q * A for reliability
             # SU2 FORCE_X/Z columns are non-dimensional; convert to Newtons
@@ -741,6 +971,8 @@ class SU2Solver(CFDSolver):
             meta = getattr(self, '_flow_meta', {})
             result.v_inf = meta.get("v_inf", self.config.mach * 340.0)
             result.mach = self.config.mach
+            result.altitude_m = self.config.altitude_m
+            result.angle_of_attack_deg = self.config.angle_of_attack_deg
             result.reynolds = meta.get("reynolds", 0.0)
             result.dynamic_pressure = meta.get("dynamic_pressure", 0.0)
             result.ref_length = meta.get("ref_length", 1.0)
@@ -768,6 +1000,11 @@ class SU2Solver(CFDSolver):
             _true_len = result.ref_length
             if self.config.geometry_dict and "length" in self.config.geometry_dict:
                 _true_len = self.config.geometry_dict["length"]
+            elif self.config.external_cad and self.config.cad_info:
+                # Imported body: the CP must lie within the body's own flow-wise
+                # extent, which is the measured bbox length — not ref_length,
+                # which the user may have overridden to a chord or span.
+                _true_len = float(self.config.cad_info.get("length", _true_len))
             # Threshold scales with the swept normal force so a single near-zero-AoA
             # point is excluded (CN→0 makes Cm/CN indeterminate) but every genuinely
             # loaded point is kept and computed independently.
@@ -821,11 +1058,72 @@ class SU2Solver(CFDSolver):
                 last_rho = _get("rms[Rho]")
                 conv_floor = math.log10(self.config.convergence_tolerance)  # e.g. -6
                 stopped_early = len(rows) < self.config.max_iterations
-                result.converged = (
-                    (last_rho <= conv_floor) or stopped_early or forces_stationary
-                )
                 result.final_residual = last_rho
-            except Exception:
+
+                # ── Convergence, with the failure cases actually excluded ─────
+                # "Stopped before the iteration cap" used to be sufficient on its
+                # own, which made every abnormal termination look converged —
+                # including a solve that went non-physical and exited 0. That
+                # flag gates inject_cfd_results_into_engine, so a diverged run
+                # could push garbage coefficients into the sim engine.
+                #
+                # Now a run must clear three hurdles: the reported forces have to
+                # be finite numbers, the residual must not have blown up from its
+                # own best value, and one genuine convergence signal has to be
+                # present.
+                _vals = [result.cd, result.cl, result.cm, last_rho]
+                finite = all(isinstance(v, float) and math.isfinite(v)
+                             for v in _vals)
+
+                # Divergence: the density residual climbing far above its best
+                # is the signature of a solution running away, regardless of
+                # where it happens to stop.
+                _rhos = []
+                for _r in rows:
+                    try:
+                        _v = float(_r.get("rms[Rho]", "nan"))
+                        if math.isfinite(_v):
+                            _rhos.append(_v)
+                    except (TypeError, ValueError):
+                        pass
+                best_rho = min(_rhos) if _rhos else last_rho
+                diverging = bool(_rhos) and (last_rho > best_rho + 2.0)  # 100x
+
+                hit_floor = finite and last_rho <= conv_floor
+                result.converged = bool(
+                    finite and not diverging
+                    and (hit_floor or forces_stationary or stopped_early)
+                )
+
+                if not result.converged:
+                    if not finite:
+                        logger.warning(
+                            f"Not converged: non-finite results "
+                            f"(Cd={result.cd}, Cl={result.cl}, Cm={result.cm}, "
+                            f"rms[Rho]={last_rho}). The solve went non-physical."
+                        )
+                    elif diverging:
+                        logger.warning(
+                            f"Not converged: residual diverged — rms[Rho] ended "
+                            f"at {last_rho:.3f} against a best of {best_rho:.3f} "
+                            f"({last_rho - best_rho:.1f} decades worse)."
+                        )
+                    else:
+                        logger.warning(
+                            f"Not converged: rms[Rho]={last_rho:.3f} above the "
+                            f"{conv_floor:.0f} floor, forces not stationary, and "
+                            f"the run used all {self.config.max_iterations} "
+                            f"iterations."
+                        )
+                elif stopped_early and not (hit_floor or forces_stationary):
+                    logger.info(
+                        f"Converged on early stop: SU2 ended at iteration "
+                        f"{len(rows)} of {self.config.max_iterations} with "
+                        f"rms[Rho]={last_rho:.3f} (a Cauchy criterion fired)."
+                    )
+            except Exception as e:
+                logger.warning(f"Convergence check failed ({e}) — "
+                               f"reporting not converged.")
                 result.converged = False
 
             # Build residual history for the convergence plot

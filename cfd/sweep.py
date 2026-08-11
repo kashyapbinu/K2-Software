@@ -122,22 +122,28 @@ class SweepData:
         return [p.result.cd_friction for p in self._sorted()]
 
     def cd_wave(self) -> list[float]:
-        """Sweep-derived wave drag.
+        """Per-point wave drag, straight from the solver.
 
-        SU2 splits total drag into pressure + viscous with no leftover, and
-        wave drag lives *inside* pressure drag — so the solver's per-point
-        ``cd_wave`` is always ~0. Across a Mach sweep we can recover it: wave
-        drag at Mach M ≈ pressure drag at M minus the subsonic-bucket minimum
-        pressure drag (the shock-free baseline). Only meaningful for a Mach
-        sweep with ≥2 points; returns the solver field otherwise.
+        This used to reconstruct wave drag across a Mach sweep by subtracting
+        the drag-bucket minimum pressure drag, because the solver's per-point
+        ``cd_wave`` was the residue of (total - pressure - friction) and so was
+        always ~0. It is now solved per point — the forebody part of the
+        integrated pressure drag, base drag removed by its own surface integral
+        (cfd/drag_decomposition.py) — so the reconstruction is both unnecessary
+        and worse: the old baseline was a *pressure* drag minimum, which carries
+        base drag in it, and subtracting it took base drag out of a wave-drag
+        number instead of out of the forebody term.
         """
-        if self.var != "mach":
-            return [p.result.cd_wave for p in self._sorted()]
-        cdp = self.cd_pressure()
-        if len(cdp) < 2:
-            return [p.result.cd_wave for p in self._sorted()]
-        baseline = min(cdp)   # drag-bucket minimum = shock-free pressure drag
-        return [max(0.0, c - baseline) for c in cdp]
+        return [p.result.cd_wave for p in self._sorted()]
+
+    def cd_forebody_pressure(self) -> list[float]:
+        """Forebody (non-base) pressure drag per point. Equals cd_wave at
+        M >= 0.8; below that it is the numerical/form pressure drag that an
+        inviscid body should not have, kept visible rather than relabelled."""
+        return [p.result.cd_forebody_pressure for p in self._sorted()]
+
+    def cd_base(self) -> list[float]:
+        return [p.result.cd_base for p in self._sorted()]
 
 
 # ── Value-list builder ───────────────────────────────────────────────────────
@@ -223,6 +229,55 @@ def analytic_friction_cd(
     return cd_f
 
 
+def analytic_friction_cd_cad(
+    cad_info: dict,
+    reynolds: float,
+    mach: float,
+    ref_area: float,
+) -> Optional[float]:
+    """Flat-plate skin-friction Cd for an imported CAD body.
+
+    Same Schlichting/compressibility build-up as :func:`analytic_friction_cd`,
+    but driven by the measured wetted area instead of a rocket component
+    breakdown — the only wetted-area information an arbitrary body carries.
+
+    The form factor uses the body's own slenderness (flow-wise length over
+    equivalent cross-stream diameter) via Hoerner's body-of-revolution
+    expression, clamped for stubby shapes where it blows up. Coarser than the
+    per-component rocket version, and it does not know a wing from a fuselage —
+    treat it as an engineering estimate, not a validated number.
+    """
+    if not cad_info or reynolds <= 1e3 or ref_area <= 0:
+        return None
+    s_wet = float(cad_info.get("wetted_area", 0.0) or 0.0)
+    L = float(cad_info.get("length", 0.0) or 0.0)
+    if s_wet <= 0 or L <= 0:
+        return None
+
+    re = max(reynolds, 1e4)
+    cf = 0.455 / (math.log10(re) ** 2.58)
+    cf *= (1.0 + 0.144 * mach * mach) ** -0.65
+
+    # Equivalent diameter from the measured frontal area (falls back to the
+    # cross-stream bbox when the projection came out unusable).
+    frontal = float(cad_info.get("frontal_area", 0.0) or 0.0)
+    if frontal > 0:
+        d_eq = 2.0 * math.sqrt(frontal / math.pi)
+    else:
+        d_eq = max(
+            float(cad_info.get("cross_width", 0.0) or 0.0),
+            float(cad_info.get("cross_height", 0.0) or 0.0),
+        )
+    if d_eq <= 0:
+        return None
+
+    # Hoerner body form factor. Below f≈2 the 60/f³ term dominates
+    # unphysically, so the fineness used here is floored.
+    fineness = max(L / d_eq, 2.0)
+    ff = 1.0 + 60.0 / fineness ** 3 + 0.0025 * fineness
+    return cf * ff * s_wet / ref_area
+
+
 # ── Mesh staging ─────────────────────────────────────────────────────────────
 
 def stage_mesh(mesh_path: Path, work_dir: Path) -> Path:
@@ -290,10 +345,16 @@ def run_sweep_point(
     # analytic flat-plate build-up to the total drag. Pressure/wave drag, lift,
     # moments and CP keep their integrated (inviscid) values untouched.
     if cfg.euler_analytic_friction:
-        cd_f = analytic_friction_cd(
-            cfg.geometry_dict, result.reynolds, result.mach,
-            result.reference_area_m2,
-        )
+        if cfg.external_cad and cfg.cad_info:
+            cd_f = analytic_friction_cd_cad(
+                cfg.cad_info, result.reynolds, result.mach,
+                result.reference_area_m2,
+            )
+        else:
+            cd_f = analytic_friction_cd(
+                cfg.geometry_dict, result.reynolds, result.mach,
+                result.reference_area_m2,
+            )
         if cd_f is not None:
             result.cd += cd_f
             result.cd_friction = cd_f
@@ -440,7 +501,8 @@ def compute_sweep_metrics(data: SweepData) -> dict:
         # Prefer the onset definition; fall back to classic if onset not found.
         metrics["drag_divergence_mach"] = m_dd if m_dd is not None else m_dd_classic
 
-        # Sweep-derived wave drag (pressure drag above the bucket baseline).
+        # Wave drag, solved per point (forebody share of the integrated
+        # pressure drag) — not reconstructed off the drag-bucket baseline.
         wd = data.cd_wave()
         if wd:
             metrics["wave_drag_peak"] = max(wd)

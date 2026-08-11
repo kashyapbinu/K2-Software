@@ -96,7 +96,7 @@ def build_rocket_regions(state, assembly):
     if not _PYVISTA:
         return {}, 0.0
     from visualization.viewer_3d import (
-        _ogive_profile, _make_surface_of_revolution, _make_tube, _make_frustum,
+        nose_profile, _make_surface_of_revolution, _make_tube, _make_frustum,
     )
     from core.components import (
         NoseCone, BodyTube, Transition, TrapezoidalFinSet, InnerTube,
@@ -151,7 +151,9 @@ def build_rocket_regions(state, assembly):
                     r_sh = getattr(comp, "shoulder_diameter", comp.diameter) / 2 or r * 0.95
                     add(region, _make_tube(z_base, L_sh, r_sh))
                 z_og = z_base + L_sh
-                pz, pr = _ogive_profile(L_nose, r, n=40)
+                pz, pr = nose_profile(
+                    getattr(comp, "shape", "Ogive"), L_nose, r, n=40
+                )
                 add(region, _make_surface_of_revolution(pz + z_og, pr))
 
             elif isinstance(comp, BodyTube):

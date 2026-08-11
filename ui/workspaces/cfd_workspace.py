@@ -17,8 +17,10 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from ui.icons import icon
+import numpy as np
 import pyvista as pv
 from pyvistaqt import QtInteractor
+from cfd.post_processing import field_percentiles
 
 logger = logging.getLogger("K2.CFD.Workspace")
 
@@ -138,6 +140,15 @@ class SolverThread(QThread):
             "geometry_dict":        cfg.geometry_dict,
             "custom_wall_size":     cfg.custom_wall_size,
             "target_element_count": cfg.target_element_count,
+            # External-CAD mode. Without these three the subprocess silently
+            # falls back to the parametric rocket and meshes the wrong body.
+            "external_cad":         (str(cfg.external_cad)
+                                     if cfg.external_cad else None),
+            "flow_axis":            cfg.flow_axis,
+            "cad_info":             cfg.cad_info,
+            "cad_units":            cfg.cad_units,
+            "cad_wrap":             cfg.cad_wrap,
+            "cad_wrap_resolution":  cfg.cad_wrap_resolution,
         }
 
         params_file = cfg.work_dir / "_mesh_params.json"
@@ -164,6 +175,13 @@ class SolverThread(QThread):
             "    geometry_dict=params['geometry_dict'],\n"
             "    custom_wall_size=params.get('custom_wall_size'),\n"
             "    target_element_count=params.get('target_element_count'),\n"
+            "    external_cad=(Path(params['external_cad'])\n"
+            "                  if params.get('external_cad') else None),\n"
+            "    flow_axis=params.get('flow_axis', 'auto'),\n"
+            "    cad_info=params.get('cad_info'),\n"
+            "    cad_units=params.get('cad_units', 'auto'),\n"
+            "    cad_wrap=params.get('cad_wrap', False),\n"
+            "    cad_wrap_resolution=params.get('cad_wrap_resolution', 'medium'),\n"
             ")\n"
             "print('MESH_OK')\n",
             encoding="utf-8",
@@ -499,6 +517,15 @@ class SweepThread(QThread):
             "geometry_dict":        cfg.geometry_dict,
             "custom_wall_size":     cfg.custom_wall_size,
             "target_element_count": cfg.target_element_count,
+            # External-CAD mode. Without these three the subprocess silently
+            # falls back to the parametric rocket and meshes the wrong body.
+            "external_cad":         (str(cfg.external_cad)
+                                     if cfg.external_cad else None),
+            "flow_axis":            cfg.flow_axis,
+            "cad_info":             cfg.cad_info,
+            "cad_units":            cfg.cad_units,
+            "cad_wrap":             cfg.cad_wrap,
+            "cad_wrap_resolution":  cfg.cad_wrap_resolution,
         }
         params_file = cfg.work_dir / "_mesh_params.json"
 
@@ -523,6 +550,13 @@ class SweepThread(QThread):
             "    geometry_dict=params['geometry_dict'],\n"
             "    custom_wall_size=params.get('custom_wall_size'),\n"
             "    target_element_count=params.get('target_element_count'),\n"
+            "    external_cad=(Path(params['external_cad'])\n"
+            "                  if params.get('external_cad') else None),\n"
+            "    flow_axis=params.get('flow_axis', 'auto'),\n"
+            "    cad_info=params.get('cad_info'),\n"
+            "    cad_units=params.get('cad_units', 'auto'),\n"
+            "    cad_wrap=params.get('cad_wrap', False),\n"
+            "    cad_wrap_resolution=params.get('cad_wrap_resolution', 'medium'),\n"
             ")\n"
             "print('MESH_OK')\n",
             encoding="utf-8",
@@ -589,6 +623,9 @@ class CFDWorkspace(QWidget):
         self._volume_mesh   = None
         self._surface_mesh  = None
         self._current_stl: Path | None = None
+        # External CAD mode: source file + its measurements (see _load_cad).
+        self._cad_path: Path | None = None
+        self._cad_info: dict | None = None
         self._res_iters: list = []
         self._res_vals:  list = []
         self._v_inf: float = 263.0   # freestream speed (m/s), updated from result
@@ -660,6 +697,116 @@ class CFDWorkspace(QWidget):
         self._rb_cad.toggled.connect(self._btn_browse.setEnabled)
         gl.addWidget(self._btn_browse)
         lay.addWidget(geo_grp)
+
+        # ── Imported CAD setup (visible only in CAD mode) ──
+        # An arbitrary body carries none of the assumptions the rocket path
+        # relies on: which axis faces the flow, and what area the force
+        # coefficients should be normalised by. Both are measured
+        # automatically and both can be overridden here.
+        self._cad_grp = QGroupBox("Imported CAD")
+        self._cad_grp.setStyleSheet(_GRP_SS)
+        cgl = QVBoxLayout(self._cad_grp)
+        cgl.setSpacing(6)
+
+        cad_form = QFormLayout()
+        cad_form.setSpacing(8)
+        cad_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self._cb_flow_axis = QComboBox()
+        self._cb_flow_axis.addItems([
+            "Auto (longest extent)", "X axis", "Y axis", "Z axis",
+        ])
+        self._cb_flow_axis.setToolTip(
+            "Which model axis points into the freestream.\n"
+            "Auto picks the longest bounding-box extent — correct for slender "
+            "bodies, wrong for a wing modelled span-wise. Set it explicitly if "
+            "the preview shows the body sideways to the flow."
+        )
+        self._cb_flow_axis.currentIndexChanged.connect(self._on_cad_option_changed)
+
+        self._cb_cad_units = QComboBox()
+        self._cb_cad_units.addItems([
+            "Auto-detect", "Millimetres (mm)", "Centimetres (cm)",
+            "Metres (m)", "Inches (in)", "Feet (ft)",
+        ])
+        self._cb_cad_units.setToolTip(
+            "Unit the CAD file's coordinates are in. The model is scaled to "
+            "metres on import.\n"
+            "Everything downstream is SI — get this wrong and the reference "
+            "area, Reynolds number and every force coefficient are wrong with "
+            "it (a millimetre model read as metres is 1000x too big).\n"
+            "Auto assumes millimetres for anything over 100 m across."
+        )
+        self._cb_cad_units.currentIndexChanged.connect(self._on_cad_option_changed)
+
+        self._chk_wrap = QCheckBox("Wrap geometry (repair dirty CAD)")
+        self._chk_wrap.setToolTip(
+            "Rebuild the body as a single clean shell by contouring its "
+            "distance field.\n"
+            "Use when meshing fails: it is the only route that survives a "
+            "self-intersecting face or an assembly whose parts interpenetrate, "
+            "because it never reads the original topology.\n\n"
+            "ALTERS THE GEOMETRY — the surface is offset outward, detail below "
+            "the grid spacing is rounded away, and internal passages are sealed. "
+            "Outer mold line only: right for external aero, wrong if you need "
+            "flow through the body."
+        )
+        self._chk_wrap.toggled.connect(self._on_cad_option_changed)
+
+        self._cb_wrap_res = QComboBox()
+        self._cb_wrap_res.addItems(["Coarse", "Medium", "Fine"])
+        self._cb_wrap_res.setCurrentIndex(1)
+        self._cb_wrap_res.setToolTip(
+            "Wrap grid spacing as a fraction of body length: coarse L/60, "
+            "medium L/100, fine L/160.\n"
+            "Finer keeps more detail but costs memory as the cube of the "
+            "resolution."
+        )
+        self._cb_wrap_res.setEnabled(False)
+        self._chk_wrap.toggled.connect(self._cb_wrap_res.setEnabled)
+        self._cb_wrap_res.currentIndexChanged.connect(self._on_cad_option_changed)
+
+        self._sp_ref_area = QDoubleSpinBox()
+        self._sp_ref_area.setRange(0.0, 1e6)
+        self._sp_ref_area.setDecimals(6)
+        self._sp_ref_area.setSuffix(" m²")
+        self._sp_ref_area.setSpecialValueText("Auto (frontal)")
+        self._sp_ref_area.setValue(0.0)
+        self._sp_ref_area.setToolTip(
+            "Reference area for Cd/Cl. 0 = the measured projected frontal "
+            "area. Set it to publish coefficients about another reference "
+            "(e.g. wing planform area)."
+        )
+
+        self._sp_ref_len = QDoubleSpinBox()
+        self._sp_ref_len.setRange(0.0, 1e6)
+        self._sp_ref_len.setDecimals(5)
+        self._sp_ref_len.setSuffix(" m")
+        self._sp_ref_len.setSpecialValueText("Auto (bbox)")
+        self._sp_ref_len.setValue(0.0)
+        self._sp_ref_len.setToolTip(
+            "Reference length for Cm and Reynolds. 0 = the bounding-box extent "
+            "along the flow axis. Set it to a mean chord for wing-type bodies."
+        )
+
+        cad_form.addRow("Units:", self._cb_cad_units)
+        cad_form.addRow("Repair:", self._chk_wrap)
+        cad_form.addRow("Wrap detail:", self._cb_wrap_res)
+        cad_form.addRow("Flow axis:", self._cb_flow_axis)
+        cad_form.addRow("Ref. area:", self._sp_ref_area)
+        cad_form.addRow("Ref. length:", self._sp_ref_len)
+        cgl.addLayout(cad_form)
+
+        self._cad_info_lbl = QLabel("Import a file to see its measurements.")
+        self._cad_info_lbl.setWordWrap(True)
+        self._cad_info_lbl.setStyleSheet(
+            "color:#8b949e; font-size:10px; padding:4px 2px 0 2px;"
+        )
+        cgl.addWidget(self._cad_info_lbl)
+
+        lay.addWidget(self._cad_grp)
+        self._cad_grp.setVisible(False)
+        self._rb_cad.toggled.connect(self._cad_grp.setVisible)
 
         # ── Flow conditions ──
         flow_grp = QGroupBox("Flow Conditions")
@@ -901,9 +1048,12 @@ class CFDWorkspace(QWidget):
         self._cb_ref.setCurrentIndex(1)
         self._cb_ref.currentIndexChanged.connect(self._on_ref_changed)
 
-        self._sp_bl = QSpinBox()
-        self._sp_bl.setRange(5, 30); self._sp_bl.setValue(15)
-        self._sp_bl.setSuffix(" layers")
+        # No "BL Inflation" control: the mesher is tet-only. Prism extrusion is
+        # incompatible with the OCC boolean-cut domain (see cfd/meshing.py), so a
+        # layer count would have been read, threaded through the config and the
+        # meshing subprocess, and then ignored — implying an inflation layer the
+        # mesh does not have. CFDConfig still carries bl_layers/bl_growth at
+        # their defaults for call compatibility.
 
         self._sp_iter = QSpinBox()
         self._sp_iter.setRange(100, 50000); self._sp_iter.setValue(5000)
@@ -916,12 +1066,13 @@ class CFDWorkspace(QWidget):
         self._sp_cores.setSpecialValueText("Auto")   # shown when value == 0
         self._sp_cores.setSuffix(" cores")
         self._sp_cores.setToolTip(
-            "MPI ranks for SU2. Auto uses all cores but one. "
-            "Needs an MPI-built SU2 + mpiexec; falls back to serial otherwise."
+            "Cores SU2 may use. Auto uses all but one, so the UI stays responsive.\n"
+            "The bundled SU2 is an OpenMP build, so this is a thread count on a "
+            "single process. If an MPI-built SU2 and mpiexec are both found it is "
+            "used as an MPI rank count instead."
         )
 
         ml.addRow("Refinement:", self._cb_ref)
-        ml.addRow("BL Inflation:", self._sp_bl)
         ml.addRow("Max Iterations:", self._sp_iter)
         ml.addRow("CPU Cores:", self._sp_cores)
 
@@ -1280,11 +1431,28 @@ class CFDWorkspace(QWidget):
         cf = QFormLayout(coef_grp)
         cf.setSpacing(6)
         cf.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        # Cd = Pressure + Friction (both integrated off the wall solution).
+        # Base and Wave are a further split OF the pressure term, so they are
+        # indented under it and must not be added to the two above — the old
+        # flat list invited exactly that misreading.
         self._lbl_cd   = _make_val_label(); cf.addRow("Total Cd:",      self._lbl_cd)
         self._lbl_cdp  = _make_val_label(); cf.addRow("  Pressure:",    self._lbl_cdp)
         self._lbl_cdf  = _make_val_label(); cf.addRow("  Friction:",    self._lbl_cdf)
-        self._lbl_cdb  = _make_val_label(); cf.addRow("  Base:",        self._lbl_cdb)
-        self._lbl_cdw  = _make_val_label(); cf.addRow("  Wave:",        self._lbl_cdw)
+        self._lbl_cdb  = _make_val_label(); cf.addRow("    ↳ Base:",    self._lbl_cdb)
+        self._lbl_cdw  = _make_val_label(); cf.addRow("    ↳ Wave:",    self._lbl_cdw)
+        for _lbl, _tip in (
+            (self._lbl_cdp, "Pressure drag, integrated over the wall.\n"
+                            "Cd = Pressure + Friction."),
+            (self._lbl_cdf, "Skin-friction drag, integrated over the wall.\n"
+                            "Under-resolved on this tet-only mesh at high y+."),
+            (self._lbl_cdb, "Base drag: pressure integrated over the rearward-\n"
+                            "facing surfaces only. A COMPONENT of Pressure above,\n"
+                            "not an extra term."),
+            (self._lbl_cdw, "Wave drag: the forebody part of the pressure drag\n"
+                            "(Pressure - Base). Reported only at M >= 0.8;\n"
+                            "an inviscid subsonic body has no wave drag."),
+        ):
+            _lbl.setToolTip(_tip)
         self._lbl_cl   = _make_val_label(); cf.addRow("Lift Cl:",       self._lbl_cl)
         self._lbl_cm   = _make_val_label(); cf.addRow("Moment Cm:",     self._lbl_cm)
         self._lbl_conv = _make_val_label(); cf.addRow("Converged:",     self._lbl_conv)
@@ -1545,21 +1713,124 @@ class CFDWorkspace(QWidget):
         """Map UI turbulence combo index to config key."""
         return ["Euler", "Laminar", "SA", "SST"][self._cb_turb.currentIndex()]
 
+    def _flow_axis_key(self) -> str:
+        """Map the flow-axis combo to the CFDConfig/meshing key."""
+        return ["auto", "x", "y", "z"][self._cb_flow_axis.currentIndex()]
+
+    def _wrap_resolution_key(self) -> str:
+        """Map the wrap-detail combo to the analyze_cad key."""
+        return ["coarse", "medium", "fine"][self._cb_wrap_res.currentIndex()]
+
+    def _cad_units_key(self) -> str:
+        """Map the units combo to the CFDConfig/analyze_cad key."""
+        return ["auto", "mm", "cm", "m", "in", "ft"][
+            self._cb_cad_units.currentIndex()
+        ]
+
     def _browse_cad(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open CAD File", "",
-            "CAD Files (*.stl *.obj *.ply *.step *.stp *.iges);;All Files (*)"
+            "CAD Files (*.step *.stp *.iges *.igs *.brep *.stl *.obj *.ply);;"
+            "STEP / IGES / BREP (*.step *.stp *.iges *.igs *.brep);;"
+            "Mesh formats (*.stl *.obj *.ply);;All Files (*)"
         )
         if path:
-            p = Path(path)
-            self._cad_lbl.setText(p.name)
-            self._current_stl = p
-            self._preview(p)
+            self._load_cad(Path(path))
+
+    def _on_cad_option_changed(self):
+        """Re-import the loaded body after a units or flow-axis change.
+
+        Both feed analyze_cad, and both change every measurement it returns,
+        so the file has to be re-read rather than the numbers patched.
+        """
+        if self._cad_path is not None and self._rb_cad.isChecked():
+            self._load_cad(self._cad_path)
+
+    def _load_cad(self, path: Path):
+        """
+        Import, align and measure a CAD file, then show it in the 3D preview.
+
+        STEP/IGES are tessellated through Gmsh's OCC kernel (no CadQuery
+        needed); the result is aligned so the chosen flow axis points along +X,
+        matching the frame the mesher and the moment origin use.
+        """
+        from PyQt6.QtWidgets import QApplication
+        from cfd.external_geometry import analyze_cad
+
+        self._cad_path = path
+        self._log(f"Importing {path.name} …")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            info = analyze_cad(
+                path,
+                flow_axis=self._flow_axis_key(),
+                work_dir=user_data_dir("cfd_run"),
+                units=self._cad_units_key(),
+                wrap=self._chk_wrap.isChecked(),
+                wrap_resolution=self._wrap_resolution_key(),
+            )
+        except Exception as e:
+            self._cad_info = None
+            self._current_stl = None
+            self._cad_lbl.setText(f"{path.name} (failed)")
+            self._cad_info_lbl.setText(f"Import failed: {e}")
+            self._cad_info_lbl.setStyleSheet(
+                "color:#f85149; font-size:10px; padding:4px 2px 0 2px;"
+            )
+            self._log(f"CAD import failed: {e}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self._cad_info = info.as_dict()
+        self._cad_lbl.setText(path.name)
+        # The aligned tessellation doubles as the geometry STL: it is what the
+        # preview shows, what the discrete mesher consumes, and the fallback
+        # the solver reads bounds from.
+        self._current_stl = Path(info.preview_stl)
+
+        axis_note = " (auto)" if info.flow_axis_auto else ""
+        wrap_note = (
+            f"<span style='color:#d29922'>Wrapped — outer mold line only "
+            f"(cell {info.wrap_cell*1000:.1f} mm, offset "
+            f"{info.wrap_offset*1000:.1f} mm)</span><br>"
+            if info.wrapped else ""
+        )
+        unit_note = (
+            f"Units <b>{info.units}</b>{' (auto)' if info.units_auto else ''}"
+            + (f" — scaled x{info.unit_scale:g} to metres" if info.unit_scale != 1.0
+               else " — no scaling")
+            + "<br>"
+        )
+        warn = "" if info.watertight else (
+            f"<br><span style='color:#d29922'>⚠ not watertight — "
+            f"{info.open_edges} free edges; meshing may fail</span>"
+        )
+        self._cad_info_lbl.setText(
+            wrap_note + unit_note +
+            f"Flow axis <b>{info.flow_axis.upper()}</b>{axis_note} → +X<br>"
+            f"Length {info.length:.4f} m · cross "
+            f"{info.cross_width:.4f} × {info.cross_height:.4f} m<br>"
+            f"Frontal area {info.frontal_area:.6f} m² · wetted "
+            f"{info.wetted_area:.4f} m²<br>"
+            f"{info.n_triangles:,} triangles · {info.n_solids} solid(s) · "
+            f"{'exact B-Rep' if info.is_brep else 'discrete shell'}{warn}"
+        )
+        self._cad_info_lbl.setStyleSheet(
+            "color:#8b949e; font-size:10px; padding:4px 2px 0 2px;"
+        )
+        self._sp_ref_area.setSpecialValueText(f"Auto ({info.frontal_area:.6f} m²)")
+        self._sp_ref_len.setSpecialValueText(f"Auto ({info.length:.5f} m)")
+        self._log(f"CAD ready — {info.summary()}")
+        self._preview(self._current_stl)
 
     def _export_geometry(self):
         from cfd.geometry_exporter import export_assembly_to_stl
-        if self._rb_cad.isChecked() and self._current_stl:
-            self._log("Using imported CAD file.")
+        if self._rb_cad.isChecked():
+            if self._cad_info:
+                self._log(f"Using imported CAD: {Path(self._cad_info['source']).name}")
+            else:
+                self._log("No CAD file loaded — use Browse CAD File first.")
             return
         assembly = self.assembly_provider() if self.assembly_provider else None
         if assembly is None:
@@ -1589,6 +1860,34 @@ class CFDWorkspace(QWidget):
         except Exception as e:
             self._log(f"Preview error: {e}")
 
+    def _stl_in_cfd_frame(self):
+        """
+        The current geometry STL expressed in the CFD frame
+        (X = flow direction, upstream tip at x=0).
+
+        Rocket exports are written in the K2 body frame (Z = length axis, nose
+        at Z_max) and have to be rotated. The aligned tessellation produced for
+        an imported CAD body is *already* in the CFD frame, so rotating it
+        again would drop the overlay in the wrong place.
+
+        Returns None when no usable STL is loaded.
+        """
+        import numpy as np
+        if not self._current_stl or not self._current_stl.is_file():
+            return None
+        raw = pv.read(str(self._current_stl))
+        if self._rb_cad.isChecked() and self._cad_info:
+            return raw
+        pts = raw.points.copy()
+        z_max = pts[:, 2].max()          # nose tip Z in K2 space
+        out = raw.copy()
+        out.points = np.column_stack([
+            z_max - pts[:, 2],   # X_cfd = distance from nose
+            pts[:, 0],           # Y_cfd = K2 X (radial)
+            pts[:, 1],           # Z_cfd = K2 Y (radial)
+        ])
+        return out
+
     def _set_params_locked(self, locked: bool):
         """Disable/enable all simulation parameter controls.
         Called when the solver starts (locked=True) and when it
@@ -1601,7 +1900,6 @@ class CFDWorkspace(QWidget):
         self._cb_turb.setEnabled(enabled)
         # Mesh settings
         self._cb_ref.setEnabled(enabled)
-        self._sp_bl.setEnabled(enabled)
         self._sp_iter.setEnabled(enabled)
         self._sp_cores.setEnabled(enabled)
         # Custom mesh controls
@@ -1613,6 +1911,13 @@ class CFDWorkspace(QWidget):
         self._rb_cad.setEnabled(enabled)
         self._btn_browse.setEnabled(enabled and self._rb_cad.isChecked())
         self._btn_export.setEnabled(enabled)
+        # Imported-CAD controls (changing the axis re-runs the import)
+        self._cb_cad_units.setEnabled(enabled)
+        self._chk_wrap.setEnabled(enabled)
+        self._cb_wrap_res.setEnabled(enabled and self._chk_wrap.isChecked())
+        self._cb_flow_axis.setEnabled(enabled)
+        self._sp_ref_area.setEnabled(enabled)
+        self._sp_ref_len.setEnabled(enabled)
         # Analysis mode + sweep controls
         self._rb_single.setEnabled(enabled)
         self._rb_sweep.setEnabled(enabled)
@@ -1627,6 +1932,9 @@ class CFDWorkspace(QWidget):
 
         if self._rb_assembly.isChecked():
             self._export_geometry()
+        elif not self._cad_info:
+            self._log("No CAD file loaded — use Browse CAD File first.")
+            return
         if not self._current_stl or not self._current_stl.is_file():
             self._log("No geometry ready — export the rocket first.")
             return
@@ -1677,23 +1985,52 @@ class CFDWorkspace(QWidget):
 
         # CG from nose tip — needed so the sweep can report dCm/dα about the CG
         # (the true static-stability metric). Best-effort; None ⇒ no verdict.
+        # Only meaningful for the rocket design — the loaded assembly's CG has
+        # nothing to do with an imported CAD body, so don't transfer moments to it.
         cg_from_nose = None
-        try:
-            _asm = self.assembly_provider() if self.assembly_provider else None
-            if _asm is None and self.engine and hasattr(self.engine, "assembly"):
-                _asm = self.engine.assembly
-            if _asm is not None and hasattr(_asm, "compute_cg"):
-                cg_from_nose = float(_asm.compute_cg())
-                self._log(f"CG = {cg_from_nose:.3f} m from nose (for stability moment transfer)")
-        except Exception as e:
-            self._log(f"CG lookup failed ({e}) — stability verdict will be unavailable")
+        if self._rb_assembly.isChecked():
+            try:
+                _asm = self.assembly_provider() if self.assembly_provider else None
+                if _asm is None and self.engine and hasattr(self.engine, "assembly"):
+                    _asm = self.engine.assembly
+                if _asm is not None and hasattr(_asm, "compute_cg"):
+                    cg_from_nose = float(_asm.compute_cg())
+                    self._log(f"CG = {cg_from_nose:.3f} m from nose (for stability moment transfer)")
+            except Exception as e:
+                self._log(f"CG lookup failed ({e}) — stability verdict will be unavailable")
+
+        # ── External CAD mode ──
+        external_cad = None
+        cad_info = None
+        ref_area_ov = None
+        ref_len_ov = None
+        if self._rb_cad.isChecked() and self._cad_info:
+            external_cad = Path(self._cad_info["source"])
+            cad_info = self._cad_info
+            ref_area_ov = self._sp_ref_area.value() or None
+            ref_len_ov = self._sp_ref_len.value() or None
+            self._log(
+                f"CAD mode: {external_cad.name} | flow axis "
+                f"{self._cad_info['flow_axis'].upper()} → +X | "
+                f"ref A={ref_area_ov if ref_area_ov else self._cad_info['frontal_area']:.6f} m² "
+                f"({'user' if ref_area_ov else 'auto frontal'}) | "
+                f"ref L={ref_len_ov if ref_len_ov else self._cad_info['length']:.5f} m "
+                f"({'user' if ref_len_ov else 'auto bbox'})"
+            )
+            if not self._cad_info.get("watertight", True):
+                self._log(
+                    f"WARNING: geometry is not watertight "
+                    f"({self._cad_info.get('open_edges', 0)} free edges) — "
+                    f"meshing may fail or the fluid volume may leak."
+                )
 
         cfg = CFDConfig(
             mach=self._sp_mach.value(),
             altitude_m=self._sp_alt.value(),
             angle_of_attack_deg=self._sp_aoa.value(),
             mesh_refinement=ref_map.get(ref_idx, "medium"),
-            boundary_layer_layers=self._sp_bl.value(),
+            # boundary_layer_layers/growth left at their defaults — the mesher is
+            # tet-only and ignores them.
             max_iterations=self._sp_iter.value(),
             n_cores=self._sp_cores.value(),
             turbulence_model=self._get_turb_key(),
@@ -1703,6 +2040,14 @@ class CFDWorkspace(QWidget):
             custom_wall_size=custom_wall,
             target_element_count=target_count,
             cg_from_nose_m=cg_from_nose,
+            external_cad=external_cad,
+            flow_axis=self._flow_axis_key(),
+            cad_info=cad_info,
+            cad_units=self._cad_units_key(),
+            cad_wrap=self._chk_wrap.isChecked(),
+            cad_wrap_resolution=self._wrap_resolution_key(),
+            ref_area_override=ref_area_ov,
+            ref_length_override=ref_len_ov,
         )
 
         # ── Sweep mode branches off here (uses cfg as the base condition) ──
@@ -1710,6 +2055,9 @@ class CFDWorkspace(QWidget):
             self._start_sweep(cfg)
             return
 
+        # Nothing from the last solve may outlive this click: if the new run
+        # fails, stale coefficients must not sit there looking like its output.
+        self._clear_results()
         self._btn_run.setEnabled(False)
         self._btn_stop.setEnabled(True)
         self._set_params_locked(True)
@@ -1773,18 +2121,37 @@ class CFDWorkspace(QWidget):
         if len(vals) < 2:
             self._log("Sweep needs at least 2 points — widen the range or shrink the step.")
             return
-        # Sweep-specific solver caps: enough iterations + tight residual so the
-        # per-point Cm (and thus dCm/dα stability) is trustworthy, while staying
-        # tractable across many points. Single-point mode keeps the user's spinbox.
-        self._sweep_max_iter = 800
+        # Sweep-specific solver caps: enough iterations per point that the
+        # per-point Cm (and thus dCm/dα stability) is trustworthy, while
+        # staying tractable across many points.
+        #
+        # The cap used to be a hard-coded 800 that silently overrode whatever
+        # the user had set, so raising Max Iterations did nothing to a sweep
+        # and there was no way to give a stubborn point more room. It is now a
+        # floor: sweeps still get at least 800 even if the spinbox is lower,
+        # but a user asking for more gets it.
+        #
+        # The tolerance override is gone. It was 1e-8 against 1e-6 for single
+        # runs, and CONV_RESIDUAL_MINVAL is an ABSOLUTE floor on dimensional
+        # residuals — a measured case starts near rms[Rho]=-3, so -8 demands 5
+        # decades where -6 demands 3, with no principled reason for a sweep
+        # point to be held to a different standard than the same case run on
+        # its own. Both paths now use the config default, and the DRAG Cauchy
+        # criterion added to the SU2 template does the real stopping work.
+        self._sweep_max_iter = max(self._sp_iter.value(), 800)
         base_cfg.max_iterations = self._sweep_max_iter
-        base_cfg.convergence_tolerance = 1e-8
         # Hybrid Euler + analytic-friction polar (see checkbox tooltip).
         self._sweep_euler_fric = self._chk_euler_fric.isChecked()
         if self._sweep_euler_fric:
             base_cfg.turbulence_model = "Euler"
             base_cfg.euler_analytic_friction = True
-            if base_cfg.geometry_dict is None:
+            if base_cfg.external_cad and base_cfg.cad_info:
+                self._log(
+                    "Euler+friction mode: friction built up from the CAD wetted "
+                    "area with a body-of-revolution form factor — an engineering "
+                    "estimate, coarser than the rocket component breakdown."
+                )
+            elif base_cfg.geometry_dict is None:
                 self._log(
                     "Euler+friction mode: no exact geometry available (STL source) — "
                     "friction build-up will be skipped, Cd will be inviscid-only."
@@ -1990,15 +2357,20 @@ class CFDWorkspace(QWidget):
         try:
             import csv
             pts = sorted(d.points, key=lambda q: q.value)
-            wave = d.cd_wave()   # sweep-derived, aligned to sorted order
+            # Per-point, solved from the surface integral — no longer
+            # reconstructed across the sweep. Aligned to sorted order.
+            wave = d.cd_wave()
+            base = d.cd_base()
             with open(path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
                 w.writerow([d.var, "Cd", "Cl", "Cm", "Cd_pressure", "Cd_friction",
-                            "Cd_wave_sweep", "CP_m", "Reynolds", "converged"])
+                            "Cd_base", "Cd_wave", "CP_m", "Reynolds", "converged"])
                 for i, p in enumerate(pts):
                     r = p.result
                     w.writerow([p.value, r.cd, r.cl, r.cm, r.cd_pressure,
-                                r.cd_friction, wave[i] if i < len(wave) else 0.0,
+                                r.cd_friction,
+                                base[i] if i < len(base) else 0.0,
+                                wave[i] if i < len(wave) else 0.0,
                                 r.cp_location_m, r.reynolds, r.converged])
             self._log(f"Polar exported: {path}")
         except Exception as e:
@@ -2040,6 +2412,7 @@ class CFDWorkspace(QWidget):
             self._solver_thread.terminate()
             self._solver_thread.wait(2000)  # wait up to 2s for cleanup
             self._log("Solver stopped by user.")
+            self._clear_results("Partial run discarded — no results to show.")
         self._btn_run.setEnabled(True)
         self._btn_stop.setEnabled(False)
         self._progress.setVisible(False)
@@ -2072,8 +2445,22 @@ class CFDWorkspace(QWidget):
         # Drag decomposition
         self._lbl_cdp.setText(f"{result.cd_pressure:.5f}  ({result.cd_pressure/max(result.cd,1e-9)*100:.0f}%)")
         self._lbl_cdf.setText(f"{result.cd_friction:.5f}  ({result.cd_friction/max(result.cd,1e-9)*100:.0f}%)")
-        self._lbl_cdb.setText(f"{result.cd_base:.5f}")
-        self._lbl_cdw.setText(f"{result.cd_wave:.5f}" if result.cd_wave > 0 else "—")
+        # Base/wave are percentages OF the pressure drag they subdivide, not of
+        # the total — showing them against Cd would imply they were separate terms.
+        # Magnitude in the denominator: cd_pressure is no longer forced positive,
+        # and a bad solution that integrates negative would otherwise print a
+        # percentage in the billions rather than reading as obviously wrong.
+        _cdp = max(abs(result.cd_pressure), 1e-9)
+        _share = "% of pressure" if result.cd_pressure > 0 else "% of |pressure|"
+        self._lbl_cdb.setText(
+            f"{result.cd_base:.5f}  ({result.cd_base/_cdp*100:.0f}{_share})"
+        )
+        if result.cd_wave > 0:
+            self._lbl_cdw.setText(
+                f"{result.cd_wave:.5f}  ({result.cd_wave/_cdp*100:.0f}{_share})"
+            )
+        else:
+            self._lbl_cdw.setText("—  (subsonic)" if result.mach < 0.8 else "—")
 
         # Forces & CP
         # Fallback: Compute dimensional forces if parser missed them (e.g., older SU2 versions)
@@ -2091,15 +2478,22 @@ class CFDWorkspace(QWidget):
             # Get the TRUE rocket length from multiple sources
             rocket_len = result.ref_length  # fallback (may be inflated by fin span)
             len_source = "ref_length"
+            # Priority 0: imported CAD — its own measured flow-wise extent. The
+            # assembly length and the STL Z-span below both describe the rocket
+            # design, which has nothing to do with the imported body.
+            if self._rb_cad.isChecked() and self._cad_info:
+                rocket_len = float(self._cad_info.get("length", rocket_len))
+                len_source = "CAD bbox"
             # Priority 1: Assembly total length (most reliable)
-            if self.engine and hasattr(self.engine, 'assembly'):
+            elif self.engine and hasattr(self.engine, 'assembly'):
                 try:
                     rocket_len = self.engine.assembly.total_length()
                     len_source = "assembly"
                 except Exception:
                     pass
             # Priority 2: STL Z-span (Z is rocket axis in K2)
-            if len_source != "assembly" and self._current_stl and self._current_stl.is_file():
+            if (len_source not in ("assembly", "CAD bbox")
+                    and self._current_stl and self._current_stl.is_file()):
                 try:
                     stl_m = pv.read(str(self._current_stl))
                     b = stl_m.bounds
@@ -2156,7 +2550,16 @@ class CFDWorkspace(QWidget):
         _mach_sq = max(result.mach, 0.01) ** 2
         P_inf = result.dynamic_pressure * 2.0 / (1.4 * _mach_sq) if _mach_sq > 0 else 101325.0
         q_inf = result.dynamic_pressure
-        self._pp_thread = PostProcessThread(user_data_dir("cfd_run"), P_inf, q_inf)
+        # Load the VTKs this result actually wrote, not a fixed directory.
+        # Sweep points write into work_dir/sweep/<tag>/, so the base folder can
+        # still hold flow.vtu from an older single run — which would then be
+        # loaded and displayed as if it belonged to this solve.
+        _vtk_dir = user_data_dir("cfd_run")
+        for _p in (result.volume_vtk, result.surface_vtk):
+            if _p:
+                _vtk_dir = Path(_p).parent
+                break
+        self._pp_thread = PostProcessThread(_vtk_dir, P_inf, q_inf)
         self._pp_thread.log_msg.connect(self._log)
         self._pp_thread.done.connect(self._on_postprocess_done)
         self._pp_thread.start()
@@ -2224,11 +2627,49 @@ class CFDWorkspace(QWidget):
 
         self._refresh_vis()
 
+    def _clear_results(self, reason: str = ""):
+        """Drop every artefact of the previous solve.
+
+        Without this a failed or stopped run left the last successful result on
+        screen — coefficients, convergence badge, loaded flow field, and live
+        Inject/Export buttons — now implicitly attributed to the NEW settings.
+        The user sees plausible numbers for a run that never produced any.
+        """
+        self._result = None
+        self._volume_mesh = None
+        self._surface_mesh = None
+        for lbl in ("_lbl_cd", "_lbl_cdp", "_lbl_cdf", "_lbl_cdb", "_lbl_cdw",
+                    "_lbl_cl", "_lbl_cm", "_lbl_conv", "_lbl_fa", "_lbl_fn",
+                    "_lbl_cp", "_lbl_solver", "_lbl_turb_r", "_lbl_re_r",
+                    "_lbl_q_r"):
+            w = getattr(self, lbl, None)
+            if w is not None:
+                w.setText("—")
+        if getattr(self, "_lbl_conv", None) is not None:
+            self._lbl_conv.setStyleSheet(_VAL_SS)
+        for btn in ("_btn_inject", "_btn_export_vtk", "_btn_export_struct",
+                    "_btn_export_pdf", "_btn_export_csv"):
+            w = getattr(self, btn, None)
+            if w is not None:
+                w.setEnabled(False)
+        # Blank the 3D view too — a stale flow field is the most convincing
+        # wrong answer of the lot.
+        try:
+            self._plotter.clear()
+            self._last_vis_idx = -1
+        except Exception:
+            pass
+        if reason:
+            self._log(reason)
+
     def _on_error(self, msg: str):
         # Show each line of the error separately so long messages are readable
         for line in msg.splitlines():
             if line.strip():
                 self._log(f"ERROR: {line}")
+        self._clear_results(
+            "Previous results cleared — this run produced none."
+        )
         self._btn_run.setEnabled(True)
         self._btn_stop.setEnabled(False)
         self._progress.setVisible(False)
@@ -2263,9 +2704,19 @@ class CFDWorkspace(QWidget):
         SU2 volume output includes cells inside the Boolean-cut rocket geometry
         with stagnant (near-zero momentum) bogus values. These render as a
         dark rectangular artifact on 2D slices. We detect them by:
-          speed < 20 m/s  AND  r < body_radius  AND  x in rocket range
+          speed < 0.5% of V_inf  AND  r < body_radius  AND  x WITHIN the body
+
+        Both thresholds used to be wrong in a way that deleted real flow.
+        The speed cut was a hard-coded 20 m/s, which is not "stagnant" — it is
+        ordinary separated flow at any realistic freestream, and below V_inf=20
+        it condemned the entire near-field. The axial window ran to
+        ``rb[1] + 0.1``, i.e. 100 mm PAST the tail, so the base recirculation
+        got cut out along with the dead cells: 358 slice points on a measured
+        M=0.8 case, covering exactly the region base drag comes from. Trapped
+        cells inside the boolean-cut solid are genuinely at machine-zero
+        momentum, so a fraction-of-freestream threshold separates them from
+        real slow flow, and the window now stops at the tail.
         """
-        import numpy as np
         sm = self._surface_mesh
         if sm is None or slc is None or slc.n_points == 0:
             return slc
@@ -2284,40 +2735,60 @@ class CFDWorkspace(QWidget):
         else:
             return slc  # can't filter without velocity info
 
+        v_ref = float(getattr(self, "_v_inf", 0.0) or 0.0)
+        if v_ref <= 0.0:
+            v_ref = float(np.percentile(speed, 99)) if speed.size else 0.0
+        stagnant = max(v_ref * 0.005, 1e-6)
+
         interior = (
-            (speed < 20.0) &
+            (speed < stagnant) &
             (r < rR * 1.05) &
             (pts[:, 0] > rb[0] - 0.01) &
-            (pts[:, 0] < rb[1] + 0.1)
+            (pts[:, 0] < rb[1])          # stop at the tail — keep the base wake
         )
         if interior.sum() == 0:
             return slc
         return slc.extract_points(~interior)
 
     @staticmethod
-    def _smooth_surface_scalars(mesh, name, n_iter=3):
-        """Laplacian-smooth a point-data scalar via repeated cell<->point averaging.
+    def _smooth_surface_scalars(mesh, name, n_iter=3) -> str:
+        """Laplacian-smooth a point-data scalar. Returns the array name to render.
 
-        Each round-trip (point→cell→point) replaces every vertex value with
-        the average of its incident-cell averages, effectively a weighted
-        Laplacian smooth that removes cell-level noise while preserving the
-        overall field shape.  3-5 iterations is typical for CFD surface data.
+        Each round-trip (point→cell→point) replaces every vertex value with the
+        average of its incident-cell averages — a weighted Laplacian smooth that
+        removes cell-level noise while preserving the field shape. 2-5 iterations
+        is typical for CFD surface data.
+
+        The smoothed values go into a SEPARATE ``<name>_smoothed`` array, and the
+        result is cached. Previously this wrote back over the source array on the
+        cached surface mesh, so every re-render smoothed an already-smoothed
+        field: switching views back and forth quietly eroded the solution. A
+        sharp stagnation peak lost 5% after five view switches and kept going,
+        taking the "stagnation Cp" readout in the status bar down with it. The
+        solver's own arrays are now left exactly as SU2 wrote them.
         """
-        import numpy as np
         if name not in mesh.point_data:
-            return mesh
+            return name
+        out = f"{name}_smoothed"
+        if out in mesh.point_data:
+            return out          # already computed for this mesh — reuse, no drift
+
         n_pts_orig = mesh.n_points
+        try:
+            mesh.point_data[out] = mesh.point_data[name].copy()
+        except Exception:
+            return name
         for _ in range(n_iter):
             try:
                 tmp = mesh.point_data_to_cell_data()
                 tmp = tmp.cell_data_to_point_data()
-                if name in tmp.point_data and len(tmp.point_data[name]) == n_pts_orig:
-                    mesh.point_data[name] = tmp.point_data[name]
+                if out in tmp.point_data and len(tmp.point_data[out]) == n_pts_orig:
+                    mesh.point_data[out] = tmp.point_data[out]
                 else:
                     break  # topology changed — stop smoothing to avoid corruption
             except Exception:
                 break
-        return mesh
+        return out
 
     def _add_freestream_indicator(self, rb, rL, rR):
         """Add freestream direction arrow and flow condition text to the 3D viewport.
@@ -2328,9 +2799,17 @@ class CFDWorkspace(QWidget):
         if rb is None:
             return
         import numpy as np
-        aoa = self._sp_aoa.value()
-        mach = self._mach if self._result else self._sp_mach.value()
-        v_inf = self._v_inf if self._result else 0.0
+        # Annotate the solved condition, not the current spin-box state — the
+        # boxes are unlocked the moment a run ends, so they drift from the flow
+        # field being drawn.
+        if self._result:
+            aoa = self._result.angle_of_attack_deg
+            mach = self._result.mach
+            v_inf = self._result.v_inf
+        else:
+            aoa = self._sp_aoa.value()
+            mach = self._sp_mach.value()
+            v_inf = 0.0
 
         # Arrow geometry: placed upstream-left and above the rocket
         cx = (rb[0] + rb[1]) / 2
@@ -2387,14 +2866,24 @@ class CFDWorkspace(QWidget):
         except Exception:
             pass
 
-    def _add_contour_lines(self, mesh, scalar_name, n_lines=12):
+    def _add_contour_lines(self, mesh, scalar_name, n_lines=12, weighted=True):
         """Overlay iso-contour lines on a surface scalar field.
 
         Extracts iso-lines at evenly spaced scalar values and renders
         them as thin semi-transparent black lines on top of the colored
         surface, mimicking professional CFD post-processing overlays.
+
+        Levels are spread over the 2-98% band rather than over raw min/max.
+        Spanning min/max put nearly every line inside the narrow value range
+        held by the nose-tip slivers: on a measured M=0.8 case Cp ran
+        [-0.49, 1.53] while 96% of the airframe area sat within [-0.31,
+        0.23], so ten of twelve iso-lines drew on the tip and the body — the
+        part anyone is looking at — got two.
+
+        ``weighted`` selects area-weighted percentiles (right for surfaces)
+        or point-counted ones (right for slices); see :meth:`_auto_clim` for
+        why the two differ.
         """
-        import numpy as np
         if mesh is None or scalar_name not in mesh.array_names:
             return
         vals = mesh[scalar_name].flatten()
@@ -2404,7 +2893,11 @@ class CFDWorkspace(QWidget):
         valid = vals[np.isfinite(vals)]
         if len(valid) < 10:
             return
-        v_min, v_max = float(valid.min()), float(valid.max())
+        v_min, v_max = field_percentiles(mesh, scalar_name, [2.0, 98.0],
+                                         weighted=weighted)
+        if not np.isfinite(v_min) or not np.isfinite(v_max):
+            v_min, v_max = float(valid.min()), float(valid.max())
+        v_min, v_max = float(v_min), float(v_max)
         if v_max - v_min < 1e-10:
             return
         levels = np.linspace(v_min, v_max, n_lines + 2)[1:-1]
@@ -2433,6 +2926,20 @@ class CFDWorkspace(QWidget):
     def _refresh_vis(self):
         idx = self._vis_combo.currentIndex()
         self._plotter.clear()
+        # Screen-space ambient occlusion is a depth-buffer pass: it darkens
+        # concave areas (fin roots, the nose/body shoulder) after the scalar
+        # colours are mapped, so on a field view it silently reports geometry
+        # as a lower field value. Keep it for the geometry preview, where it
+        # is the point, and drop it wherever the colour has to be readable
+        # against a bar.
+        try:
+            if idx == 0:
+                self._plotter.enable_ssao(radius=0.25, bias=0.002,
+                                          kernel_size=512, blur=True)
+            else:
+                self._plotter.disable_ssao()
+        except Exception:
+            pass
         # Reset scalar range to auto when switching to a DIFFERENT view
         # (don't reset when the same view re-renders from slider changes)
         if not hasattr(self, '_last_vis_idx'):
@@ -2543,14 +3050,21 @@ class CFDWorkspace(QWidget):
                         self._log(f"Fixed {n_nan} NaN/inf Cp values → 0.0")
 
                     # Light Laplacian smooth (2 iter) to clean up cell artifacts
-                    sm = self._smooth_surface_scalars(sm, cp_name, n_iter=2)
+                    cp_name = self._smooth_surface_scalars(sm, cp_name, n_iter=2)
                     cp_vals = sm[cp_name].flatten()
 
-                    # Dynamic Cp range — symmetric around 0 for diverging colormap
+                    # Dynamic Cp range — symmetric around 0 for diverging colormap.
+                    # Bounds are area-weighted percentiles, NOT raw min/max: the
+                    # nose tip carries cells ~3e5x smaller than the body, and a
+                    # couple of those slivers overshoot the isentropic stagnation
+                    # limit (Cp 1.53 measured against a physical ceiling of 1.17
+                    # at M=0.8). Scaling to them set clim=+/-1.53 while 99% of the
+                    # airframe AREA lives in [-0.35, 0.41] — a quarter of the bar,
+                    # which rendered the whole body flat white.
                     cp_min = float(cp_vals.min())
                     cp_max = float(cp_vals.max())
-                    half = max(abs(cp_min), abs(cp_max), 0.05)
-                    clim = self._get_user_clim(-half, half)
+                    clim = self._auto_clim(sm, cp_name, 0.5, 99.5,
+                                           symmetric=True, floor=0.05)
                     user_opacity = self._get_user_opacity()
                     user_cmap = self._get_user_cmap("RdBu_r")
 
@@ -2591,10 +3105,7 @@ class CFDWorkspace(QWidget):
                 slc = vm_local.slice(normal="y", origin=slice_origin)
                 slc = self._filter_interior_cells(slc)
                 if "Pressure" in slc.array_names:
-                    p_slc  = slc["Pressure"].flatten()
-                    p_lo   = float(np.percentile(p_slc, 1))
-                    p_hi   = float(np.percentile(p_slc, 99))
-                    clim = self._get_user_clim(p_lo, p_hi)
+                    clim = self._auto_clim(slc, "Pressure", 1.0, 99.0, weighted=False)
                     user_cmap = self._get_user_cmap("plasma")
                     self._plotter.add_mesh(
                         slc, scalars="Pressure", cmap=user_cmap,
@@ -2607,7 +3118,7 @@ class CFDWorkspace(QWidget):
                                          "fmt": "%.0f", "position_x": 0.25, "width": 0.5}
                     )
                     if self._chk_contour_lines.isChecked():
-                        self._add_contour_lines(slc, "Pressure", n_lines=12)
+                        self._add_contour_lines(slc, "Pressure", n_lines=12, weighted=False)
                     self._status_lbl.setText(f"Pressure mid-plane slice  [{clim[0]:.0f} – {clim[1]:.0f} Pa]")
 
             # -- idx 3: Temperature -----------------------------------------------
@@ -2615,10 +3126,7 @@ class CFDWorkspace(QWidget):
                 slc = vm_local.slice(normal="y", origin=slice_origin)
                 slc = self._filter_interior_cells(slc)
                 if "Temperature" in slc.array_names:
-                    t_slc = slc["Temperature"].flatten()
-                    t_lo  = float(np.percentile(t_slc, 1))
-                    t_hi  = float(np.percentile(t_slc, 99))
-                    clim = self._get_user_clim(t_lo, t_hi)
+                    clim = self._auto_clim(slc, "Temperature", 1.0, 99.0, weighted=False)
                     user_cmap = self._get_user_cmap("inferno")
                     self._plotter.add_mesh(
                         slc, scalars="Temperature", cmap=user_cmap,
@@ -2631,7 +3139,7 @@ class CFDWorkspace(QWidget):
                                          "fmt": "%.1f", "position_x": 0.25, "width": 0.5}
                     )
                     if self._chk_contour_lines.isChecked():
-                        self._add_contour_lines(slc, "Temperature", n_lines=12)
+                        self._add_contour_lines(slc, "Temperature", n_lines=12, weighted=False)
                     self._status_lbl.setText(f"Temperature mid-plane slice  [{clim[0]:.1f} – {clim[1]:.1f} K]")
 
             # -- idx 4: Velocity magnitude -----------------------------------------
@@ -2645,8 +3153,11 @@ class CFDWorkspace(QWidget):
                     scalar = "Velocity_Magnitude"
                 else:
                     scalar = _scalar(slc, "Velocity_Magnitude", "U")
-                v_max = self._v_inf * 1.40
-                clim = self._get_user_clim(0, v_max)
+                # Scale to the field. The fixed 1.4*V_inf ceiling wasted a
+                # quarter of the bar on a measured case (max speed 278 m/s
+                # against a clim top of 368), and would clip instead on any
+                # case with a strong expansion.
+                clim = self._auto_clim(slc, scalar or "Pressure", 0.0, 99.5, weighted=False)
                 user_cmap = self._get_user_cmap("viridis")
                 self._plotter.add_mesh(
                     slc, scalars=scalar or "Pressure", cmap=user_cmap,
@@ -2660,7 +3171,7 @@ class CFDWorkspace(QWidget):
                                      "position_x": 0.25, "width": 0.5}
                 )
                 if self._chk_contour_lines.isChecked():
-                    self._add_contour_lines(slc, scalar or "Pressure", n_lines=12)
+                    self._add_contour_lines(slc, scalar or "Pressure", n_lines=12, weighted=False)
                 self._status_lbl.setText(f"Velocity magnitude  V\u221e = {self._v_inf:.1f} m/s")
 
             # ── idx 5: Streamlines ────────────────────────────────────────
@@ -2734,8 +3245,21 @@ class CFDWorkspace(QWidget):
                 mach_name = _scalar(vm_local, "Mach", "Mach_Number")
                 slc = vm_local.slice(normal="y", origin=slice_origin)
                 slc = self._filter_interior_cells(slc)
-                mach_max = max(self._mach * 1.5, 1.5)
-                clim = self._get_user_clim(0, mach_max)
+                # Scale to the solved field, not to a fixed guess. The old
+                # clim of [0, max(1.5*M_inf, 1.5)] spent 43% of the bar on
+                # Mach numbers that do not occur: an M_inf=0.8 case peaks at
+                # 0.85, so the whole transonic field was squeezed into the
+                # bottom half of a colormap whose midpoint is not the sonic
+                # line either. Held to at least [0, 1] so the sonic point
+                # keeps a fixed, readable position whenever the flow reaches
+                # it, and so subsonic cases are not over-stretched.
+                if mach_name:
+                    m_hi = float(field_percentiles(slc, mach_name, 99.5, weighted=False)[0])
+                    if not np.isfinite(m_hi):
+                        m_hi = max(self._mach * 1.2, 1.0)
+                    clim = self._get_user_clim(0.0, max(m_hi, 1.0))
+                else:
+                    clim = self._auto_clim(slc, "Pressure", 1.0, 99.0, weighted=False)
                 user_cmap = self._get_user_cmap("coolwarm")
                 self._plotter.add_mesh(
                     slc, scalars=mach_name or "Pressure", cmap=user_cmap,
@@ -2749,17 +3273,14 @@ class CFDWorkspace(QWidget):
                                      "position_x": 0.25, "width": 0.5}
                 )
                 if self._chk_contour_lines.isChecked():
-                    self._add_contour_lines(slc, mach_name or "Pressure", n_lines=12)
+                    self._add_contour_lines(slc, mach_name or "Pressure", n_lines=12, weighted=False)
                 self._status_lbl.setText(f"Mach number  M\u221e = {self._mach:.2f}")
 
             elif idx == 7 and vm_local:
                 slc = vm_local.slice(normal="y", origin=slice_origin)
                 slc = self._filter_interior_cells(slc)
                 if "Density" in slc.array_names:
-                    d_vals = slc["Density"].flatten()
-                    d_lo = float(np.percentile(d_vals, 1))
-                    d_hi = float(np.percentile(d_vals, 99))
-                    clim = self._get_user_clim(d_lo, d_hi)
+                    clim = self._auto_clim(slc, "Density", 1.0, 99.0, weighted=False)
                     user_cmap = self._get_user_cmap("cividis")
                     self._plotter.add_mesh(
                         slc, scalars="Density", cmap=user_cmap,
@@ -2772,7 +3293,7 @@ class CFDWorkspace(QWidget):
                                          "fmt": "%.4f", "position_x": 0.25, "width": 0.5}
                     )
                     if self._chk_contour_lines.isChecked():
-                        self._add_contour_lines(slc, "Density", n_lines=10)
+                        self._add_contour_lines(slc, "Density", n_lines=10, weighted=False)
                 self._status_lbl.setText("Density \u2014 mid-plane slice")
 
             # ── idx 8: Vorticity magnitude ────────────────────────────────
@@ -2794,7 +3315,9 @@ class CFDWorkspace(QWidget):
                     slc = vm_local.slice(normal="y", origin=slice_origin)
                     slc = self._filter_interior_cells(slc)
                     v_vals = slc[vort_scalar] if vort_scalar in slc.array_names else vm_local[vort_scalar]
-                    v95 = float(np.percentile(np.abs(v_vals), 95)) if len(v_vals) > 0 else 1.0
+                    v95 = float(field_percentiles(slc, vort_scalar, 95.0, weighted=False)[0])
+                    if not np.isfinite(v95):
+                        v95 = float(np.percentile(np.abs(v_vals), 95)) if len(v_vals) > 0 else 1.0
                     clim = self._get_user_clim(0, max(v95, 1.0))
                     user_cmap = self._get_user_cmap("hot")
                     self._plotter.add_mesh(
@@ -2809,7 +3332,7 @@ class CFDWorkspace(QWidget):
                                          "position_x": 0.25, "width": 0.5}
                     )
                     if self._chk_contour_lines.isChecked():
-                        self._add_contour_lines(slc, vort_scalar, n_lines=10)
+                        self._add_contour_lines(slc, vort_scalar, n_lines=10, weighted=False)
                     self._status_lbl.setText(f"Vorticity magnitude \u2014 mid-plane slice (max={v95:.1f} 1/s)")
                 else:
                     self._status_lbl.setText("Vorticity not available. Re-run CFD to recompute.")
@@ -2870,11 +3393,10 @@ class CFDWorkspace(QWidget):
                 if cp_name:
                     slc = vm_local.slice(normal="y", origin=slice_origin)
                     slc = self._filter_interior_cells(slc)
-                    cp_slc = slc[cp_name].flatten() if cp_name in slc.array_names else vm_local[cp_name].flatten()
-                    cp_lo  = float(np.percentile(cp_slc, 1))
-                    cp_hi  = float(np.percentile(cp_slc, 99))
-                    half   = max(abs(cp_lo), abs(cp_hi), 0.05)
-                    clim   = self._get_user_clim(-half, half)
+                    clim = self._auto_clim(slc, cp_name, 1.0, 99.0,
+                                           symmetric=True, floor=0.05,
+                                           weighted=False)
+                    half = clim[1]
                     user_cmap = self._get_user_cmap("RdBu_r")
                     self._plotter.add_mesh(
                         slc, scalars=cp_name, cmap=user_cmap,
@@ -2888,7 +3410,7 @@ class CFDWorkspace(QWidget):
                                          "position_x": 0.25, "width": 0.5}
                     )
                     if self._chk_contour_lines.isChecked():
-                        self._add_contour_lines(slc, cp_name, n_lines=12)
+                        self._add_contour_lines(slc, cp_name, n_lines=12, weighted=False)
                     self._status_lbl.setText(
                         f"Cp mid-plane slice (auto-scaled +/-{half:.3f})  |  blue=suction, red=stagnation"
                     )
@@ -2926,7 +3448,9 @@ class CFDWorkspace(QWidget):
                                 grad_vec = grad[grad_key]
                                 grad_mag = np.linalg.norm(grad_vec, axis=1).astype(np.float32)
                                 grad["PressureGradient"] = grad_mag
-                                g95 = float(np.percentile(grad_mag[grad_mag > 0], 95)) if (grad_mag > 0).any() else 1.0
+                                g95 = float(field_percentiles(grad, "PressureGradient", 95.0, weighted=False)[0])
+                                if not np.isfinite(g95) or g95 <= 0:
+                                    g95 = float(np.percentile(grad_mag[grad_mag > 0], 95)) if (grad_mag > 0).any() else 1.0
                                 user_cmap = self._get_user_cmap("hot")
                                 self._plotter.add_mesh(
                                     grad, scalars="PressureGradient", cmap=user_cmap,
@@ -3010,9 +3534,14 @@ class CFDWorkspace(QWidget):
                 if yp is not None:
                     sm["YPlus_Vis"] = yp
                     # Smooth Y+ for cleaner visualization
-                    sm = self._smooth_surface_scalars(sm, "YPlus_Vis", n_iter=2)
-                    yp_vals = sm["YPlus_Vis"]
-                    yp_hi = min(300, float(np.percentile(yp_vals[yp_vals>0], 95)) if (yp_vals>0).any() else 300)
+                    yp_name = self._smooth_surface_scalars(sm, "YPlus_Vis", n_iter=2)
+                    yp_vals = sm[yp_name]
+                    # Area-weighted: the tip slivers carry their own y+ and
+                    # vastly outnumber the body cells per unit of wetted area.
+                    yp_p95 = float(field_percentiles(sm, yp_name, 95.0)[0])
+                    if not np.isfinite(yp_p95):
+                        yp_p95 = float(np.percentile(yp_vals[yp_vals > 0], 95)) if (yp_vals > 0).any() else 300.0
+                    yp_hi = min(300.0, max(yp_p95, 1.0))
                     clim = self._get_user_clim(0, yp_hi)
                     sbar = {
                         "title": "Y+",
@@ -3027,12 +3556,12 @@ class CFDWorkspace(QWidget):
                         "fmt": "%.1f",
                     }
                     self._add_mesh_pbr(
-                        sm, scalars="YPlus_Vis", cmap=self._get_user_cmap("turbo"),
+                        sm, scalars=yp_name, cmap=self._get_user_cmap("turbo"),
                         clim=clim, opacity=self._get_user_opacity(),
                         show_scalar_bar=True, scalar_bar_args=sbar,
                     )
                     if self._chk_contour_lines.isChecked():
-                        self._add_contour_lines(sm, "YPlus_Vis", n_lines=10)
+                        self._add_contour_lines(sm, yp_name, n_lines=10)
                     self._status_lbl.setText("Boundary layer Y+ (SST needs Y+ ~ 1)")
                 else:
                     self._status_lbl.setText("Y+ not in output")
@@ -3046,7 +3575,7 @@ class CFDWorkspace(QWidget):
                 shear = extract_wall_shear(sm, q_inf=_q_inf)
                 if shear is not None:
                     sm["WallShear"] = shear
-                    sm = self._smooth_surface_scalars(sm, "WallShear", n_iter=2)
+                    ws_name = self._smooth_surface_scalars(sm, "WallShear", n_iter=2)
                     sbar = {
                         "title": "Wall Shear (Pa)",
                         "vertical": False,
@@ -3059,13 +3588,22 @@ class CFDWorkspace(QWidget):
                         "height": 0.06,
                         "fmt": "%.3f",
                     }
+                    # Percentile clim, like every other field view: raw wall
+                    # shear has a long tail and one outlier cell was setting the
+                    # whole scale. This also makes the clim slider work here.
+                    _ws = np.asarray(sm[ws_name]).flatten()
+                    _ws = _ws[np.isfinite(_ws)]
+                    _hi = float(field_percentiles(sm, ws_name, 99.0)[0])
+                    if not np.isfinite(_hi):
+                        _hi = float(np.percentile(_ws, 99)) if _ws.size else 1.0
                     self._add_mesh_pbr(
-                        sm, scalars="WallShear", cmap=self._get_user_cmap("turbo"),
+                        sm, scalars=ws_name, cmap=self._get_user_cmap("turbo"),
+                        clim=self._get_user_clim(0.0, max(_hi, 1e-9)),
                         opacity=self._get_user_opacity(),
                         show_scalar_bar=True, scalar_bar_args=sbar,
                     )
                     if self._chk_contour_lines.isChecked():
-                        self._add_contour_lines(sm, "WallShear", n_lines=10)
+                        self._add_contour_lines(sm, ws_name, n_lines=10)
 
                     # Skin-friction streamlines overlay
                     try:
@@ -3113,9 +3651,25 @@ class CFDWorkspace(QWidget):
             elif idx == 14 and sm:
                 try:
                     from cfd.post_processing import compute_force_vectors
+                    # Resolve q_inf/P_inf the same way the Cp view does. This
+                    # read dynamic_pressure straight off the result with only
+                    # an `if self._result` guard, so a result carrying q_inf=0
+                    # (never solved, or a stale/partial load) produced P_inf=0
+                    # and then a divide-by-zero building Cp_surface below —
+                    # the whole view collapsed into the except with a bare
+                    # "Force vector error" and no arrows. The `_mach_sq > 0`
+                    # ternary could never fire as a fallback either, since
+                    # _mach_sq is floored at 1e-4.
                     _mach_sq = max(self._mach, 0.01) ** 2
-                    q_inf = self._result.dynamic_pressure if self._result else 1.0
-                    P_inf = q_inf * 2.0 / (1.4 * _mach_sq) if _mach_sq > 0 else 101325.0
+                    q_inf = float(getattr(self._result, "dynamic_pressure", 0.0) or 0.0) if self._result else 0.0
+                    if q_inf > 0.0:
+                        P_inf = q_inf * 2.0 / (1.4 * _mach_sq)
+                    else:
+                        from cfd.solvers.base import isa_conditions
+                        P_isa, T_isa, rho_isa = isa_conditions(self._sp_alt.value())
+                        V_isa = self._sp_mach.value() * math.sqrt(1.4 * 287.05 * T_isa)
+                        q_inf = max(0.5 * rho_isa * V_isa ** 2, 1.0)
+                        P_inf = P_isa
 
                     fv_data = compute_force_vectors(
                         sm,
@@ -3144,18 +3698,43 @@ class CFDWorkspace(QWidget):
                         else:
                             self._plotter.add_mesh(sm, color="#c8d0dc", opacity=0.4, smooth_shading=True)
 
-                        # Generate high-quality arrows
-                        # Use uniform arrow size — direction shows where force acts,
-                        # Cp coloring shows magnitude. This avoids extreme sizing
-                        # from raw force magnitudes in different unit scales.
-                        vec_norms = np.linalg.norm(fv_data["ForceVector"], axis=1)
-                        max_vec_norm = float(vec_norms.max()) if len(vec_norms) > 0 else 1.0
-                        scale_factor = (rL * 0.08) / max(max_vec_norm, 1e-12)
+                        # Generate high-quality arrows.
+                        # Uniform arrow size: direction shows where the force
+                        # acts, Cp colouring carries the magnitude. Raw force
+                        # magnitudes scale with local cell area, so length-
+                        # scaled glyphs measure the mesh as much as the flow.
+                        # (compute_force_vectors still returns a sqrt-scaled
+                        # ForceVector and a true-magnitude ForceVectorTrue for
+                        # callers that do want length encoding; this view
+                        # deliberately uses neither, and no longer claims
+                        # "adaptive scaling" in the status line.)
+                        arrow_len = rL * 0.08
 
-                        arrows = fv_data.glyph(
+                        # Stand the arrows OFF the wall.
+                        #
+                        # pv.Arrow puts its TAIL at the glyph point and grows
+                        # along the vector. Pressure arrows point inward, so
+                        # drawn as-is every compression arrow is buried inside
+                        # the body — visible only as a smear through the 0.35-
+                        # opacity surface, which made the stagnation region look
+                        # empty while suction arrows stuck out cleanly.
+                        #
+                        # Shifting the inward ones out by one arrow length puts
+                        # their HEAD on the wall and their tail in free space:
+                        # compression reads as pushing into the surface, suction
+                        # as pulling off it, and neither is occluded.
+                        _p = np.asarray(fv_data.points)
+                        _v = np.asarray(fv_data["ForceVector"])
+                        _n = np.asarray(fv_data["NormalDirection"])
+                        _inward = np.einsum("ij,ij->i", _v, _n) < 0.0
+                        offset = np.where(_inward[:, None], _n * arrow_len, 0.0)
+                        fv_draw = fv_data.copy()
+                        fv_draw.points = (_p + offset).astype(np.float32)
+
+                        arrows = fv_draw.glyph(
                             orient="ForceVector",
                             scale=False,
-                            factor=scale_factor * max_vec_norm,
+                            factor=arrow_len,
                             geom=pv.Arrow(shaft_resolution=20, tip_resolution=40, shaft_radius=0.03, tip_radius=0.1)
                         )
                         
@@ -3168,7 +3747,10 @@ class CFDWorkspace(QWidget):
                             ambient=0.2, diffuse=0.8, specular=0.3
                         )
                         
-                        self._status_lbl.setText(f"Aerodynamic force vectors ({fv_data.n_points} samples, adaptive scaling)")
+                        self._status_lbl.setText(
+                            f"Aerodynamic force vectors ({fv_data.n_points} samples)  "
+                            f"uniform length, coloured by Cp  |  q∞={q_inf:.0f} Pa"
+                        )
                     else:
                         self._status_lbl.setText("Could not compute force vectors (missing Pressure data)")
                 except Exception as e:
@@ -3229,71 +3811,68 @@ class CFDWorkspace(QWidget):
             # -- idx 16: Temperature — Surface Contour (Aerodynamic Wall Heating) ----
             elif idx == 16 and sm:
                 t_name = _scalar(sm, "Temperature")
+                t_is_modelled = t_name is None
                 if t_name is None:
-                    # Compute aerodynamic recovery (wall) temperature from Cp
-                    # and freestream conditions.  This models physical surface
-                    # heating: peak at stagnation nose, hot at shoulder/fin
-                    # roots, cooling downstream as boundary layer develops.
+                    # Adiabatic-wall recovery temperature, for solvers that do
+                    # not write a wall Temperature field.
+                    #
+                    #   T_r = T_local * (1 + r * (gamma-1)/2 * M_local^2)
+                    #
+                    # with the local Mach recovered isentropically from the
+                    # wall pressure and the freestream stagnation pressure.
+                    # Everything here is either measured (P, rho) or a
+                    # textbook constant, and the result is bounded above by
+                    # the freestream stagnation temperature because r < 1.
+                    #
+                    # What this replaces was not a physical model: it took a
+                    # min/max-normalised Cp, raised it to an arbitrary 0.45
+                    # power for "peak sharpening", and multiplied by an
+                    # invented axial decay (1 - 0.15*x^0.8) presented as
+                    # boundary-layer cooling. Because the Cp normalisation was
+                    # against the data's own extremes, the coldest point on any
+                    # body was pinned to zero heating no matter what the flow
+                    # was doing, and the whole field rescaled itself whenever
+                    # the Cp range moved. It also took T_inf as the median of
+                    # the SURFACE static temperature, which is not a freestream
+                    # value on a body that is mostly boundary layer.
                     if "Pressure" in sm.array_names and "Density" in sm.array_names:
                         p_arr = sm["Pressure"].flatten().astype(np.float64)
                         rho_arr = sm["Density"].flatten().astype(np.float64)
                         safe_rho = np.where(rho_arr < 1e-12, 1e-12, rho_arr)
                         T_static = p_arr / (safe_rho * 287.05)
 
-                        # Freestream conditions
-                        M_inf = self._mach if self._result else self._sp_mach.value()
                         gamma = 1.4
-                        r_turb = 0.89  # turbulent recovery factor \u2248 Pr^(1/3)
+                        r_turb = 0.89   # turbulent recovery factor \u2248 Pr^(1/3)
+                        M_inf = self._mach if self._result else self._sp_mach.value()
+                        M_inf = max(float(M_inf), 1e-3)
 
-                        # Stagnation temperature rise
-                        T_inf = float(np.median(T_static))
-                        dT_stag = T_inf * (gamma - 1.0) / 2.0 * M_inf ** 2
+                        # Freestream static/stagnation pressure
+                        q_inf = float(getattr(self._result, "dynamic_pressure", 0.0) or 0.0) if self._result else 0.0
+                        if q_inf > 0.0:
+                            P_inf = q_inf * 2.0 / (gamma * M_inf ** 2)
+                        else:
+                            from cfd.solvers.base import isa_conditions
+                            P_inf, _T_isa, _rho_isa = isa_conditions(self._sp_alt.value())
+                        P_0 = P_inf * (1.0 + (gamma - 1.0) / 2.0 * M_inf ** 2) ** (gamma / (gamma - 1.0))
 
-                        # Compute local Cp for heating distribution
-                        cp_local = None
-                        for cn in ["Pressure_Coefficient", "Cp", "Cp_surface", "CpTotal"]:
-                            if cn in sm.array_names:
-                                cp_local = sm[cn].flatten().copy().astype(np.float64)
-                                break
-                        if cp_local is None:
-                            q_inf = max(
-                                self._result.dynamic_pressure if self._result else 1.0,
-                                1.0,
-                            )
-                            _msq = max(M_inf, 0.01) ** 2
-                            P_inf_est = q_inf * 2.0 / (1.4 * _msq)
-                            cp_local = (p_arr - P_inf_est) / max(q_inf, 1.0)
+                        # Local Mach from the isentropic pressure ratio.
+                        # Clamped at 0: wall pressure above P_0 is a solver
+                        # overshoot, not a real compression, and would give a
+                        # negative M^2.
+                        ratio = np.maximum(P_0 / np.maximum(p_arr, 1.0), 1.0)
+                        M_local_sq = np.maximum(
+                            2.0 / (gamma - 1.0) * (ratio ** ((gamma - 1.0) / gamma) - 1.0),
+                            0.0,
+                        )
 
-                        # Heating profile from Cp:
-                        #   Cp \u2248 1.0 at stagnation \u2192 full recovery (hottest)
-                        #   Cp \u2248 0   freestream    \u2192 partial recovery
-                        #   Cp < 0   suction       \u2192 cooler than freestream
-                        cp_clipped = np.clip(cp_local, -0.5, 1.2)
-                        cp_range = max(float(cp_clipped.max() - cp_clipped.min()), 0.01)
-                        heat_weight = (cp_clipped - cp_clipped.min()) / cp_range
-                        # Power-law sharpening: concentrate peak at stagnation
-                        heat_weight = heat_weight ** 0.45
-
-                        # Axial cooling: downstream boundary-layer growth
-                        # reduces recovery toward the aft body
-                        pts = sm.points
-                        x_local = pts[:, 0].astype(np.float64)
-                        x_min = float(x_local.min())
-                        x_max = float(x_local.max())
-                        x_range = max(x_max - x_min, 0.01)
-                        x_norm = (x_local - x_min) / x_range  # 0=nose, 1=aft
-                        bl_cooling = 1.0 - 0.15 * x_norm ** 0.8
-
-                        # Recovery wall temperature
-                        T_wall = T_static + r_turb * dT_stag * heat_weight
-                        T_wall = T_inf + (T_wall - T_inf) * bl_cooling
+                        T_wall = T_static * (1.0 + r_turb * (gamma - 1.0) / 2.0 * M_local_sq)
 
                         sm["Temperature"] = T_wall.astype(np.float32)
                         t_name = "Temperature"
                         self._log(
-                            f"Recovery wall temperature computed "
-                            f"(M={M_inf:.2f}, T\u221e={T_inf:.1f} K, "
-                            f"\u0394T_stag={dT_stag:.1f} K)"
+                            f"Recovery wall temperature modelled from wall pressure "
+                            f"(M\u221e={M_inf:.2f}, P\u221e={P_inf:.0f} Pa, r={r_turb}) \u2014 "
+                            f"range [{T_wall.min():.1f}, {T_wall.max():.1f}] K"
                         )
 
                 if t_name:
@@ -3313,10 +3892,13 @@ class CFDWorkspace(QWidget):
                         self._log(f"\u26a0 Fixed {n_nan} NaN/inf Temperature values")
 
                     # Multi-pass smoothing: Laplacian (3 iter) + Gaussian if available
-                    sm = self._smooth_surface_scalars(sm, t_name, n_iter=3)
+                    t_name = self._smooth_surface_scalars(sm, t_name, n_iter=3)
                     try:
+                        # gaussian_smooth_surface also writes back in place, so
+                        # only let it touch the derived copy, never the raw field.
                         from cfd.post_processing import gaussian_smooth_surface
-                        sm = gaussian_smooth_surface(sm, t_name, sigma=1.5, n_iter=1)
+                        if t_name.endswith("_smoothed"):
+                            gaussian_smooth_surface(sm, t_name, sigma=1.5, n_iter=1)
                     except (ImportError, Exception):
                         pass
                     t_vals = sm[t_name].flatten()
@@ -3324,13 +3906,8 @@ class CFDWorkspace(QWidget):
                     # Full range for diagnostics
                     t_lo = float(t_vals.min())
                     t_hi = float(t_vals.max())
-                    # Use percentile clim for better contrast
-                    t_p2 = float(np.percentile(t_vals, 1))
-                    t_p98 = float(np.percentile(t_vals, 99))
-                    if t_p98 - t_p2 < 1.0:
-                        t_p2 -= 5.0
-                        t_p98 += 5.0
-                    clim = self._get_user_clim(t_p2, t_p98)
+                    # Area-weighted percentile clim (see _auto_clim)
+                    clim = self._auto_clim(sm, t_name, 1.0, 99.0, floor=10.0)
 
                     self._log(
                         f"Wall Temperature: [{t_lo:.1f}, {t_hi:.1f}] K  "
@@ -3358,9 +3935,13 @@ class CFDWorkspace(QWidget):
                     # Contour line overlays
                     if self._chk_contour_lines.isChecked():
                         self._add_contour_lines(sm, t_name, n_lines=12)
+                    # Say which one it is. This claimed "recovery model" even
+                    # when the solver had supplied a real wall Temperature,
+                    # which is the usual case on SU2 output.
+                    _src = "recovery model from wall pressure" if t_is_modelled else "solver wall field"
                     self._status_lbl.setText(
                         f"Aerodynamic Wall Temperature  [{t_lo:.1f} K to {t_hi:.1f} K]  "
-                        f"(M\u221e={self._mach:.2f}, recovery model)"
+                        f"(M\u221e={self._mach:.2f}, {_src})"
                     )
                 else:
                     self._status_lbl.setText("Temperature not available on surface mesh.")
@@ -3374,19 +3955,7 @@ class CFDWorkspace(QWidget):
                 stl_surf = None
                 if self._current_stl and self._current_stl.is_file():
                     try:
-                        raw_stl = pv.read(str(self._current_stl))
-                        # K2 STL: Z=length axis, nose at Z_max, nozzle at Z_min
-                        # CFD:    X=flow axis,  nose at X=0,    nozzle at X=total_L
-                        # Transform: new_X = Z_max - Z,  new_Y = X_k2,  new_Z = Y_k2
-                        pts   = raw_stl.points.copy()
-                        z_max = pts[:, 2].max()  # nose tip Z in K2 space
-                        new_pts = np.column_stack([
-                            z_max - pts[:, 2],   # X_cfd = distance from nose
-                            pts[:, 0],           # Y_cfd = K2 X (radial)
-                            pts[:, 1],           # Z_cfd = K2 Y (radial)
-                        ])
-                        stl_surf = raw_stl.copy()
-                        stl_surf.points = new_pts
+                        stl_surf = self._stl_in_cfd_frame()
                     except Exception:
                         stl_surf = sm   # fallback to SU2 surface mesh
                 else:
@@ -3450,14 +4019,30 @@ class CFDWorkspace(QWidget):
             with open(path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
                 w.writerow(["quantity", "value"])
-                w.writerow(["mach", self._sp_mach.value()])
-                w.writerow(["altitude_m", self._sp_alt.value()])
-                w.writerow(["aoa_deg", self._sp_aoa.value()])
+                # From the RESULT, never the spin boxes: _on_finished unlocks
+                # them, so a spinner touched after the run would be exported
+                # against the old coefficients.
+                w.writerow(["mach", r.mach])
+                w.writerow(["altitude_m", r.altitude_m])
+                w.writerow(["aoa_deg", r.angle_of_attack_deg])
+                w.writerow(["reynolds", r.reynolds])
+                w.writerow(["dynamic_pressure_Pa", r.dynamic_pressure])
+                w.writerow(["reference_area_m2", r.reference_area_m2])
+                w.writerow(["reference_length_m", r.ref_length])
                 w.writerow(["cd", r.cd])
                 w.writerow(["cd_pressure", r.cd_pressure])
                 w.writerow(["cd_friction", r.cd_friction])
+                w.writerow(["cd_base", r.cd_base])
+                w.writerow(["cd_forebody_pressure", r.cd_forebody_pressure])
+                w.writerow(["cd_wave", r.cd_wave])
                 w.writerow(["cl", r.cl])
                 w.writerow(["cm", r.cm])
+                w.writerow(["cm_cg", r.cm_cg])
+                w.writerow(["cp_from_nose_m", r.cp_from_nose_m])
+                w.writerow(["cp_location_m", r.cp_location_m])
+                w.writerow(["force_axial_N", r.force_axial])
+                w.writerow(["force_normal_N", r.force_normal])
+                w.writerow(["turbulence_model", r.turbulence_model])
                 w.writerow(["converged", r.converged])
                 w.writerow([])
                 w.writerow(["iteration", "residual"])
@@ -3480,9 +4065,10 @@ class CFDWorkspace(QWidget):
             return
         r = self._result
         kv = [
-            ("Mach", f"{self._sp_mach.value():.2f}"),
-            ("Altitude", f"{self._sp_alt.value():.0f} m"),
-            ("Angle of attack", f"{self._sp_aoa.value():.1f} °"),
+            # From the result, not the spin boxes — see _export_results_csv.
+            ("Mach", f"{r.mach:.2f}"),
+            ("Altitude", f"{r.altitude_m:.0f} m"),
+            ("Angle of attack", f"{r.angle_of_attack_deg:.1f} °"),
             ("Total Cd", f"{r.cd:.5f}"),
             ("  Pressure Cd", f"{r.cd_pressure:.5f}"),
             ("  Friction Cd", f"{r.cd_friction:.5f}"),
@@ -3558,13 +4144,20 @@ class CFDWorkspace(QWidget):
             return
 
         # Step 1: Inject aero coefficients into engine (same as _inject_results)
+        #
+        # inject_cfd_results_into_engine refuses a non-converged result, and it
+        # is right to. The old else-branch here announced "injecting raw values"
+        # and then injected nothing at all — so the log claimed a hand-off that
+        # never happened, and the surface-VTK steps below carried on regardless.
         if self._result.converged:
             from cfd.post_processing import inject_cfd_results_into_engine
             inject_cfd_results_into_engine(self._result, self.engine)
             self._log(f"Force coefficients injected: Cd={self._result.cd:.4f}, "
                       f"Cl={self._result.cl:.4f}, Cm={self._result.cm:.4f}")
         else:
-            self._log("CFD did not converge — injecting raw values (use with caution)")
+            self._log("CFD did not converge — coefficients NOT injected into the "
+                      "engine. The surface field below is still exported, but "
+                      "treat any structural result from it as unvalidated.")
 
         # Step 2: Extract wall shear and temperature from surface mesh
         sm = self._surface_mesh
@@ -3693,17 +4286,10 @@ class CFDWorkspace(QWidget):
             # Re-add STL outline
             if self._current_stl and self._current_stl.is_file():
                 try:
-                    raw_stl = pv.read(str(self._current_stl))
-                    pts   = raw_stl.points.copy()
-                    z_max = pts[:, 2].max()
-                    new_pts = np.column_stack([
-                        z_max - pts[:, 2],
-                        pts[:, 0],
-                        pts[:, 1],
-                    ])
-                    stl_surf = raw_stl.copy()
-                    stl_surf.points = new_pts
-                    self._plotter.add_mesh(stl_surf, color="#c8d0dc", opacity=0.3, style="wireframe")
+                    stl_surf = self._stl_in_cfd_frame()
+                    if stl_surf is not None:
+                        self._plotter.add_mesh(stl_surf, color="#c8d0dc",
+                                               opacity=0.3, style="wireframe")
                 except Exception:
                     pass
             self._plotter.add_axes()
@@ -3714,7 +4300,7 @@ class CFDWorkspace(QWidget):
 
     def reset_workspace(self):
         """Blank CFD results + plots/3D view (called on New Project)."""
-        self._result = None
+        self._clear_results()          # also drops the cached VTK meshes
         from ui.workspace_reset import clear_visuals
         clear_visuals(self)
         for name, w in list(vars(self).items()):
@@ -3763,6 +4349,41 @@ class CFDWorkspace(QWidget):
             self._sp_smax.blockSignals(False)
             return [auto_lo, auto_hi]
         return [lo, hi]
+
+    def _auto_clim(self, mesh, name, lo_pct=1.0, hi_pct=99.0,
+                   symmetric=False, floor=0.0, weighted=True):
+        """Colour range for *name* on *mesh*, honouring the user's spin boxes.
+
+        ``symmetric`` mirrors the range about zero, for diverging colormaps.
+
+        ``weighted`` picks how the percentiles are counted, and the right
+        answer differs by mesh — pass it deliberately:
+
+        * **Surfaces (True).** Wall mesh density follows CAD geometry, not
+          the flow. Cell areas span ~3e5 : 1 with the slivers packed onto the
+          nose tip, so counting one sample per point describes the tip rather
+          than the airframe: the point-based 95th percentile of Cp on a
+          measured M=0.8 case was 0.907 against an area-weighted 0.057.
+          Weighting by area is what makes the colour bar describe the model.
+
+        * **Volume slices (False).** Here the grading IS the physics — the
+          mesher deliberately packs cells into the boundary layer and wake.
+          Weighting by area hands almost all of it to the big undisturbed
+          farfield cells and collapses the range onto freestream: the
+          measured 1-99% pressure band went to [68193, 72571] Pa on a field
+          that really spans [55k, 118k] near the body. Point counting
+          inherits the mesher's judgement and is the better estimator.
+        """
+        lo, hi = field_percentiles(mesh, name, [lo_pct, hi_pct], weighted=weighted)
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            lo, hi = 0.0, max(floor, 1.0)
+        lo, hi = float(lo), float(hi)
+        if symmetric:
+            half = max(abs(lo), abs(hi), floor)
+            lo, hi = -half, half
+        elif hi - lo < 1e-12:
+            hi = lo + max(floor, 1e-6)
+        return self._get_user_clim(lo, hi)
 
     def _get_user_opacity(self) -> float:
         """Return opacity from the slider (0.1 – 1.0)."""
@@ -3862,10 +4483,19 @@ class CFDWorkspace(QWidget):
 
     def _add_mesh_pbr(self, mesh, scalars=None, cmap="turbo", clim=None,
                       opacity=1.0, show_scalar_bar=True, scalar_bar_args=None,
-                      name=None):
-        """Add a mesh with professional PBR-like rendering.
-        Falls back to Phong if PBR is unavailable."""
-        import numpy as np
+                      name=None, lit=None):
+        """Add a surface mesh, shaded or flat depending on what it is showing.
+
+        ``lit`` defaults to *False* whenever ``scalars`` is set. A scalar
+        field view is a measurement: the pixel colour has to be the colour
+        the bar says it is, and PBR does not allow that. Metallic/roughness
+        shading plus ``enable_lightkit`` and SSAO multiply the mapped colour
+        by a lighting term that varies over the body, so the same Cp read
+        one colour on the lit top of the airframe and another underneath,
+        and near-white values (most of a transonic body) came out grey
+        metal. Untextured geometry — the STL preview — still gets the nice
+        shading by passing ``lit=True``.
+        """
         show_edges = self._get_show_edges()
         edge_kw = dict(show_edges=show_edges, edge_color="#1a1e24", line_width=0.5) if show_edges else dict(show_edges=False)
 
@@ -3876,31 +4506,34 @@ class CFDWorkspace(QWidget):
             if n != mesh.n_points and n != mesh.n_cells:
                 # Scalar array corrupted — render without scalars to avoid crash
                 scalars = None
+        if lit is None:
+            lit = scalars is None
+
+        common = dict(
+            scalars=scalars, cmap=cmap, clim=clim,
+            nan_color="#1a1e24",
+            interpolate_before_map=True,
+            opacity=opacity,
+            show_scalar_bar=show_scalar_bar,
+            scalar_bar_args=scalar_bar_args or {},
+            name=name,
+            **edge_kw,
+        )
+        if not lit:
+            # Flat mapping — rendered colour == colorbar colour.
+            self._plotter.add_mesh(mesh, lighting=False, smooth_shading=True, **common)
+            return
         try:
             self._plotter.add_mesh(
-                mesh, scalars=scalars, cmap=cmap, clim=clim,
-                nan_color="#1a1e24",
-                smooth_shading=True,
-                interpolate_before_map=True,
+                mesh, smooth_shading=True,
                 pbr=True, metallic=0.08, roughness=0.35,
-                opacity=opacity,
-                show_scalar_bar=show_scalar_bar,
-                scalar_bar_args=scalar_bar_args or {},
-                name=name,
-                **edge_kw,
+                **common,
             )
         except Exception:
             # Fallback to Phong rendering
             self._plotter.add_mesh(
-                mesh, scalars=scalars, cmap=cmap, clim=clim,
-                nan_color="#1a1e24",
-                smooth_shading=True,
-                interpolate_before_map=True,
+                mesh, smooth_shading=True,
                 specular=0.4, specular_power=30,
                 ambient=0.2, diffuse=0.7,
-                opacity=opacity,
-                show_scalar_bar=show_scalar_bar,
-                scalar_bar_args=scalar_bar_args or {},
-                name=name,
-                **edge_kw,
+                **common,
             )

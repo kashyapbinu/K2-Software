@@ -11,6 +11,7 @@ boundary layer thickness estimation.
 """
 from __future__ import annotations
 import logging
+import math
 import numpy as np
 from typing import Optional, Dict, List, Tuple
 from dataclasses import dataclass, field
@@ -114,6 +115,83 @@ class _SeparationResult(dict):
 # ---------------------------------------------------------------------------
 #  Core extraction helpers
 # ---------------------------------------------------------------------------
+
+def predict_wall_yplus(
+    wall_spacing: float,
+    velocity: float,
+    density: float,
+    viscosity: float,
+    ref_length: float,
+) -> dict:
+    """Predict wall y+ from mesh spacing and freestream state, before solving.
+
+    Uses the turbulent flat-plate correlation Cf = 0.0576 * Re_x^-0.2 at
+    mid-body, which is accurate enough to tell the three regimes apart:
+
+    * ``y+ < 5``      wall-resolved; SA/SST integrate to the wall correctly.
+    * ``5 < y+ < 30``  buffer layer; the worst place to sit — neither a wall
+      model nor wall resolution is valid.
+    * ``30 < y+ < 300`` log layer; correct with a wall function.
+    * ``y+ > 300``     under-resolved; wall shear and heat transfer are
+      meaningless and drag will read low.
+
+    This exists because the mesher cannot build prism layers on an OCC
+    boolean-cut domain (see cfd/meshing.py step 7), so every mesh is tet-only
+    and the first cell sits orders of magnitude too far from the wall. A
+    measured M=0.8 case ran y+ up to 619 with skin friction 13x below the
+    flat-plate value. Nothing in the pipeline said so — the Y+ view rendered a
+    smooth plausible field and the polars reported a confident Cd. Predicting
+    it at config time makes the limitation visible before the run, instead of
+    after someone trusts the number.
+
+    Returns a dict with ``y_plus``, ``regime``, ``wall_resolved`` and the
+    ``spacing_for_yplus_1`` the mesh would need.
+
+    Expect this to read HIGHER than the y+ SU2 writes into the surface file,
+    and do not treat that gap as an error in either number. This prediction
+    uses the correlation value of Cf, i.e. what the friction should be; SU2
+    reports y+ built from the friction it actually computed, which on an
+    unresolved wall is far too low and therefore drags its own y+ down with
+    it. On the measured M=0.8 case this predicts ~3500 against a reported
+    peak of 619 — the disagreement is itself a symptom of the under-resolution
+    both are describing.
+    """
+    out = {
+        "y_plus": float("nan"),
+        "regime": "unknown",
+        "wall_resolved": False,
+        "spacing_for_yplus_1": float("nan"),
+    }
+    if min(wall_spacing, velocity, density, viscosity, ref_length) <= 0:
+        return out
+
+    nu = viscosity / density
+    re_x = max(velocity * (ref_length * 0.5) / nu, 1.0)
+    cf = 0.0576 * re_x ** -0.2
+    tau_w = 0.5 * density * velocity ** 2 * cf
+    u_tau = math.sqrt(tau_w / density)
+
+    # First cell CENTROID sits roughly half a cell off the wall for tets.
+    y1 = 0.5 * wall_spacing
+    y_plus = u_tau * y1 / nu
+
+    if y_plus < 5:
+        regime = "wall-resolved"
+    elif y_plus < 30:
+        regime = "buffer-layer (invalid for both wall models and resolution)"
+    elif y_plus <= 300:
+        regime = "log-layer (needs a wall function)"
+    else:
+        regime = "under-resolved"
+
+    out.update(
+        y_plus=float(y_plus),
+        regime=regime,
+        wall_resolved=bool(y_plus < 5),
+        spacing_for_yplus_1=float(2.0 * nu / u_tau),
+    )
+    return out
+
 
 def extract_yplus(surface_mesh) -> Optional[np.ndarray]:
     """Extract Y+ distribution from the surface mesh."""
@@ -261,13 +339,27 @@ def detect_separation(surface_mesh) -> Optional[_SeparationResult]:
 
     cf_x: Optional[np.ndarray] = None
 
-    # Look for skin friction vector (x-component indicates streamwise direction)
-    for name in ["Skin_Friction_Coefficient_X", "SF_X", "wallShearStress"]:
+    # Look for the skin friction vector; its x-component is the streamwise one,
+    # and a sign change there is what separation actually is.
+    #
+    # "Skin_Friction_Coefficient" (a 3-vector) MUST come first: that is the name
+    # SU2 writes, and every other reader in this module already uses it. This
+    # list previously held only the split "_X" variants, which SU2 never emits —
+    # so every SU2 run fell through to the magnitude fallback below and reported
+    # zero separated cells and no separation lines, whatever the flow was doing.
+    for name in ["Skin_Friction_Coefficient", "Skin_Friction_Coefficient_X",
+                 "SF_X", "Wall_Shear_Stress", "wallShearStress"]:
         if name in surface_mesh.array_names:
-            data = surface_mesh[name]
-            if data.ndim > 1:
+            data = np.asarray(surface_mesh[name])
+            if data.ndim > 1 and data.shape[1] >= 1:
                 # Use X component (freestream direction)
                 cf_x = np.asarray(data[:, 0], dtype=np.float32)
+            elif data.ndim == 1 and not name.endswith(("_X",)):
+                # A scalar under a vector field's name is a magnitude, which
+                # carries no sign — useless for separation. Let it fall through
+                # to the magnitude-threshold fallback rather than testing <= 0
+                # on a quantity that is non-negative by construction.
+                continue
             else:
                 cf_x = np.asarray(data, dtype=np.float32)
             break

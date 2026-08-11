@@ -84,21 +84,52 @@ class CFDConfig:
     # Solver
     max_iterations: int = 5000
     convergence_tolerance: float = 1e-6
-    turbulence_model: str = "SST"       # "Euler" | "Laminar" | "SA" | "SST" | "KE"
+    # "Euler" | "Laminar" | "SA" | "SST". SU2 has no k-epsilon model, so there is
+    # no "KE" option — an unrecognised value silently falls back to SST.
+    turbulence_model: str = "SST"
     # Hybrid polar mode: solve inviscid (turbulence_model="Euler") and add a
     # flat-plate skin-friction build-up to Cd per sweep point. Avoids the
     # spurious viscous body lift + inflated pressure drag of wall-unresolved
     # RANS on the tet-only mesh (y+ >> 1, no prism layers, no wall functions).
     euler_analytic_friction: bool = False
-    n_cores: int = 0                    # MPI ranks for SU2_CFD. 0 = auto (all cores).
-                                        # Requires an MPI-built SU2 + mpiexec on PATH/bin;
-                                        # falls back to serial if neither is present.
+    # Parallelism for SU2_CFD. 0 = auto (cores - 1, leaving one for the UI).
+    # The BUNDLED SU2 is an OpenMP build with no MPI, so in practice this sets
+    # OMP_NUM_THREADS on a single process — it is a thread count, not a rank
+    # count. If an MPI-built SU2 and an mpiexec/mpirun are both found it is used
+    # as a rank count instead; run() probes for that and falls back to the
+    # single-process OpenMP path when the probe fails.
+    n_cores: int = 0
 
     # Paths (populated at runtime). Per-user writable in a frozen build; resolves
     # to repo/cfd_run in a source run (unchanged dev behavior).
     work_dir: Path = field(default_factory=lambda: user_data_dir("cfd_run"))
     geometry_stl: Optional[Path] = None   # filled by geometry exporter
     geometry_dict: Optional[dict] = None  # exact dims from extract_cfd_geometry()
+
+    # ── External CAD mode ────────────────────────────────────────────────────
+    # When external_cad is set the parametric rocket is bypassed: the imported
+    # body itself is subtracted from the wind tunnel (cfd.meshing.
+    # build_external_cad_mesh) and geometry_dict is ignored.
+    external_cad: Optional[Path] = None   # .step/.stp/.iges/.brep/.stl/.obj/.ply
+    flow_axis: str = "auto"               # model axis mapped to +X: auto|x|y|z
+    cad_info: Optional[dict] = None       # CADInfo.as_dict() from analyze_cad()
+    # Unit the CAD file's bare numbers are in: auto|m|cm|mm|in|ft. The model
+    # is scaled to metres at import; without this a millimetre STEP is solved
+    # as a 1000x body and every coefficient is meaningless.
+    cad_units: str = "auto"
+    # Repair dirty CAD by rebuilding it as a distance-field wrap. ALTERS the
+    # geometry: offsets the surface outward, rounds features below the grid
+    # spacing and seals internal passages — an outer mold line only. Off by
+    # default; the only route that works when a solid self-intersects or an
+    # assembly's parts interpenetrate.
+    cad_wrap: bool = False
+    cad_wrap_resolution: str = "medium"   # coarse | medium | fine
+    # Force-coefficient references. An arbitrary body has no "body diameter" to
+    # infer them from, so they default to the measured frontal area and
+    # flow-wise bbox extent; set these to publish coefficients about a
+    # different reference (wing area, mean chord, …). None = auto.
+    ref_area_override: Optional[float] = None      # [m²]
+    ref_length_override: Optional[float] = None    # [m]
 
 
 @dataclass
@@ -114,12 +145,30 @@ class CFDResult:
     reference_area_m2: float = 0.0
     v_inf: float = 0.0            # Freestream velocity (m/s) for dimensional display
     mach: float = 0.0             # Mach number for dimensional display
+    # The conditions this result was actually solved at. Carried on the result
+    # so exports and annotations cannot drift: the UI unlocks its spin boxes as
+    # soon as a run finishes, and anything reading them afterwards records
+    # whatever the user has since typed against the old coefficients.
+    altitude_m: float = 0.0
+    angle_of_attack_deg: float = 0.0
 
-    # Drag decomposition
-    cd_pressure: float = 0.0     # Pressure drag coefficient
-    cd_friction: float = 0.0     # Skin friction drag coefficient
-    cd_base: float = 0.0         # Base drag estimate
-    cd_wave: float = 0.0         # Wave drag (supersonic only)
+    # ── Drag decomposition ───────────────────────────────────────────────────
+    # The total is cd = cd_pressure + cd_friction (both integrated off the wall
+    # solution in the wind axis). cd_base and cd_wave are COMPONENTS OF
+    # cd_pressure, not additional terms, and must not be summed with the two
+    # above. Both come from the same wall integral (cfd/drag_decomposition.py):
+    #   cd_base = the integral restricted to rearward-facing cells
+    #   cd_forebody_pressure = cd_pressure - cd_base   (exact, at any AoA)
+    #   cd_wave = cd_forebody_pressure at M >= 0.8, else 0
+    # Oswatitsch entropy production is implemented too but is a mesh-quality
+    # DIAGNOSTIC only — logged at DEBUG, never stored in any field here.
+    cd_pressure: float = 0.0     # Pressure drag coefficient (integrated)
+    cd_friction: float = 0.0     # Skin friction drag coefficient (integrated)
+    cd_base: float = 0.0         # Base drag — pressure integral over the aft face
+    cd_forebody_pressure: float = 0.0   # cd_pressure - cd_base (exact)
+    cd_wave: float = 0.0         # Wave drag = forebody pressure drag at M >= 0.8, else 0
+    base_area_m2: float = 0.0    # Projected area the base integral covered
+    drag_decomposition_method: str = ""   # provenance of cd_wave
 
     # Force components (dimensional, Newtons)
     force_axial: float = 0.0     # Axial force (drag direction)

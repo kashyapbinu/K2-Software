@@ -40,6 +40,48 @@ def _ogive_profile(length, radius, n=50):
     return zs, rs
 
 
+def nose_profile(shape, length, radius, n=50):
+    """Nose cone meridian (zs, rs) for the declared ``NoseCone.shape``.
+
+    Same convention as :func:`_ogive_profile`: ``zs[0]=0`` is the BASE
+    (r=radius), ``zs[-1]=length`` is the TIP (r≈0).
+
+    Every caller used to go straight to ``_ogive_profile``, so a conical,
+    elliptical, parabolic or Haack nose was drawn — and exported — as an ogive
+    regardless of what the user picked. This is the single shape-aware source
+    the viewer, the mission view, the stress viewer and the CFD geometry
+    exporter all share, so the picture, the STL and the CFD mesh agree.
+
+    Unknown shapes fall back to the tangent ogive, which is the K2 default.
+    """
+    if radius <= 0 or length <= 0:
+        return np.array([0.0, length]), np.array([radius, 0.0])
+
+    key = (shape or "Ogive").strip().lower()
+    if key.startswith("conic"):
+        # Exactly two stations: a cone is straight, so no polyline artefacts.
+        return np.array([0.0, length]), np.array([radius, 0.0])
+
+    zs = np.linspace(0.0, length, max(int(n), 2))
+    t = zs / length                      # 0 at base → 1 at tip
+
+    if key.startswith("ellip"):
+        rs = radius * np.sqrt(np.maximum(1.0 - t ** 2, 0.0))
+    elif key.startswith("parab"):
+        rs = radius * (1.0 - t ** 2)
+    elif key.startswith("haack") or "karman" in key or "kármán" in key:
+        # Von Kármán / LD-Haack (C=0), measured from the TIP.
+        x = np.clip(1.0 - t, 0.0, 1.0)
+        theta = np.arccos(np.clip(1.0 - 2.0 * x, -1.0, 1.0))
+        rs = (radius / np.sqrt(np.pi)) * np.sqrt(
+            np.maximum(theta - 0.5 * np.sin(2.0 * theta), 0.0)
+        )
+    else:
+        return _ogive_profile(length, radius, n)
+
+    return zs, np.clip(rs, 0.0, radius)
+
+
 def _make_surface_of_revolution(zs, rs, n_theta=RES):
     """Create a surface of revolution mesh from a z-r profile."""
     thetas = np.linspace(0, 2 * np.pi, n_theta, endpoint=False)
@@ -268,9 +310,11 @@ class Viewer3D(QWidget):
                                      smooth_shading=True, specular=0.5,
                                      specular_power=20, name=f"{name}_sh")
 
-            # Ogive profile sits above the shoulder
+            # Nose profile sits above the shoulder
             z_ogive_base = z_base + L_shoulder
-            profile_z, profile_r = _ogive_profile(L_nose, r, n=50)
+            profile_z, profile_r = nose_profile(
+                getattr(comp, "shape", "Ogive"), L_nose, r, n=50
+            )
             profile_z = profile_z + z_ogive_base
 
             mesh = _make_surface_of_revolution(profile_z, profile_r)
@@ -487,8 +531,10 @@ class Viewer3D(QWidget):
                            [-r_sh, 0, z_ogive_base], [-r_sh, 0, z_base]]
                     self._draw_loop(pts, outer_color, line_width=l_width)
                 
-                # Ogive
-                profile_z, profile_r = _ogive_profile(L_nose, r, n=50)
+                # Nose
+                profile_z, profile_r = nose_profile(
+                    getattr(comp, "shape", "Ogive"), L_nose, r, n=50
+                )
                 profile_z = profile_z + z_ogive_base
                 
                 pts = []
