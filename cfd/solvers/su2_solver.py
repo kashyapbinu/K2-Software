@@ -495,9 +495,13 @@ class SU2Solver(CFDSolver):
         # just the missing viscous heating on 88% of the surface.
         #
         # Tuning it makes it worse, not better: WALLMODEL_MAXITER= 1000 with
-        # WALLMODEL_RELFAC= 0.1 and WALLMODEL_MINYPLUS= 2.0 raised the failure
-        # rate to 6222/6318 (98.5%), and it sat there rather than working its
-        # way down as the restart advanced.
+        # WALLMODEL_RELFAC= 0.1 and WALLMODEL_MINYPLUS= 2.0 took the failure
+        # rate to 6252/6318 (99.0%) over 300 restart iterations, drifting up
+        # rather than down as the run advanced. It also took the surviving
+        # points with it: the 66 still solving freely ended at a median Cf of
+        # 1.4e-6, against 1.46e-3 for the untuned run's free points. More
+        # Newton iterations at lower relaxation do not recover a wall function
+        # whose first cell is outside the band it can invert.
         #
         # Root cause is the mesh, not the model. A wall function is only valid
         # for 30 < y+ < 300; the first cell here sits near y+ 3500 (see

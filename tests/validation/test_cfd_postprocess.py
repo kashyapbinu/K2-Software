@@ -224,9 +224,10 @@ def test_su2_viscous_config_does_not_enable_wall_functions(tmp_path):
     partly *because* the viscous heating is missing on most of the body.
 
     Tuning made it worse: WALLMODEL_MAXITER=1000 / RELFAC=0.1 / MINYPLUS=2.0
-    raised the failure rate to 6222/6318 (98.5%) and held it there. The first
-    cell sits near y+ 3500, outside the 30 < y+ < 300 band a wall function can
-    invert at all.
+    took the failure rate to 6252/6318 (99.0%) over 300 restart iterations,
+    and the 66 points still solving freely fell to a median Cf of 1.4e-6 from
+    the untuned run's 1.46e-3. The first cell sits near y+ 3500, outside the
+    30 < y+ < 300 band a wall function can invert at all.
 
     If prism layers ever land (cfd/meshing.py step 7), re-measure before
     deleting this test.
