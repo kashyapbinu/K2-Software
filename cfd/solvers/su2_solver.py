@@ -211,11 +211,27 @@ VOLUME_OUTPUT= COORDINATES, SOLUTION, PRIMITIVE, PRESSURE_COEFFICIENT, MACH, Q_C
 
 
 
-def _wall_spacing_from_su2_mesh(mesh_path: Path) -> Optional[float]:
-    """Median edge length of the ``rocket_wall`` triangles in a .su2 mesh.
+def _wall_spacing_from_su2_mesh(mesh_path: Path) -> Optional[dict]:
+    """Measure how far the first cell centroid sits off ``rocket_wall``.
 
-    Used to predict y+ before the solve. Returns None if the file cannot be
-    parsed — this is diagnostics, so it must never take a run down with it.
+    Returns ``{"normal": m, "tangential": m, "source": "prism"|"tet"}``, or None
+    if the file cannot be parsed — this is diagnostics, so it must never take a
+    run down with it.
+
+    The distinction matters because y+ is a wall-NORMAL quantity and the two
+    mesh types put the first cell in completely different places:
+
+    * With a prism stack (VTK type 13), the wall-normal spacing is the first
+      layer's own thickness, measured here as the distance between the wall
+      triangle and the matching triangle on the far face of its prism. It is
+      typically thousands of times smaller than the triangle's own edges.
+    * On a tet-only mesh there is no wall-normal direction to measure, and the
+      first cell centroid is roughly half a facet off the wall, so the surface
+      triangle's median edge length is the only available proxy.
+
+    Reading the triangle edge in both cases — as this did while prisms were
+    impossible — reports a tet-mesh y+ for a prism mesh, i.e. it would claim the
+    wall is unresolved on exactly the meshes that finally resolve it.
     """
     try:
         import numpy as np
@@ -224,6 +240,7 @@ def _wall_spacing_from_su2_mesh(mesh_path: Path) -> Optional[float]:
 
         points = None
         tris: list[tuple[int, int, int]] = []
+        prisms: list[tuple[int, ...]] = []
         i = 0
         while i < len(lines):
             head = lines[i].strip()
@@ -232,6 +249,13 @@ def _wall_spacing_from_su2_mesh(mesh_path: Path) -> Optional[float]:
                 points = np.empty((n, 3), dtype=float)
                 for j in range(n):
                     points[j] = [float(v) for v in lines[i + 1 + j].split()[:3]]
+                i += n
+            elif head.startswith("NELEM="):
+                n = int(head.split("=")[1].split()[0])
+                for j in range(n):
+                    parts = lines[i + 1 + j].split()
+                    if parts and parts[0] == "13":      # VTK wedge / prism
+                        prisms.append(tuple(int(v) for v in parts[1:7]))
                 i += n
             elif head.startswith("MARKER_TAG=") and "rocket_wall" in head:
                 n = int(lines[i + 1].split("=")[1])
@@ -250,7 +274,38 @@ def _wall_spacing_from_su2_mesh(mesh_path: Path) -> Optional[float]:
             np.linalg.norm(tri[:, 2] - tri[:, 1], axis=1),
             np.linalg.norm(tri[:, 0] - tri[:, 2], axis=1),
         ])
-        return float(np.median(edges))
+        tangential = float(np.median(edges))
+
+        # First-layer prisms are the ones whose bottom face is a wall triangle.
+        # Match on the node SET, because the prism's bottom face may be wound
+        # opposite to the marker triangle.
+        if prisms:
+            wall_faces = {frozenset(t) for t in tris}
+            first: list[float] = []
+            for pr in prisms:
+                bot, top = pr[:3], pr[3:]
+                if frozenset(bot) in wall_faces:
+                    first.append(float(np.linalg.norm(
+                        points[list(top)].mean(axis=0)
+                        - points[list(bot)].mean(axis=0)
+                    )))
+                elif frozenset(top) in wall_faces:
+                    first.append(float(np.linalg.norm(
+                        points[list(bot)].mean(axis=0)
+                        - points[list(top)].mean(axis=0)
+                    )))
+            if first:
+                return {
+                    "normal": float(np.median(first)),
+                    "tangential": tangential,
+                    "source": "prism",
+                }
+            logger.warning(
+                "Mesh contains prisms but none sit on rocket_wall — falling back "
+                "to the tet-mesh y+ estimate, which will read far too high."
+            )
+
+        return {"normal": tangential, "tangential": tangential, "source": "tet"}
     except Exception as exc:
         logger.debug(f"Wall-spacing probe failed on {mesh_path}: {exc}")
         return None
@@ -376,15 +431,15 @@ class SU2Solver(CFDSolver):
 
     # ── Configuration file generation ────────────────────────────────────────
 
-    def generate_case(self) -> Path:
-        """Write the SU2 .cfg file with correct ISA conditions."""
-        cfg = self.config
-        P, T, rho = isa_conditions(cfg.altitude_m)
-        a = math.sqrt(1.4 * 287.05 * T)          # speed of sound
-        V_inf = cfg.mach * a                       # freestream velocity
-        mu = 1.716e-5 * (T / 273.15) ** 1.5 * (273.15 + 110.4) / (T + 110.4)  # Sutherland
+    def _reference_values(self) -> tuple[float, float]:
+        """Return ``(ref_area_m2, ref_length_m)`` for the force coefficients.
 
-        # Reference values
+        Extracted from generate_case() so anything that needs the reference
+        length before the solve — mesh sizing, the pre-run y+ prediction —
+        reads the same value the coefficients are normalised by, rather than
+        recomputing its own and drifting by the ratio of the two.
+        """
+        cfg = self.config
         ref_length = 1.0
         ref_area = 0.1
 
@@ -442,6 +497,19 @@ class SU2Solver(CFDSolver):
         if cfg.ref_length_override and cfg.ref_length_override > 0:
             ref_length = float(cfg.ref_length_override)
             logger.info(f"Reference length overridden by user: {ref_length:.4f} m")
+
+        return ref_area, ref_length
+
+    def generate_case(self) -> Path:
+        """Write the SU2 .cfg file with correct ISA conditions."""
+        cfg = self.config
+        P, T, rho = isa_conditions(cfg.altitude_m)
+        a = math.sqrt(1.4 * 287.05 * T)          # speed of sound
+        V_inf = cfg.mach * a                       # freestream velocity
+        mu = 1.716e-5 * (T / 273.15) ** 1.5 * (273.15 + 110.4) / (T + 110.4)  # Sutherland
+
+        # Reference values
+        ref_area, ref_length = self._reference_values()
 
         Re = rho * V_inf * ref_length / mu
         q_inf = 0.5 * rho * V_inf ** 2
@@ -507,10 +575,18 @@ class SU2Solver(CFDSolver):
         # for 30 < y+ < 300; the first cell here sits near y+ 3500 (see
         # predict_wall_yplus below), far outside the band the Newton solve can
         # invert. Both a low-Re model and a wall function fail on the same
-        # cause -- no prism layers, blocked by the OCC boolean-cut domain (see
-        # cfd/meshing.py step 7). Until that is solved, wall shear from RANS is
-        # not trustworthy on this mesh and total drag should come from the
-        # hybrid Euler + analytic-friction mode instead.
+        # cause -- no prism layers.
+        #
+        # That blocker was re-measured on Gmsh 4.15.2 and is narrower than it
+        # was written up as. Extrusion is not what fails; leaving a valid mesh
+        # behind is. The prisms come out attached and generate(3) completes, but
+        # the tets fill the boundary-layer region as well, so the wall ends up
+        # with cells on both sides and SU2 cannot converge on it at all.
+        # Rebuilding the volume against the stack is where Gmsh actually stops
+        # ("non-manifold quad boundaries not supported yet"). See the
+        # cfd/meshing.py module docstring. Until that is solved, wall shear from
+        # RANS is not trustworthy on this mesh and total drag should come from
+        # the hybrid Euler + analytic-friction mode instead.
         if is_viscous:
             wall_bc = "MARKER_HEATFLUX= ( rocket_wall, 0.0 )"
         else:
@@ -531,12 +607,15 @@ class SU2Solver(CFDSolver):
             if spacing:
                 from cfd.boundary_layer import predict_wall_yplus
                 yp = predict_wall_yplus(
-                    wall_spacing=spacing, velocity=V_inf, density=rho,
+                    wall_spacing=spacing["normal"], velocity=V_inf, density=rho,
                     viscosity=mu, ref_length=ref_length,
                 )
+                where = ("the first prism layer" if spacing["source"] == "prism"
+                         else "the wall facet size (tet-only mesh)")
                 msg = (
-                    f"Predicted wall y+ ≈ {yp['y_plus']:.0f} ({yp['regime']}) "
-                    f"from a {spacing*1000:.2f} mm wall spacing. "
+                    f"Predicted wall y+ ≈ {yp['y_plus']:.1f} ({yp['regime']}) "
+                    f"from a {spacing['normal']*1e6:.1f} µm wall-normal spacing, "
+                    f"measured off {where}. "
                     f"y+ = 1 would need {yp['spacing_for_yplus_1']*1e6:.2f} µm."
                 )
                 if yp["y_plus"] > 30:
@@ -546,6 +625,12 @@ class SU2Solver(CFDSolver):
                         "is unresolved and there is no wall model. Pressure drag "
                         "and Cp are still usable; for total drag prefer the "
                         "hybrid Euler + analytic-friction mode."
+                    )
+                elif 5 <= yp["y_plus"] <= 30:
+                    logger.warning(
+                        msg + " That is the buffer layer, where neither wall "
+                        "resolution nor a wall function is valid. Re-mesh with a "
+                        "smaller target y+ before trusting the skin friction."
                     )
                 else:
                     logger.info(msg)

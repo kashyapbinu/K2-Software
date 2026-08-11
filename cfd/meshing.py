@@ -12,10 +12,41 @@ Approach:
   6. Run quality checks and export SU2
 
 Boundary Layer Strategy:
-  Tet-only with aggressive near-wall refinement. Prism extrusion via
-  gmsh.model.geo.extrudeBoundaryLayer is INCOMPATIBLE with OCC boolean-cut
-  domains (corrupts topology, generate(3) crashes), so near-wall resolution
-  comes from the tiered distance fields alone.
+  Tet-only with aggressive near-wall refinement, from the tiered distance
+  fields alone. Prism layers remain out of reach on this domain, and the reason
+  is more specific than "extrudeBoundaryLayer crashes" — that claim was
+  re-tested on Gmsh 4.15.2 and is no longer what happens:
+
+  * The extrusion itself RUNS. On the OCC boolean-cut domain, at coarse, medium
+    and fine, on the finned cone-tipped rocket, it produces attached prisms
+    (151k at coarse) with the physical groups intact, and generate(3) then
+    completes without error. Element counts, quality metrics and the exported
+    .su2 all look correct.
+  * The mesh is nevertheless invalid, and silently so. The original OCC fluid
+    volume still spans the boundary-layer region, so the tet pass fills it too:
+    the prisms and tets OVERLAP. Measured on the coarse mesh, all 6066 wall
+    triangles had a 3D element on both sides — the wall is not a boundary at
+    all. SU2 accepts the file, reports plausible mesh-quality metrics, and then
+    cannot converge: the residual never drops below its iteration-0 value and
+    the run ends in NaN. That was reproduced across five numerics variants
+    (gradient scheme, CFL, linear solver, limiter), which is how it was traced
+    to the mesh rather than the settings.
+  * Fixing it properly means rebuilding the volume after the extrusion, so the
+    tets are bounded by the stack's outer face. That is where Gmsh stops:
+    "Pyramid top vertex already classified ... non-manifold quad boundaries not
+    supported yet". The prism stack's quad faces cannot bound a tet region.
+
+  So the conclusion the module reached before still holds, but the useful
+  version of it is: extrusion is not the blocker, the volume rebuild is, and an
+  extruded mesh that is never volume-rebuilt is WORSE than no prisms because
+  nothing downstream reports it as broken. _check_mesh_quality now audits wall
+  manifoldness for exactly this, so a future attempt fails loudly.
+
+  Consequences, unchanged: the first cell sits near y+ 3500, far outside the
+  30 < y+ < 300 band a wall function can invert, so neither a low-Re model nor
+  a wall model has a valid first cell. Skin friction is under-resolved either
+  way — a known accuracy limit, and the reason the sweep offers a hybrid Euler
+  + flat-plate-friction mode instead of trusting RANS friction here.
 
   There are NO wall functions to fall back on, and this was tested rather than
   assumed. SU2's STANDARD_WALL_FUNCTION diverges from a freestream cold start
@@ -24,13 +55,6 @@ Boundary Layer Strategy:
   points with no wall shear at all. Tuning the wall-model solver made it worse.
   Full measured numbers are in cfd/solvers/su2_solver.py — read them before
   re-enabling it.
-
-  The cause is this mesh: the first cell sits near y+ 3500, far outside the
-  30 < y+ < 300 band a wall function can invert, so neither a low-Re model nor
-  a wall model has a valid first cell. Skin friction is therefore under-resolved
-  either way — a known accuracy limit, and the reason the sweep offers a hybrid
-  Euler + flat-plate-friction mode instead of trusting RANS friction here.
-  Prism layers are the real fix and are blocked by the OCC limitation above.
 
 Coordinate convention (CFD frame): +X = freestream flow direction,
 nose tip at x=0, nozzle at x=total_L.
@@ -43,6 +67,7 @@ import logging
 import math
 from dataclasses import replace
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger("K2.CFD.Meshing")
 
@@ -551,13 +576,23 @@ def _build_mesh(
     gmsh.model.mesh.generate(2)
     logger.info("2D surface mesh generated")
 
-    # ── 7. Selective prism boundary layer extrusion ───────────────────────────
-    # Strategy: Tet-only with aggressive near-wall refinement.
+    # ── 7. Prism boundary layer extrusion — NOT DONE, and not for the reason
+    #       this comment used to give ────────────────────────────────────────
     #
-    # geo.extrudeBoundaryLayer is INCOMPATIBLE with OCC boolean-cut domains —
-    # it corrupts the model topology, causing generate(3) to crash even when
-    # limited to simple body-tube surfaces.  This is a fundamental Gmsh
-    # limitation (OCC entities become invalid after geo.synchronize).
+    # geo.extrudeBoundaryLayer does run on an OCC boolean-cut domain (Gmsh
+    # 4.15.2, measured at coarse/medium/fine on the finned rocket). What it
+    # cannot do is leave a valid mesh behind: the original fluid volume still
+    # covers the boundary-layer region, so generate(3) fills it with tets on top
+    # of the prisms. All 6066 wall triangles came out with an element on BOTH
+    # sides — the wall stops being a boundary — and SU2 takes the file, reports
+    # healthy mesh metrics, then fails to converge from iteration 0 and NaNs.
+    # Rebuilding the volume against the stack's outer face is the correct fix
+    # and is where Gmsh actually stops: "non-manifold quad boundaries not
+    # supported yet". Full write-up in the module docstring.
+    #
+    # The danger is that the broken version looks like it works, so
+    # _check_mesh_quality audits wall manifoldness on every mesh. If prisms are
+    # attempted again, that check is what will catch a silent overlap.
     #
     # The tiered distance-based refinement fields (step 5) give the finest
     # near-wall tets this route can produce, and that is still not close enough:
@@ -569,9 +604,10 @@ def _build_mesh(
     # bl_layers / bl_growth are accepted for call compatibility and are NOT used.
     n_prisms = 0
     logger.info(
-        "Tet-only mesh — BL prism extrusion disabled (incompatible with OCC); "
-        f"bl_layers={bl_layers}/bl_growth={bl_growth} ignored. Near-wall "
-        "refinement is from the distance fields only, with no wall model."
+        "Tet-only mesh — BL prism extrusion disabled (leaves prisms and tets "
+        f"overlapping; see module docstring); bl_layers={bl_layers}/"
+        f"bl_growth={bl_growth} ignored. Near-wall refinement is from the "
+        "distance fields only, with no wall model."
     )
 
     # ── 8. Generate 3D volume mesh ────────────────────────────────────────────
@@ -614,7 +650,7 @@ def _build_mesh(
         logger.warning(f"Mesh optimization pass 2 (Netgen) failed: {e}")
 
     # ── 9. Quality checks ─────────────────────────────────────────────────────
-    _check_mesh_quality(gmsh, body_r, n_prisms)
+    _check_mesh_quality(gmsh, body_r, n_prisms, wall_surfs=rocket_wall_surfs)
 
     # ── 10. Export ────────────────────────────────────────────────────────────
     # Update physical groups to include any new BL volumes
@@ -1222,19 +1258,79 @@ def _revolve_profile_solid(occ, profile: list) -> list:
     return vols
 
 
-def _check_mesh_quality(gmsh, body_r: float, n_bl_entities: int):
+def _audit_wall_is_manifold(gmsh, wall_surfs) -> Optional[int]:
+    """Check that every wall triangle has exactly ONE 3D element behind it.
+
+    Returns the number of wall triangles with something meshed on both sides,
+    or None if the audit could not run. Zero is the only acceptable answer: the
+    wall is the edge of the fluid, so a second element on the far side means
+    two regions of the mesh occupy the same space.
+
+    This exists because a prism-extrusion attempt produced exactly that and
+    nothing else noticed. Element counts, Gmsh's own quality metrics, SU2's
+    mesh-quality table and the .su2 file were all clean; the only symptom was a
+    solve that would not converge. Cheap topology audits catch that class of
+    fault, and expensive geometric ones do not.
+    """
+    if not wall_surfs:
+        return None
+    try:
+        from collections import Counter
+
+        # Face -> number of 3D elements using it. Only triangular faces matter:
+        # a wall boundary is triangles either way.
+        faces: Counter = Counter()
+        for _, vol in gmsh.model.getEntities(3):
+            types, _, nodes = gmsh.model.mesh.getElements(3, vol)
+            for et, nd in zip(types, nodes):
+                _, _, _, nn, _, _ = gmsh.model.mesh.getElementProperties(et)
+                if nn == 4:      # tet: four triangular faces
+                    combos = ((0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3))
+                elif nn == 6:    # prism: triangular top and bottom
+                    combos = ((0, 1, 2), (3, 4, 5))
+                else:
+                    continue
+                for i in range(0, len(nd), nn):
+                    el = nd[i:i + nn]
+                    for c in combos:
+                        faces[frozenset(int(el[k]) for k in c)] += 1
+
+        buried = 0
+        checked = 0
+        for s in wall_surfs:
+            types, _, nodes = gmsh.model.mesh.getElements(2, s)
+            for et, nd in zip(types, nodes):
+                _, _, _, nn, _, _ = gmsh.model.mesh.getElementProperties(et)
+                if nn != 3:
+                    continue
+                for i in range(0, len(nd), 3):
+                    checked += 1
+                    if faces[frozenset(int(v) for v in nd[i:i + 3])] > 1:
+                        buried += 1
+        if not checked:
+            return None
+        return buried
+    except Exception as e:
+        logger.warning(f"Wall manifoldness audit could not run: {e}")
+        return None
+
+
+def _check_mesh_quality(gmsh, body_r: float, n_bl_entities: int, wall_surfs=None):
     """
     Post-generation mesh quality validation.
-    Checks element types, counts, and quality metrics.
+    Checks element types, counts, quality metrics and wall manifoldness.
     """
     n_prisms = 0
     n_tets = 0
     n_pyramids = 0
     n_hexas = 0
+    tags_3d: list[int] = []
 
     # Count 3D elements by type
     try:
         types, tags_per_type, _ = gmsh.model.mesh.getElements(3)
+        for i, t in enumerate(types):
+            tags_3d.extend(int(x) for x in tags_per_type[i])
         for i, t in enumerate(types):
             name, dim, order, n_nodes, _, _ = gmsh.model.mesh.getElementProperties(t)
             n_elems = len(tags_per_type[i])
@@ -1271,28 +1367,56 @@ def _check_mesh_quality(gmsh, body_r: float, n_bl_entities: int):
         logger.info(f"[OK] Prism boundary layer confirmed: {n_prisms:,} elements")
 
     # ── Quality metrics via Gmsh ──────────────────────────────────────────────
-    try:
-        # SICN = Scaled Inverse Condition Number (1 = perfect, 0 = degenerate)
-        sicn_data = gmsh.model.mesh.getElementQualities(
-            list(range(1, min(total_3d + 1, 10001))), "minSICN"
-        )
-        if sicn_data:
-            import statistics
-            min_q = min(sicn_data)
-            avg_q = statistics.mean(sicn_data)
-            n_negative = sum(1 for q in sicn_data if q < 0)
-            logger.info(
-                f"  Quality (SICN): min={min_q:.4f}  avg={avg_q:.4f}  "
-                f"negative={n_negative}  (sampled {len(sicn_data)} elements)"
-            )
-            if n_negative > 0:
-                logger.warning(
-                    f"  {n_negative} elements have negative Jacobians — "
-                    f"SU2 may produce poor convergence"
+    # Sample the REAL 3D element tags. This used to ask for tags 1..10000, which
+    # are whatever Gmsh numbered first — the 1D and 2D elements — so the figure
+    # reported was never the quality of the volume mesh being exported. That was
+    # survivable while every cell was a tet from a single algorithm; it is not
+    # now, because the prism stack's worst cells are exactly what this is for
+    # (fin-root and nose-tip junctions, where the extrusion fronts converge).
+    if tags_3d:
+        try:
+            # SICN = Scaled Inverse Condition Number (1 = perfect, 0 = degenerate)
+            sample = tags_3d if len(tags_3d) <= 200_000 else tags_3d[::max(1, len(tags_3d) // 200_000)]
+            # getElementQualities returns a numpy array, so this must test
+            # length — `if sicn_data:` raises "truth value of an array ... is
+            # ambiguous", which the except below then swallowed as "quality
+            # check unavailable".
+            sicn_data = gmsh.model.mesh.getElementQualities(sample, "minSICN")
+            if len(sicn_data):
+                import statistics
+                min_q = min(sicn_data)
+                avg_q = statistics.mean(sicn_data)
+                n_negative = sum(1 for q in sicn_data if q < 0)
+                n_poor = sum(1 for q in sicn_data if 0 <= q < 0.01)
+                logger.info(
+                    f"  Quality (SICN): min={min_q:.4f}  avg={avg_q:.4f}  "
+                    f"negative={n_negative}  near-degenerate(<0.01)={n_poor}  "
+                    f"(sampled {len(sicn_data):,} of {len(tags_3d):,} 3D elements)"
                 )
-    except Exception:
-        # getElementQualities may not be available in all Gmsh builds
+                if n_negative > 0:
+                    logger.warning(
+                        f"  {n_negative} elements have negative Jacobians — "
+                        f"SU2 may produce poor convergence"
+                    )
+        except Exception as e:
+            # getElementQualities may not be available in all Gmsh builds
+            logger.warning(f"Element quality check unavailable: {e}")
+
+    # ── Wall manifoldness ─────────────────────────────────────────────────────
+    buried = _audit_wall_is_manifold(gmsh, wall_surfs)
+    if buried is None:
         pass
+    elif buried:
+        logger.error(
+            f"MESH INVALID: {buried:,} wall triangles have a 3D element on both "
+            f"sides, so the rocket wall is not a boundary of the fluid. Two "
+            f"parts of the mesh occupy the same space and SU2 will not converge "
+            f"on it — the residual will not fall below its starting value. This "
+            f"is the failure mode prism extrusion produces (see the module "
+            f"docstring); do not trust any result from this mesh."
+        )
+    else:
+        logger.info("[OK] Wall is manifold: every wall face bounds exactly one cell")
 
 
 # ── Fin geometry ──────────────────────────────────────────────────────────────

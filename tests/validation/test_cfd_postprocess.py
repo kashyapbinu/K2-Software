@@ -229,8 +229,14 @@ def test_su2_viscous_config_does_not_enable_wall_functions(tmp_path):
     the untuned run's 1.46e-3. The first cell sits near y+ 3500, outside the
     30 < y+ < 300 band a wall function can invert at all.
 
-    If prism layers ever land (cfd/meshing.py step 7), re-measure before
-    deleting this test.
+    Prism layers have NOT landed — the mesher is still tet-only (cfd/meshing.py
+    step 7), so the numbers above describe the mesh this test actually runs
+    against. If they ever do land, the first cell moves to roughly y+ 1, which
+    does not make wall functions correct either: it puts the wall on the other
+    side of the same valid band, where a low-Re model integrating to the wall is
+    the right treatment and a wall function is the approximation. This guard
+    holds in both regimes. Re-measure the failure rates above before acting on
+    them on any mesh that is not tet-only.
     """
     from cfd.solvers.base import CFDConfig
     from cfd.solvers.su2_solver import SU2Solver
@@ -246,7 +252,8 @@ def test_su2_viscous_config_does_not_enable_wall_functions(tmp_path):
     active = [l for l in text.splitlines()
               if l.strip().startswith("MARKER_WALL_FUNCTIONS")]
     assert not active, (
-        "wall functions are enabled — on this tet-only mesh that leaves 88% of "
-        "the wall with zero skin friction while still reporting a confident "
-        "drag number. See the docstring above before changing this."
+        "wall functions are enabled — measured on this tet-only mesh they left "
+        "88% of the wall with zero skin friction while still reporting a "
+        "confident drag number, and a prism mesh would put the first cell below "
+        "the band they are valid in. See the docstring before changing this."
     )

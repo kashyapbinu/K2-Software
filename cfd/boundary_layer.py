@@ -135,6 +135,13 @@ def predict_wall_yplus(
     * ``y+ > 300``     under-resolved; wall shear and heat transfer are
       meaningless and drag will read low.
 
+    ``wall_spacing`` is the wall-NORMAL spacing, which on a prism mesh is the
+    first layer's thickness and on a tet-only mesh is approximated by the wall
+    facet size. :func:`cfd.solvers.su2_solver._wall_spacing_from_su2_mesh`
+    measures whichever applies; do not hand this the facet size of a mesh that
+    has prisms, or it will report the wall unresolved on a mesh that resolves
+    it.
+
     This exists because the mesher cannot build prism layers on an OCC
     boolean-cut domain (see cfd/meshing.py step 7), so every mesh is tet-only
     and the first cell sits orders of magnitude too far from the wall. A
@@ -147,14 +154,18 @@ def predict_wall_yplus(
     Returns a dict with ``y_plus``, ``regime``, ``wall_resolved`` and the
     ``spacing_for_yplus_1`` the mesh would need.
 
-    Expect this to read HIGHER than the y+ SU2 writes into the surface file,
-    and do not treat that gap as an error in either number. This prediction
-    uses the correlation value of Cf, i.e. what the friction should be; SU2
-    reports y+ built from the friction it actually computed, which on an
-    unresolved wall is far too low and therefore drags its own y+ down with
-    it. On the measured M=0.8 case this predicts ~3500 against a reported
-    peak of 619 — the disagreement is itself a symptom of the under-resolution
-    both are describing.
+    On an UNRESOLVED wall, expect this to read higher than the y+ SU2 writes
+    into the surface file, and do not treat that gap as an error in either
+    number. This prediction uses the correlation value of Cf, i.e. what the
+    friction should be; SU2 reports y+ built from the friction it actually
+    computed, which on an unresolved wall is far too low and therefore drags
+    its own y+ down with it. On the measured tet-only M=0.8 case this predicted
+    ~3500 against a reported peak of 619 — the disagreement was itself a
+    symptom of the under-resolution both numbers were describing.
+
+    On a resolved wall the two would converge, because SU2's computed friction
+    would then be close to the correlation this uses. No mesh this project
+    produces is in that regime yet.
     """
     out = {
         "y_plus": float("nan"),

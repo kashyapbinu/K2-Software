@@ -1048,12 +1048,14 @@ class CFDWorkspace(QWidget):
         self._cb_ref.setCurrentIndex(1)
         self._cb_ref.currentIndexChanged.connect(self._on_ref_changed)
 
-        # No "BL Inflation" control: the mesher is tet-only. Prism extrusion is
-        # incompatible with the OCC boolean-cut domain (see cfd/meshing.py), so a
-        # layer count would have been read, threaded through the config and the
+        # No "BL Inflation" or "target y+" control: the mesher is tet-only. A
+        # setting here would be read, threaded through the config and the
         # meshing subprocess, and then ignored — implying an inflation layer the
-        # mesh does not have. CFDConfig still carries bl_layers/bl_growth at
-        # their defaults for call compatibility.
+        # mesh does not have. Prism extrusion runs on the OCC boolean-cut domain
+        # but leaves the prisms overlapping the tets rather than bounded by
+        # them, which SU2 cannot converge on (cfd/meshing.py step 7). CFDConfig
+        # still carries bl_layers/bl_growth at their defaults for call
+        # compatibility.
 
         self._sp_iter = QSpinBox()
         self._sp_iter.setRange(100, 50000); self._sp_iter.setValue(5000)
@@ -1444,7 +1446,8 @@ class CFDWorkspace(QWidget):
             (self._lbl_cdp, "Pressure drag, integrated over the wall.\n"
                             "Cd = Pressure + Friction."),
             (self._lbl_cdf, "Skin-friction drag, integrated over the wall.\n"
-                            "Under-resolved on this tet-only mesh at high y+."),
+                            "Under-resolved on this tet-only mesh — check the\n"
+                            "Y+ Range below; above 30 it reads low."),
             (self._lbl_cdb, "Base drag: pressure integrated over the rearward-\n"
                             "facing surfaces only. A COMPONENT of Pressure above,\n"
                             "not an extra term."),
@@ -2314,10 +2317,10 @@ class CFDWorkspace(QWidget):
         yp = [p.result.yplus_mean for p in d.points if p.result.yplus_mean > 0]
         if yp and (sum(yp) / len(yp)) > 30.0:
             txt += (f"\n⚠ Wall under-resolved (mean y+ ≈ {sum(yp)/len(yp):.0f}, "
-                    f"tet-only mesh, no wall functions): Cd is inflated and CP "
-                    f"biased forward — spurious viscous body lift can read as "
-                    f"\"Unstable\". Trends vs AoA/Mach are usable; absolute Cd₀ "
-                    f"and the stability verdict are not. Cross-check CP against "
+                    f"no wall functions): Cd is inflated and CP biased forward "
+                    f"— spurious viscous body lift can read as \"Unstable\". "
+                    f"Trends vs AoA/Mach are usable; absolute Cd₀ and the "
+                    f"stability verdict are not. Cross-check CP against "
                     f"Barrowman, or re-run with the \"Euler + flat-plate "
                     f"friction\" sweep option for a cleaner pressure CP.")
         self._lbl_polar_metrics.setText(txt)

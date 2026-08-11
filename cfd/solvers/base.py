@@ -74,6 +74,10 @@ class CFDConfig:
 
     # Mesh quality
     mesh_refinement: str = "medium"     # "coarse" | "medium" | "fine"
+    # Accepted and IGNORED: the mesher is tet-only. Extruding prisms leaves them
+    # overlapping the tets rather than bounded by them, which produces a mesh
+    # SU2 cannot converge on (cfd/meshing.py step 7). Kept at their defaults so
+    # call sites do not have to change if that is ever solved.
     boundary_layer_layers: int = 15     # prism layers near wall
     boundary_layer_growth: float = 1.2  # growth rate
 
