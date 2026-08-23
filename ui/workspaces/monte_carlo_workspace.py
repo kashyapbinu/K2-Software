@@ -6,6 +6,7 @@ matplotlib visualizations, and statistical results in a 3-panel layout.
 """
 
 import csv
+import math
 import logging
 from pathlib import Path
 from typing import Optional
@@ -601,6 +602,13 @@ class MonteCarloWorkspace(QWidget):
         self.progress_label.setText("Starting…")
 
         self._mc_engine.start(config)
+        if not self._mc_engine.is_running:
+            # start() refuses while a previous worker is still winding down, and
+            # emits nothing — without this the Run button stays dead forever.
+            self.btn_run.setEnabled(True)
+            self.btn_cancel.setEnabled(False)
+            self.progress_label.setText("Previous run still finishing — try again")
+            return
         logger.info(f"Monte Carlo analysis launched: {config.num_simulations} runs")
 
     def _on_failed(self, error_msg: str):
@@ -635,12 +643,15 @@ class MonteCarloWorkspace(QWidget):
         n_outliers = getattr(results, 'n_outliers', 0)
         n_phys_bad = getattr(results, 'n_physics_invalid', 0)
         n_unstable = getattr(results, 'n_unstable', 0)
+        n_no_landing = getattr(results, 'n_no_landing', 0)
 
         parts = [f"Complete — {n} simulations"]
         if n_phys_bad > 0:
             parts.append(f"{n_phys_bad} physics-invalid")
         if n_unstable > 0:
             parts.append(f"⚠ {n_unstable} unstable ({n_unstable / n * 100:.0f}%)")
+        if n_no_landing > 0:
+            parts.append(f"{n_no_landing} never landed")
         if n_outliers > 0:
             parts.append(f"{n_outliers} outliers")
         parts.append(f"{n_valid} used for stats")
@@ -738,29 +749,65 @@ class MonteCarloWorkspace(QWidget):
         # Use pre-filtered valid landing values from statistics engine
         xs = np.array(r.landing_x_values) if r.landing_x_values else np.array([run.landing_x for run in r.runs])
         ys = np.array(r.landing_y_values) if r.landing_y_values else np.array([run.landing_y for run in r.runs])
+        # Runs that never touched down carry NaN (no landing point) - drop them
+        # so the mean/covariance of the dispersion ellipse stays finite.
+        _fin = np.isfinite(xs) & np.isfinite(ys)
+        xs, ys = xs[_fin], ys[_fin]
+        if not len(xs):
+            ax.text(0.5, 0.5, "No run reached the ground",
+                    transform=ax.transAxes, ha="center", va="center",
+                    color="#484f58", fontsize=12)
+            self._ax_landing.figure.tight_layout()
+            self._canvas_landing.draw()
+            return
 
         # All points in the filtered set are physics-valid
         ax.scatter(xs, ys, c="#58a6ff", s=8,
                    alpha=0.5, label=f"Valid ({len(xs)})", zorder=3)
 
-        # Dispersion ellipses (1σ, 2σ, 3σ)
+        # ── Dispersion ellipses ──
+        # Landing scatter is strongly correlated (downrange spread dwarfs
+        # crossrange, and the axis is set by the wind, not by East/North), so
+        # axis-aligned sigma-x / sigma-y boxes misstate it. Use the covariance
+        # eigenvectors for the orientation, and chi-square(2 dof) quantiles for
+        # the radii: a 2-D ellipse drawn at 1 sigma semi-axes holds only 39.3%
+        # of the distribution, not the 68% the label implies.
         cx, cy = float(np.mean(xs)), float(np.mean(ys))
-        sx, sy = float(np.std(xs)), float(np.std(ys))
-        for n_sigma, alpha_val in [(1, 0.5), (2, 0.35), (3, 0.2)]:
-            w = max(sx * 2 * n_sigma, 1.0)
-            h = max(sy * 2 * n_sigma, 1.0)
-            ellipse = Ellipse(
-                (cx, cy), w, h,
-                fill=False, edgecolor="#58a6ff", linewidth=1.2,
-                alpha=alpha_val, linestyle="--",
-                label=f"{n_sigma}σ" if n_sigma == 1 else f"{n_sigma}σ",
-            )
-            ax.add_patch(ellipse)
+        if len(xs) > 2:
+            cov = np.cov(xs, ys)
+            eigvals, eigvecs = np.linalg.eigh(cov)
+            eigvals = np.maximum(eigvals, 0.0)
+            order = np.argsort(eigvals)[::-1]
+            eigvals, eigvecs = eigvals[order], eigvecs[:, order]
+            angle = float(np.degrees(np.arctan2(eigvecs[1, 0], eigvecs[0, 0])))
+            # chi2.ppf([0.393, 0.865, 0.989], df=2) -> the classic 1/2/3 sigma
+            # containment fractions carried over to two dimensions.
+            for chi2, pct_label, alpha_val in [(2.296, "39%", 0.5),
+                                               (6.180, "86%", 0.35),
+                                               (11.829, "99%", 0.2)]:
+                w = 2.0 * math.sqrt(chi2 * eigvals[0])
+                h = 2.0 * math.sqrt(chi2 * eigvals[1])
+                ax.add_patch(Ellipse(
+                    (cx, cy), max(w, 1.0), max(h, 1.0), angle=angle,
+                    fill=False, edgecolor="#58a6ff", linewidth=1.2,
+                    alpha=alpha_val, linestyle="--",
+                    label=f"{pct_label} containment",
+                ))
 
         # ── Containment radii from the pad (range-safety metric) ──
         # R95/R99 = radius from the launch point enclosing 95%/99% of landings.
-        if len(xs):
-            d_pad = np.sqrt(xs ** 2 + ys ** 2)
+        # Computed over EVERY real flight, not the outlier-filtered set used for
+        # the apogee statistics — the filtered set drops the runs that land
+        # farthest, which is exactly what a containment radius is asking about.
+        safety_xs = np.asarray(getattr(r, "all_landing_x", None) or xs, dtype=float)
+        safety_ys = np.asarray(getattr(r, "all_landing_y", None) or ys, dtype=float)
+        _sfin = np.isfinite(safety_xs) & np.isfinite(safety_ys)
+        safety_xs, safety_ys = safety_xs[_sfin], safety_ys[_sfin]
+        n_diverged = int(getattr(r, "n_physics_invalid", 0) or 0)
+        n_no_landing = int(getattr(r, "n_no_landing", 0) or 0)
+
+        if len(safety_xs):
+            d_pad = np.sqrt(safety_xs ** 2 + safety_ys ** 2)
             r95 = float(np.percentile(d_pad, 95))
             r99 = float(np.percentile(d_pad, 99))
             for radius, col, lbl in [(r95, "#d29922", f"R95 = {r95:.0f} m"),
@@ -782,12 +829,22 @@ class MonteCarloWorkspace(QWidget):
                 # highlight violating landings
                 if n_out:
                     out_mask = d_pad > safe_r
-                    ax.scatter(xs[out_mask], ys[out_mask], c="#f85149", s=14,
-                               marker="x", zorder=6, label=f"Outside ({n_out})")
+                    ax.scatter(safety_xs[out_mask], safety_ys[out_mask], c="#f85149",
+                               s=14, marker="x", zorder=6, label=f"Outside ({n_out})")
                 verdict = "PASS" if ok else "FAIL"
+                # Diverged runs have no meaningful landing point, so they cannot
+                # be judged — say so rather than letting the verdict imply they
+                # were checked.
+                unscored = []
+                if n_diverged:
+                    unscored.append(f"{n_diverged} diverged")
+                if n_no_landing:
+                    unscored.append(f"{n_no_landing} never landed")
+                caveat = f", {' + '.join(unscored)} unscored" if unscored else ""
                 ax.set_title(f"Landing Dispersion — Safety {verdict} "
-                             f"({pct_in:.1f}% within {safe_r:.0f} m)",
-                             color=col, fontsize=10)
+                             f"({pct_in:.1f}% of {len(d_pad)} flights within "
+                             f"{safe_r:.0f} m{caveat})",
+                             color=col, fontsize=9)
 
         # ── Unstable runs (static margin below required caliber) in red ──
         uxs = getattr(r, "unstable_landing_x", None)
@@ -824,6 +881,14 @@ class MonteCarloWorkspace(QWidget):
 
         # Use pre-filtered valid landing distances
         dists = np.array(r.landing_distance_values) if r.landing_distance_values else np.array([run.landing_distance for run in r.runs])
+        dists = dists[np.isfinite(dists)]   # non-landing runs carry NaN
+        if not len(dists):
+            ax.text(0.5, 0.5, "No run reached the ground",
+                    transform=ax.transAxes, ha="center", va="center",
+                    color="#484f58", fontsize=12)
+            self._ax_dist.figure.tight_layout()
+            self._canvas_dist.draw()
+            return
         bins = min(50, max(30, len(dists) // 10))
 
         ax.hist(dists, bins=bins, color="#bc8cff", alpha=0.7,
@@ -866,6 +931,12 @@ class MonteCarloWorkspace(QWidget):
         ]
 
         for ax, (data, label, color) in zip(axes, datasets):
+            arr = np.asarray(data, dtype=float)
+            data = arr[np.isfinite(arr)]
+            if not len(data):
+                ax.set_title(label, color="#8b949e", fontsize=9, fontweight="bold")
+                ax.set_xticks([])
+                continue
             bp = ax.boxplot(
                 data, patch_artist=True, widths=0.6,
                 boxprops=dict(facecolor=color, alpha=0.4, edgecolor=color),
@@ -916,8 +987,10 @@ class MonteCarloWorkspace(QWidget):
             skew_txt += " highly skewed"
         self.lbl_ap_skew.setText(skew_txt)
 
+        # scipy.stats.kurtosis returns EXCESS kurtosis (normal = 0), so the
+        # old > 3.0 test never fired for a realistic apogee distribution.
         kurt_txt = f"{r.apogee_kurtosis:+.2f}"
-        if r.apogee_kurtosis > 3.0:
+        if r.apogee_kurtosis > 1.0:
             kurt_txt += " heavy-tailed"
         self.lbl_ap_kurt.setText(kurt_txt)
 
@@ -1205,6 +1278,7 @@ class MonteCarloWorkspace(QWidget):
             ("Unstable runs", f"{n_uns} / {n}  ({uns_pct:.1f} %)"),
             ("P(stability > min)", f"{r.p_stability_above_limit * 100:.1f} %"),
             ("Physics-invalid runs", f"{n_phys}"),
+            ("Runs that never landed", f"{getattr(r, 'n_no_landing', 0)}"),
         ]
         figs = [getattr(self, a).figure for a in
                 ("_ax_apogee", "_ax_landing", "_ax_dist", "_ax_tornado")

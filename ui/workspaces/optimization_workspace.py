@@ -153,9 +153,16 @@ class _DOEWorker(QThread):
             from core.batch_simulation import run_batch_simulation
             n_vars = len(self._ev)
             if self._method == "Full Factorial":
-                levels = max(2, int(round(self._n ** (1.0 / n_vars))))
+                # Pick the largest level count whose FULL grid fits the sample
+                # budget. Rounding up and then slicing [:n] chopped a
+                # contiguous slab off the grid - one whole level of the first
+                # variable - which unbalanced the median split the main-effects
+                # plot is built on.
+                levels = max(2, int(np.floor(self._n ** (1.0 / n_vars))))
+                while levels > 2 and levels ** n_vars > self._n:
+                    levels -= 1
                 grids = [np.linspace(0, 1, levels) for _ in range(n_vars)]
-                dm = np.array(np.meshgrid(*grids)).T.reshape(-1, n_vars)[:self._n]
+                dm = np.array(np.meshgrid(*grids)).T.reshape(-1, n_vars)
             else:  # Latin Hypercube / Taguchi
                 from scipy.stats.qmc import LatinHypercube
                 n = min(self._n, 27) if self._method == "Taguchi" else self._n
@@ -173,6 +180,12 @@ class _DOEWorker(QThread):
             self.finished_ok.emit(dm, responses)
         except Exception as e:
             self.failed.emit(str(e))
+
+
+def _rankdata(a) -> np.ndarray:
+    """Average-tie ranks of *a* — the rank transform PRCC is built on."""
+    from scipy.stats import rankdata
+    return np.asarray(rankdata(a), dtype=np.float64)
 
 
 class _SensitivityWorker(QThread):
@@ -237,20 +250,38 @@ class _SensitivityWorker(QThread):
                     st.append(min(max(stv, s1v), 1.0))
                 out["s1"], out["st"] = s1, st
             elif self._method == "PRCC":
-                from scipy.stats import spearmanr
+                # Partial Rank Correlation Coefficient. The previous version
+                # was a bare Spearman rank correlation with nothing partialled
+                # out — the marginal correlation, not the partial one. Proper
+                # PRCC: rank-transform everything, linearly regress both the
+                # input and the response on the OTHER inputs, then correlate
+                # the residuals.
                 prcc = []
+                ranks_X = np.apply_along_axis(_rankdata, 0, X)
+                ranks_y = _rankdata(y)
                 for j in range(n_vars):
                     try:
-                        r, _ = spearmanr(X[:, j], y)
-                        prcc.append(r)
+                        others = np.delete(ranks_X, j, axis=1)
+                        # Design matrix with intercept for the nuisance regression.
+                        A = np.column_stack([np.ones(len(ranks_y)), others])
+                        # Residuals of X_j and y after removing the other inputs.
+                        res_x = ranks_X[:, j] - A @ np.linalg.lstsq(A, ranks_X[:, j], rcond=None)[0]
+                        res_y = ranks_y - A @ np.linalg.lstsq(A, ranks_y, rcond=None)[0]
+                        sx, sy = np.std(res_x), np.std(res_y)
+                        if sx < 1e-12 or sy < 1e-12:
+                            prcc.append(0.0)
+                        else:
+                            prcc.append(float(np.mean(
+                                (res_x - res_x.mean()) * (res_y - res_y.mean())) / (sx * sy)))
                     except Exception:
-                        prcc.append(0)
+                        prcc.append(0.0)
                 out["prcc"] = prcc
             else:  # Morris Screening — extra paired elementary-effect sims
                 mu_star, sigma_vals = [], []
                 for j in range(n_vars):
                     key, vmin, vmax = ev[j]
                     delta = 0.1
+                    span = (vmax - vmin) or 1.0
                     effects = []
                     for i in range(min(n - 1, 50)):
                         v1 = X[i, j]
@@ -263,7 +294,15 @@ class _SensitivityWorker(QThread):
                         try:
                             r1 = run_batch_simulation(cfg1, seed=1000 + i).apogee
                             r2 = run_batch_simulation(cfg2, seed=1000 + i).apogee
-                            dx = v2 - v1
+                            # Normalise the step by the variable's own range.
+                            # Raw (r2-r1)/dx is metres-of-apogee per metre of
+                            # diameter for one variable and per kilogram for
+                            # the next, so the mu* bar chart was ranking
+                            # quantities with different units against each
+                            # other. Dividing by the range makes every
+                            # elementary effect "apogee change per full-range
+                            # move", which is comparable.
+                            dx = (v2 - v1) / span
                             if abs(dx) > 1e-12:
                                 effects.append((r2 - r1) / dx)
                         except Exception:
@@ -544,7 +583,7 @@ class OptimizationWorkspace(QWidget):
                 ("fin_span", "Fin Span", 0.02, 0.25, "m"),
                 ("fin_root_chord", "Fin Root Chord", 0.03, 0.40, "m"),
                 ("fin_tip_chord", "Fin Tip Chord", 0.01, 0.20, "m"),
-                ("fin_sweep_angle", "Fin Sweep", 0, 60, "°"),
+                ("fin_sweep_angle", "Fin Sweep", 0, 60, "°"),   # deg -> rad on read
                 ("fin_thickness", "Fin Thickness", 0.001, 0.01, "m"),
                 ("fin_count", "Num Fins", 3, 6, ""),
             ],
@@ -589,9 +628,13 @@ class OptimizationWorkspace(QWidget):
                 row.addWidget(lbl)
 
                 spin_min = QDoubleSpinBox()
+                # Precision has to follow the small end too: one decimal
+                # turned a 0.01 kg propellant minimum into 0.0 and a 0.05 m^2
+                # drogue minimum into 0.1.
+                decimals = 3 if (vmax < 1 or vmin < 0.5) else 1
                 spin_min.setRange(vmin * 0.1, vmax * 5)
                 spin_min.setValue(vmin)
-                spin_min.setDecimals(3 if vmax < 1 else 1)
+                spin_min.setDecimals(decimals)
                 spin_min.setFixedWidth(70)
                 spin_min.setToolTip(f"Min {unit}")
                 row.addWidget(spin_min)
@@ -604,7 +647,7 @@ class OptimizationWorkspace(QWidget):
                 spin_max = QDoubleSpinBox()
                 spin_max.setRange(vmin * 0.1, vmax * 5)
                 spin_max.setValue(vmax)
-                spin_max.setDecimals(3 if vmax < 1 else 1)
+                spin_max.setDecimals(decimals)
                 spin_max.setFixedWidth(70)
                 spin_max.setToolTip(f"Max {unit}")
                 row.addWidget(spin_max)
@@ -1190,6 +1233,32 @@ class OptimizationWorkspace(QWidget):
     #  ACTIONS — Run / Cancel / Export
     # ═════════════════════════════════════════════════════════════════════════
 
+    # Design-variable spin boxes shown in a friendlier unit than the one the
+    # model stores. fin_sweep_angle is the only one: the rocket state and
+    # physics.aerodynamics use RADIANS (`math.cos(fin_sweep)`), while this panel
+    # offers a 0-60 box labelled degrees. Feeding those readings straight
+    # through meant a "60 deg" sweep reached the aero model as 60 radians.
+    _VAR_UI_TO_MODEL = {
+        "fin_sweep_angle": math.pi / 180.0,
+    }
+
+    @classmethod
+    def _to_model_units(cls, var_key: str, value: float) -> float:
+        """Convert one spin-box reading into the unit the model stores."""
+        return float(value) * cls._VAR_UI_TO_MODEL.get(var_key, 1.0)
+
+    def _var_bounds(self, var_key: str, spin_min, spin_max) -> tuple:
+        """(min, max) for *var_key* in model units, low end first."""
+        lo = self._to_model_units(var_key, spin_min.value())
+        hi = self._to_model_units(var_key, spin_max.value())
+        return (lo, hi) if lo <= hi else (hi, lo)
+
+    def _enabled_var_bounds(self) -> list:
+        """[(key, min, max), ...] in model units for every checked variable."""
+        return [(k, *self._var_bounds(k, smin, smax))
+                for k, (chk, smin, smax, _cat) in self._var_widgets.items()
+                if chk.isChecked()]
+
     def _collect_config(self):
         """Build OptimizationConfig from UI widgets."""
         try:
@@ -1209,12 +1278,16 @@ class OptimizationWorkspace(QWidget):
         # Design variables
         design_vars = []
         state = self.engine.state
+        inverted = []
         for var_key, (chk, spin_min, spin_max, cat) in self._var_widgets.items():
             if not chk.isChecked():
                 continue
-            current = getattr(state, var_key, (spin_min.value() + spin_max.value()) / 2)
+            if spin_min.value() > spin_max.value():
+                inverted.append(var_key)
+            vmin, vmax = self._var_bounds(var_key, spin_min, spin_max)
+            current = getattr(state, var_key, (vmin + vmax) / 2)
             if current == 0:
-                current = (spin_min.value() + spin_max.value()) / 2
+                current = (vmin + vmax) / 2
             vtype = "continuous"
             if var_key == "fin_count":
                 vtype = "integer"
@@ -1222,8 +1295,8 @@ class OptimizationWorkspace(QWidget):
                 name=var_key,
                 display_name=chk.parent().findChild(QLabel).text() if chk.parent() else var_key,
                 category=cat,
-                min_val=spin_min.value(),
-                max_val=spin_max.value(),
+                min_val=vmin,
+                max_val=vmax,
                 current_val=float(current),
                 enabled=True,
                 var_type=vtype,
@@ -1232,6 +1305,14 @@ class OptimizationWorkspace(QWidget):
         if not design_vars:
             QMessageBox.warning(self, "Configuration Error",
                 "No design variables selected.\n\nPlease check at least one variable to optimize.")
+            return None
+
+        # An inverted range silently pins the variable: every sample is clamped
+        # by max(min_val, min(max_val, x)), which collapses to min_val.
+        if inverted:
+            QMessageBox.warning(self, "Configuration Error",
+                "Minimum is above maximum for: " + ", ".join(inverted) +
+                "\n\nSwap the bounds for these design variables.")
             return None
 
         # Objectives
@@ -1274,6 +1355,15 @@ class OptimizationWorkspace(QWidget):
         # it as a Mission Target so the optimizer actually hits the target.
         if mode_val == "standard" and self.spin_target_apogee.value() > 0:
             mode_val = "mission"
+
+        # Mission mode scores proximity to a target; with no target every
+        # mission term collapses to zero and only the 0.1-weighted secondary
+        # objectives are left steering the search.
+        if mode_val == "mission" and self.spin_target_apogee.value() <= 0:
+            QMessageBox.warning(self, "Configuration Error",
+                "Mission Target mode needs a target apogee.\n\n"
+                "Set Target Apogee above 0, or pick Standard mode.")
+            return None
 
         # Surrogate
         surr_map = {
@@ -1374,6 +1464,7 @@ class OptimizationWorkspace(QWidget):
         self._conv_bests = []
         self._conv_means = []
         self._conv_worsts = []
+        self._conv_feas = []
         self._ax_conv.clear()
         _style_ax(self._ax_conv, "Fitness Convergence", "Generation", "Fitness")
         self._canvas_conv.draw_idle()
@@ -1475,8 +1566,12 @@ class OptimizationWorkspace(QWidget):
         self._update_results_panel(result)
         self._populate_dse_combos(result)
 
+        # A run that produced no evaluable design (every candidate raised, or
+        # the algorithm bailed after init) still reports; don't crash the
+        # handler dereferencing a missing best design.
+        best_fit = result.best_design.fitness if result.best_design else float("nan")
         logger.info(f"Optimization complete: {n} evals, {t:.1f}s, "
-                     f"best fitness={result.best_design.fitness:.3f}")
+                     f"best fitness={best_fit:.3f}")
 
     def _on_apply_design(self):
         """Write the currently-displayed design's variables into the rocket
@@ -1578,7 +1673,13 @@ class OptimizationWorkspace(QWidget):
         ax.clear()
         _style_ax(ax, "Fitness Convergence", "Generation", "Fitness")
 
-        gens = list(range(len(bests)))
+        # Every series must share one x-axis; a stale series from an earlier
+        # run used to reach matplotlib as a length mismatch and raise.
+        n_pts = min(len(bests), len(means), len(worsts), len(feas))
+        bests, means = list(bests[:n_pts]), list(means[:n_pts])
+        worsts, feas = list(worsts[:n_pts]), list(feas[:n_pts])
+
+        gens = list(range(n_pts))
         ax.plot(gens, bests, color="#7ee787", linewidth=2, label="Best", zorder=4)
         ax.plot(gens, means, color="#58a6ff", linewidth=1.2, alpha=0.8,
                 linestyle="--", label="Mean", zorder=3)
@@ -1884,11 +1985,21 @@ class OptimizationWorkspace(QWidget):
             ax.scatter([bx], [by], c="#f0883e", s=100, marker="*",
                        zorder=5, edgecolors="#ffffff", linewidths=1)
 
-        # Colorbar
+        # Colorbar - remove the previous one first. ax.clear() does not touch
+        # the colorbar's own axes, so every refresh used to add another one and
+        # shrink the plot.
+        old_cb = getattr(self, "_dse_cbar", None)
+        if old_cb is not None:
+            try:
+                old_cb.remove()
+            except Exception:
+                pass
+            self._dse_cbar = None
         try:
             cb = ax.figure.colorbar(sc, ax=ax, fraction=0.03, pad=0.02)
             cb.ax.tick_params(colors="#484f58", labelsize=8)
             cb.set_label(color_key, color="#8b949e", fontsize=9)
+            self._dse_cbar = cb
         except Exception:
             pass
 
@@ -1969,10 +2080,7 @@ class OptimizationWorkspace(QWidget):
             return
         from core.batch_simulation import BatchSimConfig
 
-        enabled_vars = []
-        for key, (chk, smin, smax, cat) in self._var_widgets.items():
-            if chk.isChecked():
-                enabled_vars.append((key, smin.value(), smax.value()))
+        enabled_vars = self._enabled_var_bounds()
         if len(enabled_vars) < 1:
             QMessageBox.warning(self, "DOE Error", "Enable at least 1 design variable.")
             return
@@ -2066,11 +2174,19 @@ class OptimizationWorkspace(QWidget):
                                             cmap="viridis", alpha=0.8)
                     ax_right.contour(X_g, Y_g, Z_g, levels=10,
                                      colors="#c9d1d9", linewidths=0.3, alpha=0.5)
+                    old_cb = getattr(self, "_doe_cbar", None)
+                    if old_cb is not None:
+                        try:
+                            old_cb.remove()
+                        except Exception:
+                            pass
+                        self._doe_cbar = None
                     try:
                         cb = ax_right.figure.colorbar(cs, ax=ax_right,
                                                        fraction=0.03, pad=0.02)
                         cb.ax.tick_params(colors="#484f58", labelsize=8)
                         cb.set_label("Apogee (m)", color="#8b949e", fontsize=9)
+                        self._doe_cbar = cb
                     except Exception:
                         pass
 
@@ -2107,10 +2223,7 @@ class OptimizationWorkspace(QWidget):
             return
         from core.batch_simulation import BatchSimConfig
 
-        enabled_vars = []
-        for key, (chk, smin, smax, cat) in self._var_widgets.items():
-            if chk.isChecked():
-                enabled_vars.append((key, smin.value(), smax.value()))
+        enabled_vars = self._enabled_var_bounds()
         if len(enabled_vars) < 2:
             QMessageBox.warning(self, "Sensitivity Error",
                 "Enable at least 2 design variables.")
@@ -2269,7 +2382,6 @@ class OptimizationWorkspace(QWidget):
             return
 
         ax = self._ax_trade
-        ax.clear()
 
         # Radar plot
         categories = ["Apogee", "Stability", "Success %", "1/Landing", "1/Mach", "1/Mass"]
@@ -2277,35 +2389,39 @@ class OptimizationWorkspace(QWidget):
         angles = np.linspace(0, 2 * np.pi, n_cats, endpoint=False).tolist()
         angles += angles[:1]
 
+        # One axis per metric: the source key, and the transform that turns it
+        # into "bigger is better". Value and normalisation MUST come from the
+        # same transform — they didn't for 1/Landing (1000/x plotted against a
+        # 1/x min-max), so that spoke was normalised ~1000x out of range and
+        # pegged at the rim for every configuration.
+        axes_spec = [
+            ("apogee",    lambda x: x),
+            ("stability", lambda x: x),
+            ("success",   lambda x: x),
+            ("landing",   lambda x: 1000.0 / max(x, 1.0)),
+            ("max_mach",  lambda x: 1.0 / max(x, 0.1)),
+            ("mass",      lambda x: 10.0 / max(x, 0.1)),
+        ]
+        # Per-axis min/max over every configuration, in transformed units.
+        axis_ranges = []
+        for key, fn in axes_spec:
+            vals = [fn(c[key]) for c in self.trade_configs]
+            axis_ranges.append((min(vals), max(vals)))
+
         ax.figure.clear()
         ax_r = ax.figure.add_subplot(111, polar=True)
+        # add_subplot on a cleared figure orphans the old axes; keep the
+        # attribute pointing at the live one so Clear can still reset the tab.
+        self._ax_trade = ax_r
         ax_r.set_facecolor("#161b22")
         ax.figure.patch.set_facecolor("#0d1117")
 
         colors = ["#58a6ff", "#7ee787", "#f0883e", "#bc8cff", "#f85149", "#d29922"]
 
         for i, cfg in enumerate(self.trade_configs):
-            values = [
-                cfg["apogee"],
-                cfg["stability"],
-                cfg["success"],
-                1000.0 / max(cfg["landing"], 1),
-                1.0 / max(cfg["max_mach"], 0.1),
-                10.0 / max(cfg["mass"], 0.1),
-            ]
-            # Normalize to 0-1 per axis across all configs
             values_n = []
-            for j, v in enumerate(values):
-                all_vals = [c[[
-                    "apogee", "stability", "success", "landing", "max_mach", "mass"
-                ][j]] for c in self.trade_configs]
-                if j >= 3:
-                    all_vals = [1.0/max(av, 0.001) if j == 3 else (
-                        1.0/max(av, 0.001) if j == 4 else 10.0/max(av, 0.001))
-                        for av in [c[[
-                            "apogee", "stability", "success", "landing", "max_mach", "mass"
-                        ][j]] for c in self.trade_configs]]
-                vmin, vmax = min(all_vals) if all_vals else 0, max(all_vals) if all_vals else 1
+            for (key, fn), (vmin, vmax) in zip(axes_spec, axis_ranges):
+                v = fn(cfg[key])
                 if vmax - vmin > 1e-9:
                     values_n.append((v - vmin) / (vmax - vmin))
                 else:
@@ -2332,7 +2448,13 @@ class OptimizationWorkspace(QWidget):
     def _on_clear_trade(self):
         self.trade_configs = []
         self.trade_table.setRowCount(0)
-        self._ax_trade.clear()
+        # A run leaves a polar axes here; rebuild a plain cartesian one rather
+        # than clearing in place, so the radar chart actually disappears.
+        fig = self._ax_trade.figure
+        fig.clear()
+        self._ax_trade = fig.add_subplot(111)
+        self._ax_trade.set_facecolor("#161b22")
+        fig.patch.set_facecolor("#0d1117")
         _style_ax(self._ax_trade, "Trade Study", "", "")
         self._canvas_trade.draw()
 
@@ -2457,6 +2579,7 @@ class OptimizationWorkspace(QWidget):
         if apogees:
             best_idx = int(np.argmax(apogees))
             self.btn_sol_apogee.setText(f"Best Apogee: {apogees[best_idx]:.0f} m")
+            self.btn_sol_apogee.setEnabled(True)
             self._pareto_best_apogee = designs[best_idx]
 
         # Best Reliability
@@ -2466,6 +2589,7 @@ class OptimizationWorkspace(QWidget):
             self.btn_sol_reliability.setText(
                 f"Best Reliability: {rel_vals[best_idx] * 100:.0f}%"
             )
+            self.btn_sol_reliability.setEnabled(True)
             self._pareto_best_reliability = designs[best_idx]
 
         # Best Mass (lowest)
@@ -2473,6 +2597,7 @@ class OptimizationWorkspace(QWidget):
         if masses:
             best_idx = int(np.argmin(masses))
             self.btn_sol_mass.setText(f"Best Mass: {masses[best_idx]:.2f} kg")
+            self.btn_sol_mass.setEnabled(True)
             self._pareto_best_mass = designs[best_idx]
 
         # Balanced (closest to utopia) — over the user-enabled objectives only,
@@ -2499,6 +2624,7 @@ class OptimizationWorkspace(QWidget):
                 self.btn_sol_balanced.setText(
                     f"Balanced: Apogee {apogees[best_idx]:.0f} m"
                 )
+                self.btn_sol_balanced.setEnabled(True)
                 self._pareto_best_balanced = designs[best_idx]
 
     def _update_optimization_stats(self, result):
@@ -2681,6 +2807,14 @@ class OptimizationWorkspace(QWidget):
                     pass
         # The DOE / sensitivity tabs hold a row of axes on one shared figure;
         # clear_visuals handles the single-axis canvases, this clears those rows.
+        for cb_attr in ("_dse_cbar", "_doe_cbar"):
+            cb = getattr(self, cb_attr, None)
+            if cb is not None:
+                try:
+                    cb.remove()
+                except Exception:
+                    pass
+                setattr(self, cb_attr, None)
         for ax_pair in ("_ax_doe", "_ax_sens"):
             axs = getattr(self, ax_pair, None)
             if axs is not None:
@@ -2779,6 +2913,10 @@ class OptimizationWorkspace(QWidget):
 
     def _export_json(self, path: str):
         """Export best design and Pareto front to JSON."""
+        if not self._result.best_design:
+            QMessageBox.warning(self, "Export Error",
+                                "This run produced no best design to export.")
+            return
         try:
             data = {
                 "algorithm": self._result.algorithm_used,

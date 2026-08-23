@@ -36,6 +36,31 @@ from environment.wind_model import WindModel, MultiLevelWindModel
 logger = logging.getLogger("K2.BatchSim")
 
 
+# Substrings that mark a run as a numerical artifact rather than a real flight.
+# Anything else run_batch_simulation reports (no thrust, timeout, recovery
+# failure) is a genuine outcome: the trajectory it produced is real, even if
+# the mission failed, so its ascent metrics still mean something.
+_DIVERGENCE_MARKERS = (
+    "divergence",
+    "integration error",
+    "simulation error",
+)
+
+
+def is_divergence_reason(reason: str) -> bool:
+    """True if *reason* describes a numerical artifact, not a flight outcome."""
+    low = str(reason).lower()
+    return any(marker in low for marker in _DIVERGENCE_MARKERS)
+
+
+def result_diverged(result) -> bool:
+    """True if *result* is a numerical artifact rather than a real flight."""
+    if getattr(result, "success", True):
+        return False
+    return any(is_divergence_reason(fr)
+               for fr in (getattr(result, "failure_reasons", None) or []))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  BatchSimConfig — all inputs for a single simulation run
 # ══════════════════════════════════════════════════════════════════════════════
@@ -723,6 +748,14 @@ def run_batch_simulation(
 
             if phase == FlightPhase.LANDED:
                 break
+        else:
+            # Ran out the 600 s wall without touching down (a high flight under
+            # drogue can easily need longer). The rocket is still airborne, so
+            # `state_vec` is NOT a landing point — mark the run so callers stop
+            # reading its mid-air position as one. FlightPhase.TIMEOUT was
+            # already handled below but nothing ever set it.
+            if phase != FlightPhase.LANDED:
+                phase = FlightPhase.TIMEOUT
 
     except Exception as exc:
         failure_reasons.append(f"Simulation error: {exc}")
