@@ -17,6 +17,8 @@ _MOTOR_KEYS = ("motor_designation", "motor_avg_thrust", "motor_max_thrust",
                "motor_total_impulse", "motor_burn_time", "propellant_mass",
                "motor_dry_mass", "motor_length", "custom_thrust_curve")
 
+from ui import theme
+
 logger = logging.getLogger("K2.PropulsionWS")
 
 
@@ -24,8 +26,8 @@ class ValueLabel(QLabel):
     def __init__(self, text="—", parent=None):
         super().__init__(text, parent)
         self.setStyleSheet(
-            "color: #e6edf3; font-family: 'Cascadia Code', monospace; font-size: 13px; "
-            "font-weight: 600; padding: 2px 4px; background-color: #161b22; border-radius: 4px;")
+            f"color: {theme.TEXT_BRIGHT}; font-family: 'Cascadia Code', monospace; font-size: 13px; "
+            f"font-weight: 600; padding: 2px 4px; background-color: {theme.PANEL}; border-radius: 4px;")
 
 
 class _CurveFetcher(QThread):
@@ -194,7 +196,7 @@ class PropulsionWorkspace(QWidget):
         fl.addRow("Motor:", self.motor_combo)
 
         self.lbl_count = QLabel("")
-        self.lbl_count.setStyleSheet("color: #8b949e; font-size: 11px;")
+        self.lbl_count.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px;")
         fl.addRow("", self.lbl_count)
 
         self.btn_custom_motor = QPushButton("Create Custom Motor")
@@ -527,4 +529,4 @@ class PropulsionWorkspace(QWidget):
         else:
             t, f = generate_thrust_curve(s.motor_avg_thrust, s.motor_max_thrust, s.motor_burn_time)
             
-        self.thrust_plot.update_plot(t, f, "Thrust Curve", "Time (s)", "Thrust (N)", "#f0883e")
+        self.thrust_plot.update_plot(t, f, "Thrust Curve", "Time (s)", "Thrust (N)", theme.ACCENT)

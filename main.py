@@ -16,7 +16,8 @@ from PyQt6.QtCore import Qt
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from ui.main_window import MainWindow
-from ui.styles import DARK_STYLESHEET
+from ui import theme as ui_theme
+from ui import settings as ui_settings
 
 
 def setup_logging():
@@ -105,8 +106,11 @@ def main():
         except Exception:
             pass
 
-    # Apply dark theme
-    app.setStyleSheet(DARK_STYLESHEET)
+    # Apply the saved theme (dark unless the user picked otherwise)
+    ui_theme.set_mode(ui_settings.theme_mode())
+    app.setStyleSheet(ui_theme.stylesheet())
+    ui_theme.apply_matplotlib_theme()
+    ui_settings.apply_log_level()
 
     # Create and show main window
     window = MainWindow()

@@ -1,3 +1,4 @@
+from ui import theme
 """
 K2 AeroSim — Gauge Widget for avionics dashboard.
 Custom-painted circular analog gauge.
@@ -34,13 +35,13 @@ class GaugeWidget(QWidget):
         p.translate(w / 2, h / 2)
 
         # Background circle
-        p.setPen(QPen(QColor("#30363d"), 2))
-        p.setBrush(QColor("#0d1117"))
+        p.setPen(QPen(QColor(theme.LINE), 2))
+        p.setBrush(QColor(theme.BG))
         r = side * 0.42
         p.drawEllipse(QRectF(-r, -r, r * 2, r * 2))
 
         # Arc track
-        p.setPen(QPen(QColor("#21262d"), 6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setPen(QPen(QColor(theme.RAISED), 6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         arc_rect = QRectF(-r * 0.85, -r * 0.85, r * 1.7, r * 1.7)
         p.drawArc(arc_rect, 225 * 16, -270 * 16)
 
@@ -50,11 +51,11 @@ class GaugeWidget(QWidget):
         arc_span = -270 * frac
 
         if frac < 0.6:
-            arc_color = QColor("#58a6ff")
+            arc_color = QColor(theme.ACCENT)
         elif frac < 0.85:
-            arc_color = QColor("#d29922")
+            arc_color = QColor(theme.WARN)
         else:
-            arc_color = QColor("#f85149")
+            arc_color = QColor(theme.ERR)
 
         p.setPen(QPen(arc_color, 6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.drawArc(arc_rect, 225 * 16, int(arc_span * 16))
@@ -64,7 +65,7 @@ class GaugeWidget(QWidget):
         angle_rad = math.radians(angle_deg)
         nx = r * 0.65 * math.cos(angle_rad)
         ny = -r * 0.65 * math.sin(angle_rad)
-        p.setPen(QPen(QColor("#e6edf3"), 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setPen(QPen(QColor(theme.TEXT_BRIGHT), 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.drawLine(0, 0, int(nx), int(ny))
 
         # Center dot
@@ -73,7 +74,7 @@ class GaugeWidget(QWidget):
         p.drawEllipse(QRectF(-4, -4, 8, 8))
 
         # Value text
-        p.setPen(QColor("#e6edf3"))
+        p.setPen(QColor(theme.TEXT_BRIGHT))
         font = QFont("Cascadia Code", int(side * 0.09), QFont.Weight.Bold)
         p.setFont(font)
         if abs(self._value) >= 1000:
@@ -85,13 +86,13 @@ class GaugeWidget(QWidget):
         p.drawText(QRectF(-r, r * 0.1, r * 2, r * 0.4), Qt.AlignmentFlag.AlignCenter, val_text)
 
         # Unit
-        p.setPen(QColor("#484f58"))
+        p.setPen(QColor(theme.LINE_STRONG))
         font2 = QFont("Segoe UI", int(side * 0.06))
         p.setFont(font2)
         p.drawText(QRectF(-r, r * 0.4, r * 2, r * 0.3), Qt.AlignmentFlag.AlignCenter, self.unit)
 
         # Title
-        p.setPen(QColor("#58a6ff"))
+        p.setPen(QColor(theme.ACCENT))
         font3 = QFont("Segoe UI", int(side * 0.055), QFont.Weight.Bold)
         p.setFont(font3)
         p.drawText(QRectF(-r, -r * 0.65, r * 2, r * 0.3), Qt.AlignmentFlag.AlignCenter, self.title)

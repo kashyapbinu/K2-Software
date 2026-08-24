@@ -12,6 +12,8 @@ from PyQt6.QtCore import Qt
 
 from ui.icons import icon
 
+from ui import theme
+
 logger = logging.getLogger("K2.Toolbar")
 
 
@@ -54,11 +56,11 @@ class MainToolbar(QToolBar):
         self.action_import_ork.setShortcut("Ctrl+I")
 
         # ── Simulation actions ──
-        self.action_run_sim = QAction(icon("run", color="#3fb950"), "Run Sim", self)
+        self.action_run_sim = QAction(icon("run", color=theme.OK), "Run Sim", self)
         self.action_run_sim.setToolTip("Run flight simulation (F5)")
         self.action_run_sim.setShortcut("F5")
 
-        self.action_stop_sim = QAction(icon("stop", color="#f85149"), "Stop", self)
+        self.action_stop_sim = QAction(icon("stop", color=theme.ERR), "Stop", self)
         self.action_stop_sim.setToolTip("Stop simulation")
         self.action_stop_sim.setEnabled(False)
 

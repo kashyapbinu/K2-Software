@@ -28,6 +28,8 @@ from physics.liquid_propulsion import (LiquidEngineDesign, PropellantCombo,
     PROPELLANT_COMBOS, ENGINE_CYCLES, COOLING_METHODS, THRUST_PROFILES,
     OPT_MODES, ambient_pressure_at_altitude)
 
+from ui import theme
+
 logger = logging.getLogger("K2.LiquidEngine")
 
 
@@ -40,7 +42,7 @@ class LiquidEngineDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Liquid Engine Designer")
         self.setMinimumSize(1180, 780)
-        self.setStyleSheet("background-color:#1a1a1a; color:#ffffff;")
+        self.setStyleSheet(f"background-color:{theme.PANEL}; color:#ffffff;")
         self._result = None
         self._design = None
         self._loading = True
@@ -199,7 +201,7 @@ class LiquidEngineDialog(QDialog):
         # action buttons
         btns = QVBoxLayout()
         self.btn_apply = QPushButton("APPLY TO ROCKET")
-        self.btn_apply.setStyleSheet("background:#2ea043; color:white; padding:8px; font-weight:bold;")
+        self.btn_apply.setStyleSheet(f"background:{theme.OK}; color:white; padding:8px; font-weight:bold;")
         self.btn_apply.clicked.connect(self._apply)
         self.btn_export = QPushButton("Export all parameters (CSV)")
         self.btn_export.clicked.connect(self._export_csv)
@@ -508,7 +510,7 @@ class LiquidEngineDialog(QDialog):
         if self.combo_graph.currentIndex() == 1:
             y = [p / 1e5 for p in self._result["pressure"]]
             c.style_ax("Chamber Pressure vs Time", "Time (s)", "Pc (bar)")
-            col = "#ff7b72"
+            col = theme.ERR
         else:
             y = self._result["thrust"]
             c.style_ax("Thrust vs Time", "Time (s)", "Thrust (N)")
@@ -534,8 +536,8 @@ class LiquidEngineDialog(QDialog):
         self._hover_annot = ax.annotate(
             f"t={t[i]:.2f}s\n{y[i]:.0f}", xy=(t[i], y[i]),
             xytext=(10, 10), textcoords="offset points",
-            color="#e6edf3", fontsize=9,
-            bbox=dict(boxstyle="round", fc="#21262d", ec="#30363d"))
+            color=theme.TEXT_BRIGHT, fontsize=9,
+            bbox=dict(boxstyle="round", fc=theme.RAISED, ec=theme.LINE))
         self.canvas_thrust.canvas.draw_idle()
 
     def _draw_schematic(self):
@@ -561,7 +563,7 @@ class LiquidEngineDialog(QDialog):
         ax.plot(xs, [-v for v in ys], color=ACCENT, lw=2)
         ax.fill_between(xs, ys, [-v for v in ys], color=ACCENT, alpha=0.10)
         ax.plot([x_inj, x_exit], [0, 0], color=MUTED, ls="--", lw=0.8)
-        ax.plot([x_inj, x_inj], [-rc, rc], color="#ff7b72", lw=3)  # injector face
+        ax.plot([x_inj, x_inj], [-rc, rc], color=theme.ERR, lw=3)  # injector face
         ax.annotate("injector", (x_inj, rc), color=MUTED, fontsize=8, ha="left", va="bottom")
         ax.annotate("throat", (x_thr, rt), color=MUTED, fontsize=8, ha="center", va="bottom")
         ax.annotate("exit", (x_exit, re), color=MUTED, fontsize=8, ha="right", va="bottom")
@@ -584,30 +586,30 @@ class LiquidEngineDialog(QDialog):
 
         def box(x, y, w, h, text, color):
             ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.05",
-                         fc=color, ec="#30363d", alpha=0.85))
+                         fc=color, ec=theme.LINE, alpha=0.85))
             ax.text(x + w / 2, y + h / 2, text, ha="center", va="center",
-                    color="#0d1117", fontsize=8, fontweight="bold")
+                    color=theme.BG, fontsize=8, fontweight="bold")
 
         def arrow(x0, y0, x1, y1):
             ax.add_patch(FancyArrowPatch((x0, y0), (x1, y1),
-                         arrowstyle="-|>", mutation_scale=12, color="#8b949e", lw=1.4))
+                         arrowstyle="-|>", mutation_scale=12, color=theme.TEXT_DIM, lw=1.4))
 
         mono = d.combo.monoprop
         # Ox row
         if not mono:
-            box(0.2, 4.0, 1.6, 1.0, f"LOX tank\n{d.ox_mass:.1f} kg", "#58a6ff")
-            box(2.4, 4.0, 1.6, 1.0, f"Feed\n{d.mdot_ox:.2f} kg/s", "#79c0ff")
+            box(0.2, 4.0, 1.6, 1.0, f"LOX tank\n{d.ox_mass:.1f} kg", theme.ACCENT)
+            box(2.4, 4.0, 1.6, 1.0, f"Feed\n{d.mdot_ox:.2f} kg/s", theme.ACCENT_HOVER)
             arrow(1.8, 4.5, 2.4, 4.5)
             arrow(4.0, 4.5, 4.8, 3.7)
         # Fuel row
-        box(0.2, 1.0, 1.6, 1.0, f"Fuel tank\n{d.fuel_mass:.1f} kg", "#f0883e")
+        box(0.2, 1.0, 1.6, 1.0, f"Fuel tank\n{d.fuel_mass:.1f} kg", theme.ACCENT)
         box(2.4, 1.0, 1.6, 1.0, f"Feed\n{d.mdot_fuel:.2f} kg/s", "#ffa657")
         arrow(1.8, 1.5, 2.4, 1.5)
         arrow(4.0, 1.5, 4.8, 2.3)
         # injector / chamber / nozzle
         box(4.8, 2.3, 1.6, 1.4, f"Injector\n{d.inj_n_holes} holes\nΔP {d.inj_dp/1e5:.1f} bar", "#d2a8ff")
-        box(6.8, 2.3, 1.4, 1.4, f"Chamber\nPc {d.chamber_pressure/1e5:.0f} bar\nØ{d.chamber_diameter*1000:.0f}mm", "#ff7b72")
-        box(8.4, 2.5, 1.4, 1.0, f"Nozzle\nε {d.expansion_ratio:.0f}\nIsp {d.isp:.0f}s", "#3fb950")
+        box(6.8, 2.3, 1.4, 1.4, f"Chamber\nPc {d.chamber_pressure/1e5:.0f} bar\nØ{d.chamber_diameter*1000:.0f}mm", theme.ERR)
+        box(8.4, 2.5, 1.4, 1.0, f"Nozzle\nε {d.expansion_ratio:.0f}\nIsp {d.isp:.0f}s", theme.OK)
         arrow(6.4, 3.0, 6.8, 3.0)
         arrow(8.2, 3.0, 8.4, 3.0)
         c.figure.tight_layout()
@@ -628,11 +630,11 @@ class LiquidEngineDialog(QDialog):
         struct = 0.20 * dry
         vals = [d.ox_mass, d.fuel_mass, eng, tank, struct]
         labels = ["Oxidizer", "Fuel", "Engine dry", "Tank", "Structural"]
-        colors = ["#58a6ff", "#f0883e", "#d2a8ff", "#ff7b72", "#8b949e"]
+        colors = [theme.ACCENT, theme.ACCENT, "#d2a8ff", theme.ERR, theme.TEXT_DIM]
         vals, labels, colors = zip(*[(v, l, col) for v, l, col in
                                      zip(vals, labels, colors) if v > 1e-6])
         ax.pie(vals, labels=labels, colors=colors, autopct="%1.1f%%",
-               textprops={"color": "#e6edf3", "fontsize": 9})
+               textprops={"color": theme.TEXT_BRIGHT, "fontsize": 9})
         ax.text(0, -1.35, f"Wet mass {d.wet_mass:.1f} kg", ha="center",
                 color=MUTED, fontsize=9)
         c.figure.tight_layout()
@@ -662,9 +664,9 @@ class LiquidEngineDialog(QDialog):
         y = range(len(rows))
         ax.barh(list(y), [h - l for h, l in zip(highs, lows)],
                 left=lows, color=ACCENT, alpha=0.7, height=0.5)
-        ax.axvline(0, color="#ff7b72", lw=1, ls="--")
+        ax.axvline(0, color=theme.ERR, lw=1, ls="--")
         ax.set_yticks(list(y))
-        ax.set_yticklabels(rows, color="#c9d1d9")
+        ax.set_yticklabels(rows, color=theme.TEXT)
         for i, (l, h) in enumerate(zip(lows, highs)):
             ax.text(h, i, f" {h:+.1f}%", va="center", color=MUTED, fontsize=8)
             ax.text(l, i, f"{l:+.1f}% ", va="center", ha="right", color=MUTED, fontsize=8)

@@ -20,6 +20,8 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
 from PyQt6.QtCore import Qt, QTimer
 
 import logging
+from ui import theme
+
 logger = logging.getLogger("K2.ModeShapeViewer")
 
 
@@ -54,13 +56,13 @@ class ModeShapeViewer(QWidget):
 
         # Plotter
         self.plotter = QtInteractor(self)
-        self.plotter.set_background("#0d1117", top="#161b22")
+        self.plotter.set_background(theme.BG, top=theme.PANEL)
         self.plotter.add_axes(interactive=False, line_width=2)
         layout.addWidget(self.plotter.interactor, 1)
 
         # Controls bar
         ctrl = QFrame()
-        ctrl.setStyleSheet("background:#161b22; border-top:1px solid #30363d;")
+        ctrl.setStyleSheet(f"background:{theme.PANEL}; border-top:1px solid {theme.LINE};")
         ctrl_layout = QHBoxLayout(ctrl)
         ctrl_layout.setContentsMargins(12, 6, 12, 6)
         ctrl_layout.setSpacing(10)
@@ -69,15 +71,15 @@ class ModeShapeViewer(QWidget):
         self.btn_play.setCheckable(True)
         self.btn_play.clicked.connect(self._toggle_play)
         self.btn_play.setStyleSheet(
-            "background:#21262d; color:#c9d1d9; padding:5px 14px; "
-            "border-radius:6px; font-weight:600; border:1px solid #30363d;"
+            f"background:{theme.RAISED}; color:{theme.TEXT}; padding:5px 14px; "
+            f"border-radius:6px; font-weight:600; border:1px solid {theme.LINE};"
         )
         ctrl_layout.addWidget(self.btn_play)
 
         # Mode info label
         self.lbl_mode_info = QLabel("No mode loaded")
         self.lbl_mode_info.setStyleSheet(
-            "color:#8b949e; font-size:12px; font-family:'Segoe UI',sans-serif;"
+            f"color:{theme.TEXT_DIM}; font-size:12px; font-family:'Segoe UI',sans-serif;"
         )
         ctrl_layout.addWidget(self.lbl_mode_info, 1)
 
@@ -146,7 +148,7 @@ class ModeShapeViewer(QWidget):
         # Ghost wireframe (undeformed reference)
         self._ghost_actor = self.plotter.add_mesh(
             self._ghost_grid, style="wireframe",
-            color="#30363d", line_width=1, opacity=0.3,
+            color=theme.LINE, line_width=1, opacity=0.3,
             label="_ghost"
         )
 
@@ -156,14 +158,14 @@ class ModeShapeViewer(QWidget):
             scalars="Displacement (mm)",
             cmap="turbo",
             show_edges=True,
-            edge_color="#1a1e24",
+            edge_color=theme.PANEL,
             line_width=0.5,
             clim=[0, 1],
             scalar_bar_args={
                 "title": "Displacement (mm)",
                 "title_font_size": 11,
                 "label_font_size": 10,
-                "color": "#c9d1d9",
+                "color": theme.TEXT,
                 "position_x": 0.85,
                 "position_y": 0.1,
                 "width": 0.08,
@@ -204,13 +206,13 @@ class ModeShapeViewer(QWidget):
 
         self.plotter.clear_actors()
         self._ghost_actor = self.plotter.add_mesh(
-            self._ghost_grid, style="wireframe", color="#484f58",
+            self._ghost_grid, style="wireframe", color=theme.LINE_STRONG,
             line_width=1, opacity=0.35)
         self._mesh_actor = self.plotter.add_mesh(
             self._grid, scalars="Displacement (mm)", cmap="turbo",
-            show_edges=True, edge_color="#1a1e24", line_width=0.5, clim=[0, 1],
+            show_edges=True, edge_color=theme.PANEL, line_width=0.5, clim=[0, 1],
             scalar_bar_args={"title": "Displacement", "title_font_size": 11,
-                             "label_font_size": 10, "color": "#c9d1d9",
+                             "label_font_size": 10, "color": theme.TEXT,
                              "position_x": 0.85, "position_y": 0.1,
                              "width": 0.08, "height": 0.7, "fmt": "%.2f"})
         self.plotter.reset_camera()

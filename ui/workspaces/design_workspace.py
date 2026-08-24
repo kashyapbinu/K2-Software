@@ -12,16 +12,13 @@ from core.components import (RocketAssembly, Stage, NoseCone, BodyTube,
     EngineBlock, Parachute, ShockCord, MassComponent, LaunchLug, RailButton)
 from ui.widgets.component_tree import ComponentTree
 from ui.widgets.component_palette import ComponentPalette
+from ui.widgets.collapsible import CollapsibleSection
+from ui import theme
 from ui.widgets.component_editor import ComponentEditor
 from ui.properties_panel import PropertiesPanel
 from visualization.viewer_3d import Viewer3D
 
 logger = logging.getLogger("K2.DesignWS")
-
-_STAB_VAL_SS = (
-    "color: #e6edf3; font-family: 'Cascadia Code', monospace; font-size: 13px; "
-    "font-weight: 600; padding: 2px 4px; background-color: #161b22; border-radius: 4px;"
-)
 
 # Components that must be children of a BodyTube
 INNER_TYPES = (InnerTube, CenteringRing, Bulkhead, EngineBlock)
@@ -86,34 +83,29 @@ class DesignWorkspace(QWidget):
         rl.addWidget(self.editor, 1)
 
         # ── Stability Analysis panel ──
-        stab_grp = QGroupBox("Stability Analysis")
-        stab_grp.setStyleSheet(
-            "QGroupBox { font-weight: 700; font-size: 12px; color: #c9d1d9; "
-            "border: 1px solid #30363d; border-radius: 6px; margin-top: 6px; padding-top: 14px; }"
-            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }"
-        )
+        stab_grp = CollapsibleSection("Stability (static)")
         sf = QFormLayout()
         sf.setSpacing(4)
         sf.setContentsMargins(8, 4, 8, 8)
 
         self._stab_cp = QLabel("—")
-        self._stab_cp.setStyleSheet(_STAB_VAL_SS)
+        self._stab_cp.setProperty("value", True)
         sf.addRow("CP:", self._stab_cp)
 
         self._stab_cg = QLabel("—")
-        self._stab_cg.setStyleSheet(_STAB_VAL_SS)
+        self._stab_cg.setProperty("value", True)
         sf.addRow("CG:", self._stab_cg)
 
         self._stab_margin = QLabel("—")
-        self._stab_margin.setStyleSheet(_STAB_VAL_SS)
+        self._stab_margin.setProperty("value", True)
         sf.addRow("Margin:", self._stab_margin)
 
         self._stab_status = QLabel("—")
-        self._stab_status.setStyleSheet("font-weight: 600; font-size: 13px;")
+        self._stab_status.setProperty("value", True)
         sf.addRow("Status:", self._stab_status)
 
-        stab_grp.setLayout(sf)
-        stab_grp.setMaximumHeight(140)
+        stab_grp.set_content_layout(sf)
+        stab_grp.setMaximumHeight(170)
         rl.addWidget(stab_grp)
 
         self.properties = PropertiesPanel(self.engine)
@@ -277,16 +269,16 @@ class DesignWorkspace(QWidget):
 
         if s.stability_margin < 0.5:
             self._stab_status.setText("UNSTABLE")
-            self._stab_status.setStyleSheet("color: #f85149; font-weight: 600; font-size: 13px;")
+            self._stab_status.setStyleSheet(theme.value_qss(theme.ERR))
         elif s.stability_margin < 1.0:
             self._stab_status.setText("MARGINAL")
-            self._stab_status.setStyleSheet("color: #d29922; font-weight: 600; font-size: 13px;")
+            self._stab_status.setStyleSheet(theme.value_qss(theme.WARN))
         elif s.stability_margin <= 2.5:
             self._stab_status.setText("✓ STABLE")
-            self._stab_status.setStyleSheet("color: #7ee787; font-weight: 600; font-size: 13px;")
+            self._stab_status.setStyleSheet(theme.value_qss(theme.OK))
         else:
             self._stab_status.setText("OVERSTABLE")
-            self._stab_status.setStyleSheet("color: #d29922; font-weight: 600; font-size: 13px;")
+            self._stab_status.setStyleSheet(theme.value_qss(theme.WARN))
 
     def closeEvent(self, event):
         self.viewer.closeEvent(event)

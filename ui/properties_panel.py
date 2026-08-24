@@ -12,6 +12,9 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
+from ui import theme
+from ui.widgets.collapsible import CollapsibleSection
+
 logger = logging.getLogger("K2.Properties")
 
 
@@ -19,9 +22,8 @@ class ValueLabel(QLabel):
     def __init__(self, text="—", parent=None):
         super().__init__(text, parent)
         self.setStyleSheet(
-            "color: #e6edf3; font-family: 'Cascadia Code', 'Consolas', monospace; "
-            "font-size: 13px; font-weight: 600; padding: 2px 4px; "
-            "background-color: #161b22; border-radius: 4px;"
+            f"color: {theme.TEXT_BRIGHT}; font-family: {theme.MONO}; "
+            f"font-size: 13px; padding: 2px 0px; background: transparent;"
         )
         self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
@@ -33,6 +35,9 @@ class StabilityIndicator(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
         self.value_label = ValueLabel("0.00 cal")
+        self.value_label.setStyleSheet(
+            f"color: {theme.ACCENT}; font-family: {theme.MONO}; font-size: 17px;"
+            f" font-weight: 600; padding: 2px 0px; background: transparent;")
         layout.addWidget(self.value_label)
         self.bar = QProgressBar()
         self.bar.setRange(0, 100)
@@ -41,7 +46,7 @@ class StabilityIndicator(QWidget):
         self.bar.setFixedHeight(6)
         layout.addWidget(self.bar)
         self.status_label = QLabel("Unknown")
-        self.status_label.setStyleSheet("font-size: 10px; color: #8b949e;")
+        self.status_label.setStyleSheet(f"font-size: 11px; color: {theme.TEXT_DIM};")
         layout.addWidget(self.status_label)
 
     def update_stability(self, margin):
@@ -56,15 +61,15 @@ class StabilityIndicator(QWidget):
         self.bar.setValue(min(max(progress, 0), 100))
 
         if margin < 0:
-            status, color = "UNSTABLE", "#f85149"
+            status, color = "UNSTABLE", theme.ERR
         elif margin < 0.5:
-            status, color = "MARGINAL–", "#d29922"
+            status, color = "MARGINAL–", theme.WARN
         elif margin < 1.0:
-            status, color = "MARGINAL", "#d29922"
+            status, color = "MARGINAL", theme.WARN
         elif margin <= 2.5:
-            status, color = "✓ STABLE", "#7ee787"
+            status, color = "✓ STABLE", theme.OK
         else:
-            status, color = "OVERSTABLE", "#d29922"
+            status, color = "OVERSTABLE", theme.WARN
 
         self.status_label.setText(status)
         self.status_label.setStyleSheet(f"font-size: 11px; color: {color}; font-weight: 600;")
@@ -86,10 +91,10 @@ class PropertiesPanel(QWidget):
         content = QWidget()
         ml = QVBoxLayout(content)
         ml.setContentsMargins(8, 8, 8, 8)
-        ml.setSpacing(12)
+        ml.setSpacing(8)
 
         # Stability
-        g = QGroupBox("Stability Analysis")
+        g = CollapsibleSection("Stability (current configuration)")
         lo = QVBoxLayout()
         self.stability_indicator = StabilityIndicator()
         lo.addWidget(self.stability_indicator)
@@ -97,23 +102,23 @@ class PropertiesPanel(QWidget):
         self.cg_label = ValueLabel("0.000 m"); f.addRow("CG:", self.cg_label)
         self.cp_label = ValueLabel("0.000 m"); f.addRow("CP:", self.cp_label)
         self.total_length_label = ValueLabel("0.000 m"); f.addRow("Total Length:", self.total_length_label)
-        lo.addLayout(f); g.setLayout(lo); ml.addWidget(g)
+        lo.addLayout(f); g.set_content_layout(lo); ml.addWidget(g)
 
         # Mass
-        g = QGroupBox("Mass Properties"); f = QFormLayout(); f.setSpacing(6)
+        g = CollapsibleSection("Mass properties"); f = QFormLayout(); f.setSpacing(6)
         self.total_mass_label = ValueLabel("0.000 kg"); f.addRow("Total:", self.total_mass_label)
         self.weight_label = ValueLabel("0.000 N"); f.addRow("Weight:", self.weight_label)
-        g.setLayout(f); ml.addWidget(g)
+        g.set_content_layout(f); ml.addWidget(g)
 
 
 
         # Motor
-        g = QGroupBox("Active Motor"); f = QFormLayout(); f.setSpacing(6)
+        g = CollapsibleSection("Active motor"); f = QFormLayout(); f.setSpacing(6)
         self.motor_name_label = ValueLabel("None"); f.addRow("Motor:", self.motor_name_label)
         self.motor_impulse_label = ValueLabel("—"); f.addRow("Impulse:", self.motor_impulse_label)
         self.motor_thrust_label = ValueLabel("—"); f.addRow("Thrust:", self.motor_thrust_label)
         self.motor_burn_label = ValueLabel("—"); f.addRow("Burn:", self.motor_burn_label)
-        g.setLayout(f); ml.addWidget(g)
+        g.set_content_layout(f); ml.addWidget(g)
 
         ml.addStretch()
         scroll.setWidget(content)

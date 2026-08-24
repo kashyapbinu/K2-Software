@@ -1,3 +1,4 @@
+from ui import theme
 """
 K2 AeroSim — Shared dark-themed widgets for the engine/motor design dialogs.
 ============================================================================
@@ -20,12 +21,12 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QGridLayout, QLabel,
 from PyQt6.QtCore import Qt
 
 # Shared palette (matches ui/styles.py)
-ACCENT = "#58a6ff"
-MUTED = "#8b949e"
-WARN = "#f0883e"
-GOOD = "#3fb950"
-BG = "#0d1117"
-PANEL = "#161b22"
+ACCENT = theme.ACCENT
+MUTED = theme.TEXT_DIM
+WARN = theme.ACCENT
+GOOD = theme.OK
+BG = theme.BG
+PANEL = theme.PANEL
 
 
 class CollapsibleBox(QWidget):
@@ -35,9 +36,9 @@ class CollapsibleBox(QWidget):
         super().__init__(parent)
         self.toggle = QToolButton(text=title, checkable=True, checked=expanded)
         self.toggle.setStyleSheet(
-            "QToolButton { background:#161b22; color:#e6edf3; border:1px solid #30363d;"
+            f"QToolButton {{ background:{theme.PANEL}; color:{theme.TEXT_BRIGHT}; border:1px solid {theme.LINE};"
             " border-radius:6px; padding:6px 8px; font-weight:600; text-align:left; }"
-            "QToolButton:hover { background:#21262d; }")
+            f"QToolButton:hover {{ background:{theme.RAISED}; }}")
         self.toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
         self.toggle.clicked.connect(self._on_toggle)
@@ -100,7 +101,7 @@ class MplCanvas(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         if toolbar:
             tb = NavToolbar(self.canvas, self)
-            tb.setStyleSheet("background:#161b22; color:#c9d1d9;")
+            tb.setStyleSheet(f"background:{theme.PANEL}; color:{theme.TEXT};")
             lay.addWidget(tb)
         lay.addWidget(self.canvas)
 
@@ -110,12 +111,12 @@ class MplCanvas(QWidget):
         ax.set_title(title, color=ACCENT, fontsize=12, fontweight="bold", pad=10)
         ax.set_xlabel(xlabel, color=MUTED, fontsize=10)
         ax.set_ylabel(ylabel, color=MUTED, fontsize=10)
-        ax.tick_params(colors="#484f58", labelsize=9)
+        ax.tick_params(colors=theme.LINE_STRONG, labelsize=9)
         for s in ("top", "right"):
             ax.spines[s].set_visible(False)
         for s in ("bottom", "left"):
-            ax.spines[s].set_color("#30363d")
-        ax.grid(True, alpha=0.15, color="#30363d")
+            ax.spines[s].set_color(theme.LINE)
+        ax.grid(True, alpha=0.15, color=theme.LINE)
 
     def clear(self):
         self.figure.clear()

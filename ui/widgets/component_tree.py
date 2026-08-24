@@ -10,6 +10,8 @@ from PyQt6.QtGui import QColor, QBrush, QFont
 from core.components import RocketComponent, Stage
 from ui.icons import icon as app_icon
 
+from ui import theme
+
 logger = logging.getLogger("K2.CompTree")
 
 ICONS = {
@@ -40,8 +42,7 @@ class ComponentTree(QWidget):
 
         # Tree header
         header = QLabel("ROCKET STRUCTURE")
-        header.setStyleSheet("color: #58a6ff; font-weight: 700; font-size: 11px; "
-            "letter-spacing: 1px; padding: 4px 8px;")
+        header.setProperty("panelTitle", True)
         layout.addWidget(header)
 
         # Tree widget
@@ -49,11 +50,13 @@ class ComponentTree(QWidget):
         self.tree.setHeaderHidden(True)
         self.tree.setIndentation(20)
         self.tree.setAnimated(True)
-        self.tree.setStyleSheet("""
-            QTreeWidget { background-color: #0d1117; border: 1px solid #21262d; border-radius: 6px; }
-            QTreeWidget::item { padding: 4px 6px; border-radius: 3px; }
-            QTreeWidget::item:selected { background-color: #1f6feb; color: #ffffff; }
-            QTreeWidget::item:hover:!selected { background-color: #161b22; }
+        self.tree.setStyleSheet(f"""
+            QTreeWidget {{ background-color: {theme.PANEL};
+                           border: 1px solid {theme.LINE}; border-radius: 6px; }}
+            QTreeWidget::item {{ padding: 5px 6px; border-radius: 3px; }}
+            QTreeWidget::item:selected {{ background-color: {theme.RAISED};
+                                          color: {theme.ACCENT}; }}
+            QTreeWidget::item:hover:!selected {{ background-color: {theme.RAISED}; }}
         """)
         self.tree.currentItemChanged.connect(self._on_selection_changed)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -69,25 +72,25 @@ class ComponentTree(QWidget):
 
         # Crisp qtawesome icons + descriptive hover tooltips (the old ▲▼⧉✕
         # glyphs rendered inconsistently and read as random characters).
-        self.btn_up = QPushButton(app_icon("move_up", color="#c9d1d9"), "")
+        self.btn_up = QPushButton(app_icon("move_up", color=theme.TEXT), "")
         self.btn_up.setToolTip("Move component up")
         self.btn_up.setFixedSize(36, 30)
         self.btn_up.clicked.connect(self._move_up)
         bl.addWidget(self.btn_up)
 
-        self.btn_down = QPushButton(app_icon("move_down", color="#c9d1d9"), "")
+        self.btn_down = QPushButton(app_icon("move_down", color=theme.TEXT), "")
         self.btn_down.setToolTip("Move component down")
         self.btn_down.setFixedSize(36, 30)
         self.btn_down.clicked.connect(self._move_down)
         bl.addWidget(self.btn_down)
 
-        self.btn_dup = QPushButton(app_icon("duplicate", color="#58a6ff"), "")
+        self.btn_dup = QPushButton(app_icon("duplicate", color=theme.ACCENT), "")
         self.btn_dup.setToolTip("Duplicate component")
         self.btn_dup.setFixedSize(36, 30)
         self.btn_dup.clicked.connect(self._duplicate)
         bl.addWidget(self.btn_dup)
 
-        self.btn_del = QPushButton(app_icon("delete", color="#f85149"), "")
+        self.btn_del = QPushButton(app_icon("delete", color=theme.ERR), "")
         self.btn_del.setToolTip("Delete component")
         self.btn_del.setFixedSize(36, 30)
         self.btn_del.setProperty("danger", True)
@@ -107,7 +110,7 @@ class ComponentTree(QWidget):
         f.setBold(True)
         f.setPointSize(11)
         root.setFont(0, f)
-        root.setForeground(0, QBrush(QColor("#e6edf3")))
+        root.setForeground(0, QBrush(QColor(theme.TEXT_BRIGHT)))
         root.setExpanded(True)
 
         for stage in self.assembly.stages:
@@ -208,8 +211,7 @@ class ComponentTree(QWidget):
             return
 
         menu = QMenu(self)
-        menu.setStyleSheet("QMenu { background: #161b22; border: 1px solid #30363d; } "
-            "QMenu::item { padding: 6px 20px; } QMenu::item:selected { background: #1f6feb; }")
+
         menu.addAction("▲ Move Up", lambda: QTimer.singleShot(0, self._move_up))
         menu.addAction("▼ Move Down", lambda: QTimer.singleShot(0, self._move_down))
         menu.addSeparator()

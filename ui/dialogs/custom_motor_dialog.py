@@ -27,6 +27,8 @@ from ui.widgets.design_widgets import (CollapsibleBox, MetricGrid, MplCanvas,
 from physics.internal_ballistics import (Propellant, BatesGrain, TubularGrain,
     EndBurnerGrain, StarGrain, MotorSimulator)
 
+from ui import theme
+
 logger = logging.getLogger("K2.CustomMotor")
 
 P_ATM = 101325.0
@@ -57,7 +59,7 @@ class GrainRenderer(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
-        painter.fillRect(0, 0, w, h, QColor("#1e1e1e"))
+        painter.fillRect(0, 0, w, h, QColor(theme.SUNKEN))
         cx, cy = w / 2, h / 2
         max_d = max(self.outer_d, 1.0)
         scale = min(w, h) * 0.8 / max_d
@@ -71,18 +73,18 @@ class GrainRenderer(QWidget):
             current_inner_d = min(self.inner_d + 2 * self.regression, self.outer_d)
             r_in = (current_inner_d * scale) / 2
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QBrush(QColor("#1e1e1e")))
+            painter.setBrush(QBrush(QColor(theme.SUNKEN)))
             painter.drawEllipse(int(cx - r_in), int(cy - r_in), int(r_in * 2), int(r_in * 2))
         elif self.grain_type == 2:  # End-Burner
             if self.regression >= self.outer_d * 5:
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QBrush(QColor("#1e1e1e")))
+                painter.setBrush(QBrush(QColor(theme.SUNKEN)))
                 painter.drawEllipse(int(cx - r_out), int(cy - r_out), int(r_out * 2), int(r_out * 2))
         elif self.grain_type == 3:  # Star
             from PyQt6.QtGui import QPolygonF
             from PyQt6.QtCore import QPointF
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QBrush(QColor("#1e1e1e")))
+            painter.setBrush(QBrush(QColor(theme.SUNKEN)))
             poly = QPolygonF()
             N = self.star_points
             r_inner = self.inner_d / 2.0
@@ -107,7 +109,7 @@ class CustomMotorDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Custom Motor Builder")
         self.setMinimumSize(1180, 760)
-        self.setStyleSheet("background-color:#1a1a1a; color:#ffffff;")
+        self.setStyleSheet(f"background-color:{theme.PANEL}; color:#ffffff;")
         self._last_result = None
         self._summary = None
 
@@ -520,8 +522,8 @@ class CustomMotorDialog(QDialog):
             self._hover_annot.remove()
         self._hover_annot = ax.annotate(
             f"t={t[i]:.2f}s\n{y[i]:.1f}", xy=(t[i], y[i]), xytext=(10, 10),
-            textcoords="offset points", color="#e6edf3", fontsize=9,
-            bbox=dict(boxstyle="round", fc="#21262d", ec="#30363d"))
+            textcoords="offset points", color=theme.TEXT_BRIGHT, fontsize=9,
+            bbox=dict(boxstyle="round", fc=theme.RAISED, ec=theme.LINE))
         self.canvas_curve.canvas.draw_idle()
 
     def _draw_schematic(self):
@@ -543,7 +545,7 @@ class CustomMotorDialog(QDialog):
         ax.plot(xs, [-v for v in ys], color=ACCENT, lw=2)
         ax.fill_between(xs, ys, [-v for v in ys], color=ACCENT, alpha=0.10)
         ax.plot([0, xs[-1]], [0, 0], color=MUTED, ls="--", lw=0.8)
-        ax.plot([0, 0], [-rc, rc], color="#ff7b72", lw=3)
+        ax.plot([0, 0], [-rc, rc], color=theme.ERR, lw=3)
         ax.annotate("forward closure", (0, rc), color=MUTED, fontsize=8, ha="left", va="bottom")
         ax.annotate("throat", (xs[2], rt), color=MUTED, fontsize=8, ha="center", va="bottom")
         ax.annotate("exit", (xs[3], re), color=MUTED, fontsize=8, ha="right", va="bottom")
@@ -561,11 +563,11 @@ class CustomMotorDialog(QDialog):
         case = 0.55 * inert; nozzle = 0.25 * inert; struct = 0.20 * inert
         vals = [s["prop_mass"], case, nozzle, struct]
         labels = ["Propellant", "Casing", "Nozzle", "Structural"]
-        colors = ["#58a6ff", "#ff7b72", "#d2a8ff", "#8b949e"]
+        colors = [theme.ACCENT, theme.ERR, "#d2a8ff", theme.TEXT_DIM]
         vals, labels, colors = zip(*[(v, l, col) for v, l, col in
                                      zip(vals, labels, colors) if v > 1e-6])
         ax.pie(vals, labels=labels, colors=colors, autopct="%1.1f%%",
-               textprops={"color": "#e6edf3", "fontsize": 9})
+               textprops={"color": theme.TEXT_BRIGHT, "fontsize": 9})
         ax.text(0, -1.35, f"Wet mass {s['wet_mass']:.2f} kg", ha="center", color=MUTED, fontsize=9)
         c.figure.tight_layout(); c.canvas.draw()
 
@@ -599,8 +601,8 @@ class CustomMotorDialog(QDialog):
         y = range(len(rows))
         ax.barh(list(y), [h - l for h, l in zip(highs, lows)], left=lows,
                 color=ACCENT, alpha=0.7, height=0.5)
-        ax.axvline(0, color="#ff7b72", lw=1, ls="--")
-        ax.set_yticks(list(y)); ax.set_yticklabels(rows, color="#c9d1d9")
+        ax.axvline(0, color=theme.ERR, lw=1, ls="--")
+        ax.set_yticks(list(y)); ax.set_yticklabels(rows, color=theme.TEXT)
         for i, (l, h) in enumerate(zip(lows, highs)):
             ax.text(h, i, f" {h:+.0f}%", va="center", color=MUTED, fontsize=8)
             ax.text(l, i, f"{l:+.0f}% ", va="center", ha="right", color=MUTED, fontsize=8)

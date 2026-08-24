@@ -58,18 +58,20 @@ try:
 except Exception:
     _ROCKET_MESH_OK = False
 
+from ui import theme
+
 logger = logging.getLogger("K2.MissionViz")
 
 _PHASE_COLORS = {
-    "Pre-Launch":     "#58a6ff",
+    "Pre-Launch":     theme.ACCENT,
     "Boost":          "#ffa657",
-    "Coast":          "#7ee787",
-    "Apogee":         "#f0883e",
-    "Drogue Descent": "#79c0ff",
-    "Main Descent":   "#56d364",
-    "Landed":         "#3fb950",
-    "Timeout":        "#f85149",
-    "Terminated":     "#f85149",
+    "Coast":          theme.OK,
+    "Apogee":         theme.ACCENT,
+    "Drogue Descent": theme.ACCENT_HOVER,
+    "Main Descent":   theme.OK,
+    "Landed":         theme.OK,
+    "Timeout":        theme.ERR,
+    "Terminated":     theme.ERR,
 }
 
 # Categorical phase coloring for the "Flight Phase" trail mode
@@ -77,29 +79,29 @@ _PHASE_INDEX = {
     "Pre-Launch": 0, "Ignition": 1, "Boost": 1, "Coast": 2, "Apogee": 3,
     "Drogue Descent": 4, "Main Descent": 5, "Landed": 6,
 }
-_PHASE_CMAP = ["#58a6ff", "#ffa657", "#7ee787", "#f0883e",
-               "#79c0ff", "#56d364", "#3fb950"]
+_PHASE_CMAP = [theme.ACCENT, "#ffa657", theme.OK, theme.ACCENT,
+               theme.ACCENT_HOVER, theme.OK, theme.OK]
 
 # Events that get a 3D flag marker on the trajectory
 _FLAG_EVENTS = {
     "motor_burnout": ("Burnout",  "#ffa657"),
-    "max_q":         ("Max-Q",    "#d29922"),
-    "apogee":        ("Apogee",   "#f0883e"),
-    "drogue_deploy": ("Drogue",   "#79c0ff"),
-    "main_deploy":   ("Main",     "#56d364"),
-    "landing":       ("Landing",  "#3fb950"),
+    "max_q":         ("Max-Q",    theme.WARN),
+    "apogee":        ("Apogee",   theme.ACCENT),
+    "drogue_deploy": ("Drogue",   theme.ACCENT_HOVER),
+    "main_deploy":   ("Main",     theme.OK),
+    "landing":       ("Landing",  theme.OK),
 }
 
 _EVENT_LABELS = {
-    "sim_start":      ("Ignition",            "#58a6ff"),
+    "sim_start":      ("Ignition",            theme.ACCENT),
     "motor_ignition": ("Motor Ignition",      "#ffa657"),
     "motor_burnout":  ("Burnout",             "#ffa657"),
-    "apogee":         ("Apogee",              "#f0883e"),
-    "drogue_deploy":  ("Drogue Deploy",       "#79c0ff"),
-    "main_deploy":    ("Main Chute Deploy",   "#56d364"),
-    "landing":        ("Landing",             "#3fb950"),
-    "max_q":          ("Max-Q",               "#d29922"),
-    "sim_end":        ("Sim End",             "#3fb950"),
+    "apogee":         ("Apogee",              theme.ACCENT),
+    "drogue_deploy":  ("Drogue Deploy",       theme.ACCENT_HOVER),
+    "main_deploy":    ("Main Chute Deploy",   theme.OK),
+    "landing":        ("Landing",             theme.OK),
+    "max_q":          ("Max-Q",               theme.WARN),
+    "sim_end":        ("Sim End",             theme.OK),
 }
 
 
@@ -113,12 +115,12 @@ class _Readout(QWidget):
         lay.setSpacing(1)
 
         lbl = QLabel(label.upper())
-        lbl.setStyleSheet("color:#8b949e;font-size:9px;font-weight:600;letter-spacing:1px;")
+        lbl.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:9px;font-weight:600;letter-spacing:1px;")
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self._val = QLabel("--")
         self._val.setStyleSheet(
-            "color:#e6edf3;font-family:'Cascadia Code',monospace;"
+            f"color:{theme.TEXT_BRIGHT};font-family:'Cascadia Code',monospace;"
             "font-size:14px;font-weight:700;"
         )
         self._val.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -127,11 +129,11 @@ class _Readout(QWidget):
         lay.addWidget(self._val)
         if unit:
             u = QLabel(unit)
-            u.setStyleSheet("color:#484f58;font-size:8px;")
+            u.setStyleSheet(f"color:{theme.LINE_STRONG};font-size:8px;")
             u.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lay.addWidget(u)
 
-        self.setStyleSheet("background:#161b22;border:1px solid #21262d;border-radius:6px;")
+        self.setStyleSheet(f"background:{theme.PANEL};border:1px solid {theme.RAISED};border-radius:6px;")
         self.setMinimumWidth(85)
 
         self._last_text = None
@@ -142,7 +144,7 @@ class _Readout(QWidget):
         if text != self._last_text:
             self._val.setText(text)
             self._last_text = text
-        col = color or "#e6edf3"
+        col = color or theme.TEXT_BRIGHT
         # setStyleSheet reparses CSS — only touch it when the colour changes.
         if col != self._last_col:
             self._val.setStyleSheet(
@@ -317,7 +319,7 @@ class MissionVisualizerWorkspace(QWidget):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(2)
-        splitter.setStyleSheet("QSplitter::handle { background: #21262d; }")
+        splitter.setStyleSheet(f"QSplitter::handle {{ background: {theme.RAISED}; }}")
         splitter.addWidget(self._build_left_panel())
         splitter.addWidget(self._build_right_panel())
         splitter.setSizes([920, 280])
@@ -330,20 +332,20 @@ class MissionVisualizerWorkspace(QWidget):
     def _build_title_bar(self):
         bar = QWidget()
         bar.setFixedHeight(36)
-        bar.setStyleSheet("background:#0d1117;border-bottom:1px solid #21262d;")
+        bar.setStyleSheet(f"background:{theme.BG};border-bottom:1px solid {theme.RAISED};")
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(16, 0, 16, 0)
 
         title = QLabel("MISSION VISUALIZER")
         title.setStyleSheet(
-            "color:#58a6ff;font-size:13px;font-weight:700;letter-spacing:3px;"
+            f"color:{theme.ACCENT};font-size:13px;font-weight:700;letter-spacing:3px;"
         )
         lay.addWidget(title)
         lay.addStretch()
 
         self._stats_lbl = QLabel("")
         self._stats_lbl.setStyleSheet(
-            "color:#7ee787;font-family:'Cascadia Code',monospace;font-size:10px;"
+            f"color:{theme.OK};font-family:'Cascadia Code',monospace;font-size:10px;"
             "padding:2px 8px;margin-right:8px;"
         )
         self._stats_lbl.setVisible(False)
@@ -351,29 +353,29 @@ class MissionVisualizerWorkspace(QWidget):
 
         self._status_lbl = QLabel("STANDBY")
         self._status_lbl.setStyleSheet(
-            "color:#484f58;font-size:11px;font-weight:600;"
-            "padding:2px 10px;border:1px solid #21262d;border-radius:4px;"
+            f"color:{theme.LINE_STRONG};font-size:11px;font-weight:600;"
+            f"padding:2px 10px;border:1px solid {theme.RAISED};border-radius:4px;"
         )
         lay.addWidget(self._status_lbl)
 
         self._phase_lbl = QLabel("--")
         self._phase_lbl.setStyleSheet(
-            "color:#8b949e;font-size:11px;font-weight:600;"
-            "padding:2px 10px;border:1px solid #21262d;border-radius:4px;margin-left:8px;"
+            f"color:{theme.TEXT_DIM};font-size:11px;font-weight:600;"
+            f"padding:2px 10px;border:1px solid {theme.RAISED};border-radius:4px;margin-left:8px;"
         )
         lay.addWidget(self._phase_lbl)
         return bar
 
     def _build_left_panel(self):
         w = QWidget()
-        w.setStyleSheet("background:#0d1117;")
+        w.setStyleSheet(f"background:{theme.BG};")
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
         # 3D view
         view_frame = QFrame()
-        view_frame.setStyleSheet("background:#0d1117;")
+        view_frame.setStyleSheet(f"background:{theme.BG};")
         vfl = QVBoxLayout(view_frame)
         vfl.setContentsMargins(0, 0, 0, 0)
 
@@ -381,7 +383,7 @@ class MissionVisualizerWorkspace(QWidget):
             try:
                 self._plotter = QtInteractor(view_frame)
                 vfl.addWidget(self._plotter.interactor)
-                self._plotter.set_background("#0d1117")
+                self._plotter.set_background(theme.BG)
                 self._init_3d_scene()
                 self._scene_ready = True
             except Exception as exc:
@@ -406,13 +408,13 @@ class MissionVisualizerWorkspace(QWidget):
     def _fallback_label(self, text):
         lbl = QLabel(text)
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl.setStyleSheet("color:#484f58;font-size:12px;")
+        lbl.setStyleSheet(f"color:{theme.LINE_STRONG};font-size:12px;")
         return lbl
 
     def _build_graph_strip(self):
         frame = QFrame()
         frame.setFixedHeight(125)
-        frame.setStyleSheet("background:#0d1117;border-top:1px solid #21262d;")
+        frame.setStyleSheet(f"background:{theme.BG};border-top:1px solid {theme.RAISED};")
         lay = QHBoxLayout(frame)
         lay.setContentsMargins(8, 4, 8, 4)
         lay.setSpacing(6)
@@ -432,16 +434,16 @@ class MissionVisualizerWorkspace(QWidget):
         if _MPL_OK:
             for label, unit in specs:
                 fig = Figure(figsize=(2, 1), dpi=70)
-                fig.patch.set_facecolor("#0d1117")
+                fig.patch.set_facecolor(theme.BG)
                 ax = fig.add_subplot(111)
-                ax.set_facecolor("#0d1117")
-                ax.tick_params(colors="#484f58", labelsize=6)
+                ax.set_facecolor(theme.BG)
+                ax.tick_params(colors=theme.LINE_STRONG, labelsize=6)
                 for sp in ax.spines.values():
-                    sp.set_edgecolor("#21262d")
+                    sp.set_edgecolor(theme.RAISED)
                 title_str = f"{label} ({unit})" if unit else label
-                ax.set_title(title_str, color="#8b949e", fontsize=7, pad=2)
+                ax.set_title(title_str, color=theme.TEXT_DIM, fontsize=7, pad=2)
                 fig.subplots_adjust(left=0.18, right=0.97, top=0.78, bottom=0.22)
-                line, = ax.plot([], [], color="#58a6ff", linewidth=1.0)
+                line, = ax.plot([], [], color=theme.ACCENT, linewidth=1.0)
                 canvas = FigureCanvas(fig)
                 canvas.setMinimumWidth(110)
                 canvas.setSizePolicy(
@@ -458,23 +460,23 @@ class MissionVisualizerWorkspace(QWidget):
     def _build_right_panel(self):
         tabs = QTabWidget()
         tabs.setMinimumWidth(250)
-        tabs.setStyleSheet("""
-            QTabWidget::pane { border:none; background:#0d1117; }
-            QTabBar::tab {
-                color:#8b949e; background:#161b22; padding:6px 10px;
-                border:1px solid #21262d; border-bottom:none; font-size:10px;
-            }
-            QTabBar::tab:selected {
-                color:#e6edf3; background:#0d1117;
-                border-top:2px solid #58a6ff;
-            }
-            QTabBar::scroller { width:30px; }
-            QTabBar QToolButton {
-                background:#21262d; border:1px solid #30363d; border-radius:4px;
-                margin:2px 1px; width:22px; color:#c9d1d9;
-            }
-            QTabBar QToolButton:hover { background:#1f6feb; border-color:#1f6feb; }
-            QTabBar QToolButton:disabled { background:#161b22; border-color:#21262d; }
+        tabs.setStyleSheet(f"""
+            QTabWidget::pane {{ border:none; background:{theme.BG}; }}
+            QTabBar::tab {{
+                color:{theme.TEXT_DIM}; background:{theme.PANEL}; padding:6px 10px;
+                border:1px solid {theme.RAISED}; border-bottom:none; font-size:10px;
+            }}
+            QTabBar::tab:selected {{
+                color:{theme.TEXT_BRIGHT}; background:{theme.BG};
+                border-top:2px solid {theme.ACCENT};
+            }}
+            QTabBar::scroller {{ width:30px; }}
+            QTabBar QToolButton {{
+                background:{theme.RAISED}; border:1px solid {theme.LINE}; border-radius:4px;
+                margin:2px 1px; width:22px; color:{theme.TEXT};
+            }}
+            QTabBar QToolButton:hover {{ background:{theme.ACCENT_DEEP}; border-color:{theme.ACCENT_DEEP}; }}
+            QTabBar QToolButton:disabled {{ background:{theme.PANEL}; border-color:{theme.RAISED}; }}
         """)
         tabs.addTab(self._build_telemetry_tab(), "Telemetry")
         tabs.addTab(self._build_events_tab(),    "Flight Events")
@@ -485,9 +487,9 @@ class MissionVisualizerWorkspace(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("background:#0d1117;")
+        scroll.setStyleSheet(f"background:{theme.BG};")
         inner = QWidget()
-        inner.setStyleSheet("background:#0d1117;")
+        inner.setStyleSheet(f"background:{theme.BG};")
         lay = QVBoxLayout(inner)
         lay.setContentsMargins(8, 8, 8, 8)
         lay.setSpacing(6)
@@ -524,7 +526,7 @@ class MissionVisualizerWorkspace(QWidget):
         # ── Recovery section ──
         hdr = QLabel("RECOVERY")
         hdr.setStyleSheet(
-            "color:#56d364;font-size:9px;font-weight:700;letter-spacing:2px;"
+            f"color:{theme.OK};font-size:9px;font-weight:700;letter-spacing:2px;"
             "padding:6px 2px 2px 2px;"
         )
         lay.addWidget(hdr)
@@ -544,36 +546,36 @@ class MissionVisualizerWorkspace(QWidget):
 
     def _build_events_tab(self):
         w = QWidget()
-        w.setStyleSheet("background:#0d1117;")
+        w.setStyleSheet(f"background:{theme.BG};")
         lay = QVBoxLayout(w)
         lay.setContentsMargins(6, 6, 6, 6)
         self._events_list = QListWidget()
-        self._events_list.setStyleSheet("""
-            QListWidget { background:#0d1117; border:none; color:#e6edf3; font-size:11px; }
-            QListWidget::item { padding:5px 6px; border-bottom:1px solid #161b22; }
-            QListWidget::item:selected { background:#161b22; color:#58a6ff; }
+        self._events_list.setStyleSheet(f"""
+            QListWidget {{ background:{theme.BG}; border:none; color:{theme.TEXT_BRIGHT}; font-size:11px; }}
+            QListWidget::item {{ padding:5px 6px; border-bottom:1px solid {theme.PANEL}; }}
+            QListWidget::item:selected {{ background:{theme.PANEL}; color:{theme.ACCENT}; }}
         """)
         self._events_list.itemClicked.connect(self._on_event_clicked)
         lay.addWidget(self._events_list)
 
         hint = QLabel("Click an event to jump replay")
-        hint.setStyleSheet("color:#484f58;font-size:9px;padding:4px 2px;")
+        hint.setStyleSheet(f"color:{theme.LINE_STRONG};font-size:9px;padding:4px 2px;")
         lay.addWidget(hint)
         return w
 
     def _build_timeline_tab(self):
         w = QWidget()
-        w.setStyleSheet("background:#0d1117;")
+        w.setStyleSheet(f"background:{theme.BG};")
         lay = QVBoxLayout(w)
         lay.setContentsMargins(6, 6, 6, 6)
         self._timeline_list = QListWidget()
-        self._timeline_list.setStyleSheet("""
-            QListWidget {
-                background:#0d1117; border:none; color:#e6edf3;
+        self._timeline_list.setStyleSheet(f"""
+            QListWidget {{
+                background:{theme.BG}; border:none; color:{theme.TEXT_BRIGHT};
                 font-family:'Cascadia Code',monospace; font-size:10px;
-            }
-            QListWidget::item { padding:4px 6px; border-bottom:1px solid #161b22; }
-            QListWidget::item:selected { background:#161b22; color:#58a6ff; }
+            }}
+            QListWidget::item {{ padding:4px 6px; border-bottom:1px solid {theme.PANEL}; }}
+            QListWidget::item:selected {{ background:{theme.PANEL}; color:{theme.ACCENT}; }}
         """)
         lay.addWidget(self._timeline_list)
         return w
@@ -581,7 +583,7 @@ class MissionVisualizerWorkspace(QWidget):
     def _build_controls_bar(self):
         bar = QWidget()
         bar.setFixedHeight(50)
-        bar.setStyleSheet("background:#161b22;border-top:1px solid #21262d;")
+        bar.setStyleSheet(f"background:{theme.PANEL};border-top:1px solid {theme.RAISED};")
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(12, 6, 12, 6)
         lay.setSpacing(8)
@@ -598,7 +600,7 @@ class MissionVisualizerWorkspace(QWidget):
 
         sep0 = QFrame()
         sep0.setFrameShape(QFrame.Shape.VLine)
-        sep0.setStyleSheet("color:#30363d;")
+        sep0.setStyleSheet(f"color:{theme.LINE};")
         lay.addWidget(sep0)
 
         # Overlay toggles
@@ -652,7 +654,7 @@ class MissionVisualizerWorkspace(QWidget):
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setStyleSheet("color:#30363d;")
+        sep.setStyleSheet(f"color:{theme.LINE};")
         lay.addWidget(sep)
 
         # Replay controls (shown only in replay mode)
@@ -663,9 +665,9 @@ class MissionVisualizerWorkspace(QWidget):
         pb_lay.addWidget(self._styled_label("Replay:"))
 
         btn_style = (
-            "QPushButton { background:#21262d; color:#e6edf3; border:1px solid #30363d;"
+            f"QPushButton {{ background:{theme.RAISED}; color:{theme.TEXT_BRIGHT}; border:1px solid {theme.LINE};"
             "border-radius:4px; padding:2px 10px; font-size:12px; font-weight:600; }"
-            "QPushButton:hover { background:#30363d; }"
+            f"QPushButton:hover {{ background:{theme.LINE}; }}"
         )
         self._btn_restart = QPushButton("Restart")
         self._btn_play    = QPushButton("Play")
@@ -678,13 +680,13 @@ class MissionVisualizerWorkspace(QWidget):
         self._replay_slider.setRange(0, 1000)
         self._replay_slider.setFixedWidth(180)
         self._replay_slider.setStyleSheet(
-            "QSlider::groove:horizontal{background:#21262d;height:4px;border-radius:2px;}"
-            "QSlider::handle:horizontal{background:#58a6ff;width:12px;height:12px;"
+            f"QSlider::groove:horizontal{{background:{theme.RAISED};height:4px;border-radius:2px;}}"
+            f"QSlider::handle:horizontal{{background:{theme.ACCENT};width:12px;height:12px;"
             "border-radius:6px;margin:-4px 0;}"
         )
         self._replay_time_lbl = QLabel("T+0.00s")
         self._replay_time_lbl.setStyleSheet(
-            "color:#8b949e;font-family:'Cascadia Code',monospace;font-size:10px;"
+            f"color:{theme.TEXT_DIM};font-family:'Cascadia Code',monospace;font-size:10px;"
         )
 
         self._btn_restart.clicked.connect(self._on_replay_restart)
@@ -704,9 +706,9 @@ class MissionVisualizerWorkspace(QWidget):
 
         reset_btn = QPushButton("Reset Camera")
         reset_btn.setStyleSheet(
-            "QPushButton{background:#21262d;color:#8b949e;border:1px solid #30363d;"
+            f"QPushButton{{background:{theme.RAISED};color:{theme.TEXT_DIM};border:1px solid {theme.LINE};"
             "border-radius:4px;padding:4px 10px;font-size:11px;}"
-            "QPushButton:hover{background:#30363d;color:#e6edf3;}"
+            f"QPushButton:hover{{background:{theme.LINE};color:{theme.TEXT_BRIGHT};}}"
         )
         reset_btn.clicked.connect(self._reset_camera)
         lay.addWidget(reset_btn)
@@ -714,18 +716,18 @@ class MissionVisualizerWorkspace(QWidget):
 
     def _styled_label(self, text):
         lbl = QLabel(text)
-        lbl.setStyleSheet("color:#8b949e;font-size:11px;")
+        lbl.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:11px;")
         return lbl
 
     def _styled_combo(self, items):
         cb = QComboBox()
         cb.addItems(items)
         cb.setStyleSheet(
-            "QComboBox{background:#0d1117;color:#e6edf3;border:1px solid #30363d;"
+            f"QComboBox{{background:{theme.BG};color:{theme.TEXT_BRIGHT};border:1px solid {theme.LINE};"
             "border-radius:4px;padding:3px 8px;font-size:11px;min-width:100px;}"
             "QComboBox::drop-down{border:none;}"
-            "QComboBox QAbstractItemView{background:#161b22;color:#e6edf3;"
-            "selection-background-color:#21262d;}"
+            f"QComboBox QAbstractItemView{{background:{theme.PANEL};color:{theme.TEXT_BRIGHT};"
+            f"selection-background-color:{theme.RAISED};}}"
         )
         return cb
 
@@ -733,10 +735,10 @@ class MissionVisualizerWorkspace(QWidget):
         cb = QCheckBox(text)
         cb.setChecked(checked)
         cb.setStyleSheet(
-            "QCheckBox{color:#8b949e;font-size:11px;spacing:4px;}"
-            "QCheckBox::indicator{width:12px;height:12px;border:1px solid #30363d;"
-            "border-radius:3px;background:#0d1117;}"
-            "QCheckBox::indicator:checked{background:#58a6ff;border-color:#58a6ff;}"
+            f"QCheckBox{{color:{theme.TEXT_DIM};font-size:11px;spacing:4px;}}"
+            f"QCheckBox::indicator{{width:12px;height:12px;border:1px solid {theme.LINE};"
+            f"border-radius:3px;background:{theme.BG};}}"
+            f"QCheckBox::indicator:checked{{background:{theme.ACCENT};border-color:{theme.ACCENT};}}"
         )
         return cb
 
@@ -750,7 +752,7 @@ class MissionVisualizerWorkspace(QWidget):
             sp.setSuffix(suffix)
         sp.setFixedWidth(86)
         sp.setStyleSheet(
-            "QDoubleSpinBox{background:#0d1117;color:#e6edf3;border:1px solid #30363d;"
+            f"QDoubleSpinBox{{background:{theme.BG};color:{theme.TEXT_BRIGHT};border:1px solid {theme.LINE};"
             "border-radius:4px;padding:2px 4px;font-size:11px;}"
         )
         return sp
@@ -777,12 +779,12 @@ class MissionVisualizerWorkspace(QWidget):
         rail = pv.Cylinder(
             center=(0, 0, 30), direction=(0, 0, 1), radius=0.6, height=60.0
         )
-        p.add_mesh(rail, color="#484f58", name="rail", smooth_shading=True)
+        p.add_mesh(rail, color=theme.LINE_STRONG, name="rail", smooth_shading=True)
 
         # Launch pad
         pad = pv.Disc(center=(0, 0, 0.5), normal=(0, 0, 1),
                       inner=0.0, outer=12.0, r_res=2, c_res=24)
-        p.add_mesh(pad, color="#21262d", name="pad")
+        p.add_mesh(pad, color=theme.RAISED, name="pad")
 
         # Initial camera: framing the pad, ready for liftoff
         p.camera.position    = (300, -350, 180)
@@ -810,7 +812,7 @@ class MissionVisualizerWorkspace(QWidget):
         # In-view HUD (alpha / Mach / q) — one text actor, updated at 10 Hz
         try:
             self._hud_actor = p.add_text(
-                "", position="upper_left", font_size=9, color="#7ee787",
+                "", position="upper_left", font_size=9, color=theme.OK,
                 name="hud", font="courier")
             self._hud_actor.SetVisibility(self._show_hud)
         except Exception:
@@ -881,7 +883,7 @@ class MissionVisualizerWorkspace(QWidget):
         rocket = body.merge(nose)
         try:
             self._actor_rocket = self._plotter.add_mesh(
-                rocket, color="#58a6ff", name="rocket",
+                rocket, color=theme.ACCENT, name="rocket",
                 smooth_shading=True, ambient=0.35, diffuse=0.65
             )
             self._rocket_dims_key = key
@@ -929,10 +931,15 @@ class MissionVisualizerWorkspace(QWidget):
         mach_arr = np.asarray(mach_arr, dtype=float)
         alt_arr  = np.asarray(alt_arr, dtype=float)
         vel_arr  = np.asarray(vel_arr, dtype=float)
+        phase_np = None
         if phase_arr is not None and len(phase_arr) == len(pts):
-            phase_np = np.asarray(phase_arr, dtype=float)
-        else:
-            phase_np = None
+            try:
+                phase_np = np.asarray(phase_arr, dtype=float)
+            except (TypeError, ValueError):
+                # Phase names instead of indices - map them, don't crash.
+                phase_np = np.asarray(
+                    [_PHASE_INDEX.get(p, 0) if isinstance(p, str) else p
+                     for p in phase_arr], dtype=float)
         n = len(pts_arr)
 
         # Decimate to the quality-mode point cap for rendering
@@ -998,7 +1005,7 @@ class MissionVisualizerWorkspace(QWidget):
                          inner=20.0, outer=120.0, r_res=2, c_res=32)
         try:
             self._actor_landing = self._plotter.add_mesh(
-                marker, color="#3fb950", opacity=0.7, name="landing"
+                marker, color=theme.OK, opacity=0.7, name="landing"
             )
         except Exception:
             pass
@@ -1015,7 +1022,7 @@ class MissionVisualizerWorkspace(QWidget):
                            center=(x, y, z))
         try:
             self._actor_failure = self._plotter.add_mesh(
-                sphere, color="#f85149", opacity=0.30, name="failure"
+                sphere, color=theme.ERR, opacity=0.30, name="failure"
             )
         except Exception:
             pass
@@ -1103,6 +1110,11 @@ class MissionVisualizerWorkspace(QWidget):
         ease the camera, render only when something changed. Skipped if hidden
         so a backgrounded tab costs nothing."""
         if self._closing or not self._plotter or not self.isVisible():
+            if self._replay_is_playing and getattr(self, "_replay_diag", 3) < 3:
+                self._replay_diag = getattr(self, "_replay_diag", 0) + 1
+                logger.warning(
+                    "Replay frame dropped - closing=%s plotter=%s visible=%s",
+                    self._closing, self._plotter is not None, self.isVisible())
             return
 
         t0 = perf_counter()
@@ -1310,21 +1322,21 @@ class MissionVisualizerWorkspace(QWidget):
         self._rd_dynq.set_value(s.dynamic_pressure,  "{:.0f}")
 
         stab = s.stability_margin
-        sc = "#3fb950" if stab >= 1.5 else ("#ffa657" if stab >= 0.5 else "#f85149")
+        sc = theme.OK if stab >= 1.5 else ("#ffa657" if stab >= 0.5 else theme.ERR)
         self._rd_stab.set_value(stab, "{:.2f}", sc)
 
-        pc = _PHASE_COLORS.get(s.sim_phase, "#8b949e")
+        pc = _PHASE_COLORS.get(s.sim_phase, theme.TEXT_DIM)
         self._rd_phase.set_value(s.sim_phase, color=pc)
         if s.sim_phase != getattr(self, "_phase_lbl_text", None):
             self._phase_lbl.setText(s.sim_phase)
             self._phase_lbl.setStyleSheet(
                 f"color:{pc};font-size:11px;font-weight:600;"
-                "padding:2px 10px;border:1px solid #21262d;border-radius:4px;margin-left:8px;"
+                f"padding:2px 10px;border:1px solid {theme.RAISED};border-radius:4px;margin-left:8px;"
             )
             self._phase_lbl_text = s.sim_phase
 
         if s.parachute_deployed:
-            self._rd_recovery.set_value("DEPLOYED", color="#7ee787")
+            self._rd_recovery.set_value("DEPLOYED", color=theme.OK)
         else:
             self._rd_recovery.set_value(str(s.flight_computer_state))
 
@@ -1367,8 +1379,8 @@ class MissionVisualizerWorkspace(QWidget):
 
         if fail and not self._failure_active:
             self._failure_active = True
-            self._add_timeline_entry(s.sim_time, f"FAILURE: {reason}", "#f85149", events=True)
-            self._update_status("FAILURE", "#f85149")
+            self._add_timeline_entry(s.sim_time, f"FAILURE: {reason}", theme.ERR, events=True)
+            self._update_status("FAILURE", theme.ERR)
             self._show_failure_sphere(s.x_position, s.y_position, s.altitude)
         elif not fail and self._failure_active:
             self._failure_active = False
@@ -1447,14 +1459,14 @@ class MissionVisualizerWorkspace(QWidget):
             )
             self._envelope.set_visible(self._show_envelope)
 
-        self._update_status("LIVE", "#7ee787")
-        self._add_timeline_entry(0.0, "Simulation started", "#58a6ff")
+        self._update_status("LIVE", theme.OK)
+        self._add_timeline_entry(0.0, "Simulation started", theme.ACCENT)
 
     @pyqtSlot()
     def _on_sim_finished(self):
         t = self._latest_state.sim_time if self._latest_state else 0.0
-        self._update_status("COMPLETE - REPLAY", "#58a6ff")
-        self._add_timeline_entry(t, "Simulation complete", "#3fb950")
+        self._update_status("COMPLETE - REPLAY", theme.ACCENT)
+        self._add_timeline_entry(t, "Simulation complete", theme.OK)
 
         # Final full-trail render
         if self._plotter and len(self._trail_pts) >= 2:
@@ -1481,7 +1493,14 @@ class MissionVisualizerWorkspace(QWidget):
         except Exception:
             pass
 
-        self._enter_replay_mode()
+        try:
+            self._enter_replay_mode()
+        except Exception:
+            # A trail/overlay problem must not cost the user their replay
+            # controls - log it and still offer playback.
+            logger.exception("Replay setup failed; enabling controls anyway")
+            self._replay_mode = True
+            self._pb_group.setVisible(True)
 
     def _on_flight_event(self, data):
         event_name = data.get("event", "")
@@ -1533,7 +1552,7 @@ class MissionVisualizerWorkspace(QWidget):
             text += f"  @ {alt:.0f} m"
         self._add_timeline_entry(t, text, color, events=True)
 
-    def _add_timeline_entry(self, t, text, color="#8b949e", events=False):
+    def _add_timeline_entry(self, t, text, color=theme.TEXT_DIM, events=False):
         targets = [self._timeline_list]
         if events:
             targets.append(self._events_list)
@@ -1812,7 +1831,7 @@ class MissionVisualizerWorkspace(QWidget):
              "Drogue Deploying": "Drogue Descent",
              "Main Descending": "Main Descent",
              "Main Deploying": "Main Descent",
-             "Landed": "Landed"}.get(st, ""), "#8b949e",
+             "Landed": "Landed"}.get(st, ""), theme.TEXT_DIM,
         )
         self._rd_rec_state.set_value(st, color=col)
         self._rd_rec_area.set_value(tel["canopy_area"], "{:.2f}")
@@ -1916,7 +1935,9 @@ class MissionVisualizerWorkspace(QWidget):
         self._replay_slider.setValue(n - 1)
         self._replay_mode = True
         self._pb_group.setVisible(True)
-        self._update_status("REPLAY", "#d29922")
+        logger.info("Replay ready: %d frames, %.1f s of flight",
+                    n, (self._replay_times[-1] if self._replay_times else 0.0))
+        self._update_status("REPLAY", theme.WARN)
         # Place the rocket at touchdown, then frame the whole scene so the user
         # can immediately see the full trajectory + envelope + altitude scale.
         self._needs_3d_update = False
@@ -1989,18 +2010,37 @@ class MissionVisualizerWorkspace(QWidget):
         if self._replay_index >= n - 1:
             self._replay_is_playing = False
             self._replay_timer.stop()
+            logger.info("Replay reached the end of the flight (%d frames)", n)
             return
         self._replay_index = min(self._replay_index + 5, n - 1)
         self._needs_3d_update = True
+        diag = getattr(self, "_replay_diag", None)
+        if diag is not None and diag < 3:
+            self._replay_diag = diag + 1
+            logger.info("Replay tick %d: frame %d/%d, visible=%s",
+                        diag + 1, self._replay_index, n - 1, self.isVisible())
 
     def _on_replay_play(self):
         if not self._replay_mode:
+            logger.warning("Play ignored - not in replay mode (no flight loaded yet)")
+            return
+        if not self._replay_pts:
+            logger.warning("Play ignored - no replay frames captured")
             return
         if self._replay_index >= len(self._replay_pts) - 1:
             self._replay_index = 0
         self._replay_is_playing = True
         self._cam_snap = True   # re-grab the rocket when playback resumes
         self._replay_timer.start()
+        self._replay_diag = 0          # arms the first few playback log lines
+        logger.info(
+            "Replay play: frame %d/%d, tick=%dms, visible=%s, plotter=%s, "
+            "render_timer=%s (%dms)",
+            self._replay_index, len(self._replay_pts) - 1,
+            self._replay_timer.interval(), self.isVisible(),
+            self._plotter is not None, self._render_timer.isActive(),
+            self._render_timer.interval(),
+        )
 
     def _on_replay_pause(self):
         self._replay_is_playing = False

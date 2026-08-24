@@ -44,6 +44,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from ui.icons import icon
 
+from ui import theme
+
 logger = logging.getLogger("K2.StressViewer")
 
 STRESS_MODES = [
@@ -75,12 +77,12 @@ _REGION_LABEL = {
 }
 
 _CTRL_BTN = (
-    "QPushButton{background:#21262d;color:#c9d1d9;padding:5px 12px;"
-    "border-radius:6px;font-weight:600;border:1px solid #30363d;}"
-    "QPushButton:hover{background:#30363d;border-color:#8b949e;}"
+    f"QPushButton{{background:{theme.RAISED};color:{theme.TEXT};padding:5px 12px;"
+    f"border-radius:6px;font-weight:600;border:1px solid {theme.LINE};}}"
+    f"QPushButton:hover{{background:{theme.LINE};border-color:{theme.TEXT_DIM};}}"
 )
 _COMBO = (
-    "QComboBox{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;"
+    f"QComboBox{{background:{theme.BG};color:{theme.TEXT};border:1px solid {theme.LINE};"
     "border-radius:6px;padding:4px 8px;}"
 )
 
@@ -282,7 +284,7 @@ class StressViewer(QWidget):
         root.setSpacing(0)
 
         bar = QFrame()
-        bar.setStyleSheet("background:#161b22;border-bottom:1px solid #21262d;")
+        bar.setStyleSheet(f"background:{theme.PANEL};border-bottom:1px solid {theme.RAISED};")
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(10, 6, 10, 6)
         bl.setSpacing(8)
@@ -298,7 +300,7 @@ class StressViewer(QWidget):
         bl.addWidget(self.comp_combo)
         bl.addStretch()
         _basis = QLabel("⚠ Analytical estimate — smooth field, not nodal FEA")
-        _basis.setStyleSheet("color:#d29922;font-size:10px;font-weight:600;")
+        _basis.setStyleSheet(f"color:{theme.WARN};font-size:10px;font-weight:600;")
         _basis.setToolTip(
             "This contour is a smooth analytical reconstruction from the closed-form "
             "stress solution (axial / bending / hoop / shear distributed by beam-shape "
@@ -316,14 +318,14 @@ class StressViewer(QWidget):
 
         if not _PYVISTA:
             lbl = QLabel(f"3D viewer unavailable: {_PV_ERR}")
-            lbl.setStyleSheet("color:#f85149;padding:20px;")
+            lbl.setStyleSheet(f"color:{theme.ERR};padding:20px;")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             root.addWidget(lbl, 1)
             self.plotter = None
             return
 
         self.plotter = QtInteractor(self)
-        self.plotter.set_background("#0d1117", top="#161b22")
+        self.plotter.set_background(theme.BG, top=theme.PANEL)
         # Orientation axes are added only once a result is rendered (see
         # _render). Showing them in the empty state put a stray gizmo + X/Y/Z
         # labels in the middle of the "no results" message.
@@ -331,13 +333,13 @@ class StressViewer(QWidget):
 
         self._empty = QLabel("Please run a simulation to view results.")
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty.setStyleSheet("color:#6e7681;font-size:14px;background:transparent;")
+        self._empty.setStyleSheet(f"color:{theme.TEXT_FAINT};font-size:14px;background:transparent;")
         self._empty.setParent(self.plotter.interactor)
         self._empty.show()
 
     def _tag(self, txt):
         l = QLabel(txt)
-        l.setStyleSheet("color:#8b949e;font-size:11px;font-weight:600;")
+        l.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:11px;font-weight:600;")
         return l
 
     def _side_view(self):
@@ -472,7 +474,7 @@ class StressViewer(QWidget):
                 peak_val = float(f[idx]); peak_pt = mesh.points[idx]; peak_region = region
 
         sbar = dict(title=title, title_font_size=12, label_font_size=10,
-                    color="#c9d1d9", position_x=0.86, position_y=0.12,
+                    color=theme.TEXT, position_x=0.86, position_y=0.12,
                     width=0.06, height=0.7, fmt="%.1f", n_labels=6)
         first = next(iter(region_fields))
         for region, f in region_fields.items():
@@ -481,7 +483,7 @@ class StressViewer(QWidget):
             is_first = (region == first)
             self.plotter.add_mesh(
                 mesh, scalars="stress", cmap=cmap, clim=clim,
-                show_edges=(region == "fins"), edge_color="#1a1e24",
+                show_edges=(region == "fins"), edge_color=theme.PANEL,
                 line_width=0.4, smooth_shading=True, specular=0.3,
                 show_scalar_bar=is_first,
                 scalar_bar_args=sbar if is_first else None)
@@ -495,7 +497,7 @@ class StressViewer(QWidget):
                 txt = f"Peak: {peak_val:.1f} MPa\n{_REGION_LABEL.get(peak_region, peak_region)}"
             self.plotter.add_point_labels(
                 [peak_pt], [txt], font_size=12, text_color="#ffffff",
-                point_color="#ff3b30", point_size=8, shape_color="#161b22",
+                point_color="#ff3b30", point_size=8, shape_color=theme.PANEL,
                 shape_opacity=0.7, always_visible=True, name="max_label")
 
         try:

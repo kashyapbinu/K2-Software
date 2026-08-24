@@ -25,6 +25,8 @@ from PyQt6.QtCore import QObject, QTimer, QUrl, QElapsedTimer, pyqtSignal, pyqtS
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
 from PyQt6.QtWebChannel import QWebChannel
 
+from ui import theme
+
 logger = logging.getLogger("K2.CinematicWS")
 
 _WEB_DIR = Path(__file__).resolve().parents[2] / "visualization" / "cinematic"
@@ -70,7 +72,7 @@ class CinematicWorkspace(QWidget):
                 "Cinematic view requires PyQt6-WebEngine.\n"
                 "pip install PyQt6-WebEngine (version-matched to PyQt6)."
             )
-            msg.setStyleSheet("color:#8b949e; font-size:14px; padding:40px;")
+            msg.setStyleSheet(f"color:{theme.TEXT_DIM}; font-size:14px; padding:40px;")
             lay.addWidget(msg)
             self._view = None
             self._bridge = None

@@ -13,6 +13,8 @@ from core.components import (MATERIALS, NOSE_SHAPES, NOZZLE_TYPES, NoseCone, Bod
     Transition, TrapezoidalFinSet, InnerTube, CenteringRing, Bulkhead,
     EngineBlock, Parachute, ShockCord, MassComponent, LaunchLug, RailButton, Stage, Nozzle)
 
+from ui import theme
+
 logger = logging.getLogger("K2.CompEditor")
 
 
@@ -39,8 +41,7 @@ class ComponentEditor(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.header = QLabel("COMPONENT PROPERTIES")
-        self.header.setStyleSheet("color: #58a6ff; font-weight: 700; font-size: 11px; "
-            "letter-spacing: 1px; padding: 4px 8px;")
+        self.header.setProperty("panelTitle", True)
         layout.addWidget(self.header)
 
         self.scroll = QScrollArea()
@@ -55,7 +56,7 @@ class ComponentEditor(QWidget):
         self._component = component
         if component is None:
             empty_lbl = QLabel("Select a component to edit its properties")
-            empty_lbl.setStyleSheet("color: #484f58; padding: 20px;")
+            empty_lbl.setStyleSheet(f"color: {theme.LINE_STRONG}; padding: 20px;")
             empty_lbl.setWordWrap(True)
             empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.scroll.setWidget(empty_lbl)
@@ -92,10 +93,10 @@ class ComponentEditor(QWidget):
         preset_key = self._get_preset_key(comp)
         if preset_key and preset_key in self._presets:
             preset_btn = QPushButton(icon("settings"), "Apply Preset...")
-            preset_btn.setStyleSheet("""
-                QPushButton { background: #161b22; border: 1px solid #30363d;
-                    border-radius: 6px; padding: 8px; color: #58a6ff; font-weight: 600; }
-                QPushButton:hover { border-color: #58a6ff; background: #21262d; }
+            preset_btn.setStyleSheet(f"""
+                QPushButton {{ background: {theme.PANEL}; border: 1px solid {theme.LINE};
+                    border-radius: 6px; padding: 8px; color: {theme.ACCENT}; font-weight: 600; }}
+                QPushButton:hover {{ border-color: {theme.ACCENT}; background: {theme.RAISED}; }}
             """)
             preset_btn.clicked.connect(lambda: self._show_presets(comp, preset_key))
             layout.addWidget(preset_btn)
@@ -111,7 +112,7 @@ class ComponentEditor(QWidget):
         g3 = QGroupBox("Mass")
         f3 = QFormLayout(); f3.setSpacing(6)
         mass_lbl = QLabel(f"{comp.computed_mass()*1000:.2f} g")
-        mass_lbl.setStyleSheet("color: #e6edf3; font-family: 'Cascadia Code', monospace; font-weight: 600;")
+        mass_lbl.setStyleSheet(f"color: {theme.TEXT_BRIGHT}; font-family: 'Cascadia Code', monospace; font-weight: 600;")
         f3.addRow("Computed:", mass_lbl)
         self._mass_label = mass_lbl
 
@@ -210,7 +211,7 @@ class ComponentEditor(QWidget):
             self._dim(form, "Wall:", comp, "wall_thickness", " m", 4, 0.0005, 0.05, 0.0005)
             # Show expansion ratio (read-only)
             er_label = QLabel(f"{comp.expansion_ratio:.2f}")
-            er_label.setStyleSheet("color: #e6edf3; font-family: 'Cascadia Code', monospace; font-weight: 600;")
+            er_label.setStyleSheet(f"color: {theme.TEXT_BRIGHT}; font-family: 'Cascadia Code', monospace; font-weight: 600;")
             form.addRow("Expansion Ratio:", er_label)
             if comp.nozzle_type == "Full Propulsion":
                 self._dim(form, "Chamber P:", comp, "design_chamber_pressure", " Pa", 0, 1e5, 5e7, 1e5)

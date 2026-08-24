@@ -1,3 +1,4 @@
+from ui import theme
 """
 K2 AeroSim — Cp Distribution Plot Widget
 =============================================
@@ -19,7 +20,7 @@ class CpPlotWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.figure = Figure(figsize=(5, 3), dpi=100)
-        self.figure.patch.set_facecolor("#0d1117")
+        self.figure.patch.set_facecolor(theme.BG)
         self.canvas = FigureCanvas(self.figure)
         # Let wheel events bubble to an enclosing QScrollArea instead of being
         # swallowed by the canvas — keeps scroll panels smooth over the plot.
@@ -40,17 +41,17 @@ class CpPlotWidget(QWidget):
 
     def _style_axis(self):
         ax = self.ax
-        ax.set_facecolor("#161b22")
-        ax.set_title("Cp Distribution", color="#58a6ff", fontsize=11,
+        ax.set_facecolor(theme.PANEL)
+        ax.set_title("Cp Distribution", color=theme.TEXT, fontsize=11,
                       fontweight="bold", pad=8)
-        ax.set_xlabel("x / L", color="#8b949e", fontsize=10)
-        ax.set_ylabel("Cp", color="#8b949e", fontsize=10)
-        ax.tick_params(colors="#484f58", labelsize=9)
-        ax.spines["bottom"].set_color("#30363d")
-        ax.spines["left"].set_color("#30363d")
+        ax.set_xlabel("x / L", color=theme.TEXT_DIM, fontsize=10)
+        ax.set_ylabel("Cp", color=theme.TEXT_DIM, fontsize=10)
+        ax.tick_params(colors=theme.LINE_STRONG, labelsize=9)
+        ax.spines["bottom"].set_color(theme.LINE)
+        ax.spines["left"].set_color(theme.LINE)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        ax.grid(True, alpha=0.15, color="#30363d")
+        ax.grid(True, alpha=0.15, color=theme.LINE)
         # Aerospace convention: invert Y-axis (suction = negative Cp = top)
         ax.invert_yaxis()
 
@@ -78,31 +79,31 @@ class CpPlotWidget(QWidget):
         self._y_data = np.asarray(cp_values)
 
         # Section shading
-        self.ax.axvspan(0, nose_end, alpha=0.06, color="#58a6ff",
+        self.ax.axvspan(0, nose_end, alpha=0.06, color=theme.ACCENT,
                         label="Nose")
-        self.ax.axvspan(nose_end, fin_start, alpha=0.04, color="#7ee787",
+        self.ax.axvspan(nose_end, fin_start, alpha=0.04, color=theme.OK,
                         label="Body")
-        self.ax.axvspan(fin_start, 1.0, alpha=0.06, color="#f0883e",
+        self.ax.axvspan(fin_start, 1.0, alpha=0.06, color=theme.ACCENT,
                         label="Fins/Aft")
 
         # Cp = 0 reference line
-        self.ax.axhline(y=0, color="#484f58", linestyle="--", linewidth=0.8,
+        self.ax.axhline(y=0, color=theme.LINE_STRONG, linestyle="--", linewidth=0.8,
                         alpha=0.6)
 
         # Main Cp curve
-        self.ax.plot(self._x_data, self._y_data, color="#58a6ff",
+        self.ax.plot(self._x_data, self._y_data, color=theme.ACCENT,
                      linewidth=1.8, zorder=5)
         self.ax.fill_between(self._x_data, self._y_data, 0, alpha=0.08,
-                             color="#58a6ff")
+                             color=theme.ACCENT)
 
         # Stagnation point marker
         if len(self._y_data) > 0:
             max_idx = np.argmax(self._y_data)
             self.ax.plot(self._x_data[max_idx], self._y_data[max_idx],
-                        "o", color="#f85149", markersize=6, zorder=6)
+                        "o", color=theme.ERR, markersize=6, zorder=6)
 
-        self.ax.legend(facecolor="#161b22", edgecolor="#30363d",
-                       labelcolor="#8b949e", fontsize=8, loc="lower right")
+        self.ax.legend(facecolor=theme.PANEL, edgecolor=theme.LINE,
+                       labelcolor=theme.TEXT_DIM, fontsize=8, loc="lower right")
         self.ax.set_xlim(0, 1)
 
         self.figure.tight_layout()
@@ -135,9 +136,9 @@ class CpPlotWidget(QWidget):
             self._annotation = self.ax.annotate(
                 "", xy=(0, 0), xytext=(15, 15),
                 textcoords="offset points",
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="#21262d",
-                          edgecolor="#30363d", alpha=0.95),
-                color="#e6edf3", fontsize=9,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor=theme.RAISED,
+                          edgecolor=theme.LINE, alpha=0.95),
+                color=theme.TEXT_BRIGHT, fontsize=9,
                 fontfamily="monospace",
             )
 

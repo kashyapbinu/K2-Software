@@ -1,3 +1,4 @@
+from ui import theme
 """
 K2 AeroSim — Preset Picker Dialog
 Searchable/filterable table of component presets.
@@ -14,13 +15,13 @@ class PresetDialog(QDialog):
         self._selected = None
         self.setWindowTitle(f"Choose {component_type} Preset")
         self.setMinimumSize(700, 450)
-        self.setStyleSheet("""
-            QDialog { background: #0d1117; }
-            QTableWidget { background: #0d1117; border: 1px solid #21262d; gridline-color: #21262d; }
-            QTableWidget::item { padding: 4px 8px; }
-            QTableWidget::item:selected { background: #1f6feb; }
-            QHeaderView::section { background: #161b22; color: #58a6ff; border: 1px solid #21262d;
-                padding: 6px; font-weight: 600; font-size: 11px; }
+        self.setStyleSheet(f"""
+            QDialog {{ background: {theme.BG}; }}
+            QTableWidget {{ background: {theme.BG}; border: 1px solid {theme.RAISED}; gridline-color: {theme.RAISED}; }}
+            QTableWidget::item {{ padding: 4px 8px; }}
+            QTableWidget::item:selected {{ background: {theme.ACCENT_DEEP}; }}
+            QHeaderView::section {{ background: {theme.PANEL}; color: {theme.ACCENT}; border: 1px solid {theme.RAISED};
+                padding: 6px; font-weight: 600; font-size: 11px; }}
         """)
         self._setup_ui()
 

@@ -11,6 +11,8 @@ from PyQt6.QtCore import Qt
 from core.flight_phases import FlightPhase, PHASE_COLORS
 from ui.icons import icon
 
+from ui import theme
+
 logger = logging.getLogger("K2.SimWS")
 
 
@@ -18,9 +20,9 @@ class BigReadout(QLabel):
     def __init__(self, t="—", parent=None):
         super().__init__(t, parent)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setStyleSheet("color: #e6edf3; font-family: 'Cascadia Code', monospace; "
+        self.setStyleSheet(f"color: {theme.TEXT_BRIGHT}; font-family: 'Cascadia Code', monospace; "
             "font-size: 22px; font-weight: 700; padding: 8px; "
-            "background-color: #161b22; border: 1px solid #21262d; border-radius: 8px;")
+            f"background-color: {theme.PANEL}; border: 1px solid {theme.RAISED}; border-radius: 8px;")
 
 
 class PhaseLight(QLabel):
@@ -28,7 +30,7 @@ class PhaseLight(QLabel):
     def __init__(self, phase: FlightPhase, parent=None):
         super().__init__(phase.value, parent)
         self.phase = phase
-        self._color = PHASE_COLORS.get(phase, "#484f58")
+        self._color = PHASE_COLORS.get(phase, theme.LINE_STRONG)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.set_active(False)
 
@@ -36,14 +38,14 @@ class PhaseLight(QLabel):
         if active:
             self.setStyleSheet(
                 f"color: {self._color}; font-weight: 700; font-size: 11px; "
-                f"padding: 4px 8px; background-color: #0d1117; "
+                f"padding: 4px 8px; background-color: #0e0e10; "
                 f"border: 2px solid {self._color}; border-radius: 6px;"
             )
         else:
             self.setStyleSheet(
-                "color: #484f58; font-weight: 600; font-size: 11px; "
-                "padding: 4px 8px; background-color: #161b22; "
-                "border: 1px solid #21262d; border-radius: 6px;"
+                f"color: {theme.LINE_STRONG}; font-weight: 600; font-size: 11px; "
+                f"padding: 4px 8px; background-color: {theme.PANEL}; "
+                f"border: 1px solid {theme.RAISED}; border-radius: 6px;"
             )
 
 
@@ -70,7 +72,7 @@ class SimulationWorkspace(QWidget):
 
         # Title
         title = QLabel("MISSION CONTROL")
-        title.setStyleSheet("color: #58a6ff; font-size: 18px; font-weight: 700; letter-spacing: 2px;")
+        title.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
 
@@ -78,7 +80,7 @@ class SimulationWorkspace(QWidget):
         ctrl_group = QGroupBox("Simulation Controls")
         cl = QHBoxLayout(); cl.setSpacing(12)
 
-        self.btn_run = QPushButton(icon("run", color="#3fb950"), "RUN")
+        self.btn_run = QPushButton(icon("run", color=theme.OK), "RUN")
         self.btn_run.setProperty("primary", True)
         self.btn_run.setMinimumHeight(44)
         self.btn_run.clicked.connect(self._on_run)
@@ -90,7 +92,7 @@ class SimulationWorkspace(QWidget):
         self.btn_pause.clicked.connect(self._on_pause)
         cl.addWidget(self.btn_pause)
 
-        self.btn_stop = QPushButton(icon("stop", color="#f85149"), "STOP")
+        self.btn_stop = QPushButton(icon("stop", color=theme.ERR), "STOP")
         self.btn_stop.setProperty("danger", True)
         self.btn_stop.setMinimumHeight(44)
         self.btn_stop.setEnabled(False)
@@ -208,7 +210,7 @@ class SimulationWorkspace(QWidget):
         btn_add_layer = QPushButton(icon("add"), "Add Layer")
         btn_add_layer.clicked.connect(self._on_add_wind_layer)
         ml_btns.addWidget(btn_add_layer)
-        btn_del_layer = QPushButton(icon("delete", color="#f85149"), "Delete")
+        btn_del_layer = QPushButton(icon("delete", color=theme.ERR), "Delete")
         btn_del_layer.clicked.connect(self._on_delete_wind_layer)
         ml_btns.addWidget(btn_del_layer)
         ml.addLayout(ml_btns)
@@ -307,7 +309,7 @@ class SimulationWorkspace(QWidget):
         for i, (name, unit) in enumerate(readout_defs):
             row, col = divmod(i, 4)
             header = QLabel(f"{name}")
-            header.setStyleSheet("color: #58a6ff; font-weight: 600; font-size: 11px;")
+            header.setStyleSheet(f"color: {theme.TEXT_DIM}; font-weight: 600; font-size: 11px;")
             header.setAlignment(Qt.AlignmentFlag.AlignCenter)
             rg.addWidget(header, row * 2, col)
             val = BigReadout("—")
@@ -341,7 +343,7 @@ class SimulationWorkspace(QWidget):
         time_group = QGroupBox("Mission Timeline")
         tl = QVBoxLayout()
         self.time_label = QLabel("T+ 0.00 s")
-        self.time_label.setStyleSheet("color: #e6edf3; font-family: 'Cascadia Code', monospace; "
+        self.time_label.setStyleSheet(f"color: {theme.TEXT_BRIGHT}; font-family: 'Cascadia Code', monospace; "
             "font-size: 28px; font-weight: 700;")
         self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         tl.addWidget(self.time_label)
@@ -354,7 +356,7 @@ class SimulationWorkspace(QWidget):
         tl.addWidget(self.progress)
 
         self.phase_label = QLabel("Pre-Launch")
-        self.phase_label.setStyleSheet("color: #8b949e; font-size: 14px; font-weight: 600;")
+        self.phase_label.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 14px; font-weight: 600;")
         self.phase_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         tl.addWidget(self.phase_label)
 

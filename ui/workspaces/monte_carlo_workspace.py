@@ -32,45 +32,16 @@ from core.monte_carlo_engine import (
     MonteCarloConfig, MonteCarloEngine, MonteCarloResults,
 )
 
+from ui import theme
+
 logger = logging.getLogger("K2.MonteCarloWS")
 
 # ── Stylesheet constants ────────────────────────────────────────────────────
 
-_GRP = """
-QGroupBox { color:#8b949e; font-size:11px; font-weight:600;
-  border:1px solid #21262d; border-radius:6px; margin-top:10px; padding-top:6px; }
-QGroupBox::title { subcontrol-origin:margin; left:10px; padding:0 4px; }
-"""
-
-_BTN_P = """
-QPushButton { background:#1f6feb; color:#fff; font-weight:700; font-size:12px;
-  border:none; border-radius:6px; padding:9px 14px; }
-QPushButton:hover { background:#388bfd; }
-QPushButton:disabled { background:#21262d; color:#484f58; }
-"""
-
-_BTN_D = """
-QPushButton { background:#da3633; color:#fff; font-weight:700; font-size:12px;
-  border:none; border-radius:6px; padding:9px 14px; }
-QPushButton:hover { background:#f85149; }
-QPushButton:disabled { background:#21262d; color:#484f58; }
-"""
-
-_BTN_S = """
-QPushButton { background:#21262d; color:#c9d1d9; font-weight:600; font-size:11px;
-  border:1px solid #30363d; border-radius:6px; padding:7px 12px; }
-QPushButton:hover { background:#30363d; border-color:#58a6ff; }
-QPushButton:disabled { color:#484f58; }
-"""
-
-_VAL = ("color:#e6edf3; font-family:'Cascadia Code',monospace; font-size:13px;"
-        "font-weight:600; padding:2px 6px; background:#161b22; border-radius:4px;")
-
-
 def _vl(text: str = "—") -> QLabel:
     """Create a monospace value label."""
     lbl = QLabel(text)
-    lbl.setStyleSheet(_VAL)
+    lbl.setProperty("value", True)
     return lbl
 
 
@@ -78,23 +49,23 @@ def _vl(text: str = "—") -> QLabel:
 
 def _style_ax(ax, title: str = "", xlabel: str = "", ylabel: str = ""):
     """Apply K2 dark-theme styling to a matplotlib Axes."""
-    ax.set_facecolor("#161b22")
-    ax.set_title(title, color="#58a6ff", fontsize=12, fontweight="bold", pad=10)
-    ax.set_xlabel(xlabel, color="#8b949e", fontsize=10)
-    ax.set_ylabel(ylabel, color="#8b949e", fontsize=10)
-    ax.tick_params(colors="#484f58", labelsize=9)
+    ax.set_facecolor(theme.PANEL)
+    ax.set_title(title, color=theme.TEXT, fontsize=12, fontweight="bold", pad=10)
+    ax.set_xlabel(xlabel, color=theme.TEXT_DIM, fontsize=10)
+    ax.set_ylabel(ylabel, color=theme.TEXT_DIM, fontsize=10)
+    ax.tick_params(colors=theme.LINE_STRONG, labelsize=9)
     for spine in ("bottom", "left"):
-        ax.spines[spine].set_color("#30363d")
+        ax.spines[spine].set_color(theme.LINE)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
-    ax.grid(True, alpha=0.15, color="#30363d")
+    ax.grid(True, alpha=0.15, color=theme.LINE)
 
 
 def _dark_figure(rows: int = 1, cols: int = 1,
                  figsize: tuple = (8, 5)) -> tuple:
     """Return (Figure, axes) with dark background."""
     fig = Figure(figsize=figsize, dpi=100)
-    fig.patch.set_facecolor("#0d1117")
+    fig.patch.set_facecolor(theme.BG)
     if rows == 1 and cols == 1:
         ax = fig.add_subplot(111)
         _style_ax(ax)
@@ -149,16 +120,12 @@ class MonteCarloWorkspace(QWidget):
 
         # Title
         title = QLabel("MONTE CARLO ANALYSIS")
-        title.setStyleSheet(
-            "color:#58a6ff; font-size:16px; font-weight:700; "
-            "letter-spacing:2px; padding:2px 0 6px 0;"
-        )
+        title.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(title)
 
         # ── Simulation Count ──
         g1 = QGroupBox("Simulation Count")
-        g1.setStyleSheet(_GRP)
         f1 = QFormLayout()
         f1.setSpacing(8)
         self.spin_num = QSpinBox()
@@ -171,7 +138,6 @@ class MonteCarloWorkspace(QWidget):
 
         # ── Wind Uncertainty ──
         g2 = QGroupBox("Wind Uncertainty")
-        g2.setStyleSheet(_GRP)
         f2 = QFormLayout()
         f2.setSpacing(8)
         self.spin_wind_speed = QDoubleSpinBox()
@@ -191,7 +157,6 @@ class MonteCarloWorkspace(QWidget):
 
         # ── Vehicle Uncertainty ──
         g3 = QGroupBox("Vehicle Uncertainty")
-        g3.setStyleSheet(_GRP)
         f3 = QFormLayout()
         f3.setSpacing(8)
         self.spin_dry_mass = QDoubleSpinBox()
@@ -217,7 +182,6 @@ class MonteCarloWorkspace(QWidget):
 
         # ── Motor Uncertainty ──
         g4 = QGroupBox("Motor Uncertainty")
-        g4.setStyleSheet(_GRP)
         f4 = QFormLayout()
         f4.setSpacing(8)
         self.spin_impulse = QDoubleSpinBox()
@@ -231,7 +195,6 @@ class MonteCarloWorkspace(QWidget):
 
         # ── Launch Uncertainty ──
         g5 = QGroupBox("Launch Uncertainty")
-        g5.setStyleSheet(_GRP)
         f5 = QFormLayout()
         f5.setSpacing(8)
         self.spin_launch_angle = QDoubleSpinBox()
@@ -245,7 +208,6 @@ class MonteCarloWorkspace(QWidget):
 
         # ── Failure Criteria ──
         g6 = QGroupBox("Failure Criteria")
-        g6.setStyleSheet(_GRP)
         f6 = QFormLayout()
         f6.setSpacing(8)
         self.spin_min_stab = QDoubleSpinBox()
@@ -283,7 +245,6 @@ class MonteCarloWorkspace(QWidget):
 
         # ── Target ──
         g7 = QGroupBox("Target")
-        g7.setStyleSheet(_GRP)
         f7 = QFormLayout()
         f7.setSpacing(8)
         self.spin_target = QDoubleSpinBox()
@@ -297,18 +258,17 @@ class MonteCarloWorkspace(QWidget):
 
         # ── Actions ──
         g8 = QGroupBox("Actions")
-        g8.setStyleSheet(_GRP)
         al = QVBoxLayout()
         al.setSpacing(8)
 
         self.btn_run = QPushButton(icon("run", color="#fff"), "RUN ANALYSIS")
-        self.btn_run.setStyleSheet(_BTN_P)
+        self.btn_run.setProperty("primary", True)
         self.btn_run.setMinimumHeight(40)
         self.btn_run.clicked.connect(self._on_run)
         al.addWidget(self.btn_run)
 
         self.btn_cancel = QPushButton(icon("stop", color="#fff"), "CANCEL")
-        self.btn_cancel.setStyleSheet(_BTN_D)
+        self.btn_cancel.setProperty("danger", True)
         self.btn_cancel.setMinimumHeight(40)
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.clicked.connect(self._on_cancel)
@@ -320,24 +280,22 @@ class MonteCarloWorkspace(QWidget):
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFixedHeight(12)
         self.progress_bar.setStyleSheet(
-            "QProgressBar { background:#21262d; border-radius:6px; border:none; "
-            "color:#c9d1d9; font-size:9px; }"
-            "QProgressBar::chunk { background:#1f6feb; border-radius:6px; }"
+            f"QProgressBar {{ background:{theme.RAISED}; border-radius:6px; border:none; "
+            f"color:{theme.TEXT}; font-size:9px; }}"
+            f"QProgressBar::chunk {{ background:{theme.ACCENT_DEEP}; border-radius:6px; }}"
         )
         al.addWidget(self.progress_bar)
 
         self.progress_label = QLabel("Ready")
-        self.progress_label.setStyleSheet("color:#8b949e; font-size:11px;")
+        self.progress_label.setStyleSheet(f"color:{theme.TEXT_DIM}; font-size:11px;")
         al.addWidget(self.progress_label)
 
         self.btn_export = QPushButton(icon("export"), "EXPORT CSV")
-        self.btn_export.setStyleSheet(_BTN_S)
         self.btn_export.setEnabled(False)
         self.btn_export.clicked.connect(self._on_export)
         al.addWidget(self.btn_export)
 
         self.btn_export_pdf = QPushButton(icon("report"), "EXPORT PDF")
-        self.btn_export_pdf.setStyleSheet(_BTN_S)
         self.btn_export_pdf.setEnabled(False)
         self.btn_export_pdf.clicked.connect(self._on_export_pdf)
         al.addWidget(self.btn_export_pdf)
@@ -359,15 +317,15 @@ class MonteCarloWorkspace(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.setStyleSheet(
-            "QTabWidget::pane { border:1px solid #21262d; }"
-            "QTabBar::tab { background:#161b22; color:#8b949e; padding:6px 14px; "
-            "  border:1px solid #21262d; border-bottom:none; border-radius:4px 4px 0 0; }"
-            "QTabBar::tab:selected { background:#0d1117; color:#58a6ff; font-weight:700; }"
+            f"QTabWidget::pane {{ border:1px solid {theme.RAISED}; }}"
+            f"QTabBar::tab {{ background:{theme.PANEL}; color:{theme.TEXT_DIM}; padding:6px 14px; "
+            f"  border:1px solid {theme.RAISED}; border-bottom:none; border-radius:4px 4px 0 0; }}"
+            f"QTabBar::tab:selected {{ background:{theme.BG}; color:{theme.ACCENT}; font-weight:700; }}"
             "QTabBar::scroller { width:30px; }"
-            "QTabBar QToolButton { background:#21262d; border:1px solid #30363d; "
-            "  border-radius:4px; margin:2px 1px; width:22px; color:#c9d1d9; }"
-            "QTabBar QToolButton:hover { background:#1f6feb; border-color:#1f6feb; }"
-            "QTabBar QToolButton:disabled { background:#161b22; border-color:#21262d; }"
+            f"QTabBar QToolButton {{ background:{theme.RAISED}; border:1px solid {theme.LINE}; "
+            f"  border-radius:4px; margin:2px 1px; width:22px; color:{theme.TEXT}; }}"
+            f"QTabBar QToolButton:hover {{ background:{theme.ACCENT_DEEP}; border-color:{theme.ACCENT_DEEP}; }}"
+            f"QTabBar QToolButton:disabled {{ background:{theme.PANEL}; border-color:{theme.RAISED}; }}"
         )
 
         # Tab 1: Apogee Distribution
@@ -416,14 +374,11 @@ class MonteCarloWorkspace(QWidget):
         lay.setSpacing(12)
 
         t = QLabel("Statistics")
-        t.setStyleSheet(
-            "color:#58a6ff; font-size:15px; font-weight:700; padding:2px 0 6px 0;"
-        )
+        t.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
         lay.addWidget(t)
 
         # ── Apogee Statistics ──
         ga = QGroupBox("Apogee Statistics")
-        ga.setStyleSheet(_GRP)
         fa = QFormLayout()
         fa.setSpacing(6)
         self.lbl_ap_mean   = _vl(); fa.addRow("Mean:",    self.lbl_ap_mean)
@@ -440,7 +395,6 @@ class MonteCarloWorkspace(QWidget):
 
         # ── Performance Statistics ──
         gp = QGroupBox("Performance Statistics")
-        gp.setStyleSheet(_GRP)
         fp = QFormLayout()
         fp.setSpacing(6)
         self.lbl_vel_mean  = _vl(); fp.addRow("Max Velocity:", self.lbl_vel_mean)
@@ -452,7 +406,6 @@ class MonteCarloWorkspace(QWidget):
 
         # ── Landing Statistics ──
         gl = QGroupBox("Landing Statistics")
-        gl.setStyleSheet(_GRP)
         fl = QFormLayout()
         fl.setSpacing(6)
         self.lbl_ld_mean = _vl(); fl.addRow("Mean Dist:", self.lbl_ld_mean)
@@ -463,7 +416,6 @@ class MonteCarloWorkspace(QWidget):
 
         # ── Mission Assessment ──
         gm = QGroupBox("Mission Assessment")
-        gm.setStyleSheet(_GRP)
         fm = QFormLayout()
         fm.setSpacing(6)
         self.lbl_success  = _vl(); fm.addRow("Success Rate:", self.lbl_success)
@@ -476,31 +428,29 @@ class MonteCarloWorkspace(QWidget):
 
         # ── Failure Breakdown ──
         gf = QGroupBox("Failure Breakdown")
-        gf.setStyleSheet(_GRP)
         self._fail_layout = QVBoxLayout()
         self._fail_layout.setSpacing(4)
         self._fail_placeholder = QLabel("No data")
-        self._fail_placeholder.setStyleSheet("color:#484f58; font-size:11px;")
+        self._fail_placeholder.setStyleSheet(f"color:{theme.LINE_STRONG}; font-size:11px;")
         self._fail_layout.addWidget(self._fail_placeholder)
         gf.setLayout(self._fail_layout)
         lay.addWidget(gf)
 
         # ── Scenarios (clickable) ──
         gs = QGroupBox("Scenarios")
-        gs.setStyleSheet(_GRP)
         fs = QVBoxLayout()
         fs.setSpacing(6)
         self.btn_best = QPushButton("Best Case: —")
         self.btn_best.setStyleSheet(
-            "QPushButton{color:#7ee787;background:#161b22;border:1px solid #30363d;"
+            f"QPushButton{{color:{theme.OK};background:{theme.PANEL};border:1px solid {theme.LINE};"
             "border-radius:4px;padding:6px;font-size:12px;text-align:left;}"
-            "QPushButton:hover{background:#1c2333;border-color:#58a6ff;}"
+            f"QPushButton:hover{{background:#1c2333;border-color:{theme.ACCENT};}}"
         )
         self.btn_worst = QPushButton("Worst Case: —")
         self.btn_worst.setStyleSheet(
-            "QPushButton{color:#f85149;background:#161b22;border:1px solid #30363d;"
+            f"QPushButton{{color:{theme.ERR};background:{theme.PANEL};border:1px solid {theme.LINE};"
             "border-radius:4px;padding:6px;font-size:12px;text-align:left;}"
-            "QPushButton:hover{background:#1c2333;border-color:#58a6ff;}"
+            f"QPushButton:hover{{background:#1c2333;border-color:{theme.ACCENT};}}"
         )
         fs.addWidget(self.btn_best)
         fs.addWidget(self.btn_worst)
@@ -509,7 +459,6 @@ class MonteCarloWorkspace(QWidget):
 
         # ── Reliability Analysis ──
         gr = QGroupBox("Reliability Analysis")
-        gr.setStyleSheet(_GRP)
         fr = QFormLayout()
         fr.setSpacing(6)
         self.lbl_r_apogee   = _vl(); fr.addRow("P(Apogee>Target):", self.lbl_r_apogee)
@@ -696,8 +645,8 @@ class MonteCarloWorkspace(QWidget):
 
         # Histogram
         counts, bin_edges, patches = ax.hist(
-            apogees, bins=bins, color="#58a6ff", alpha=0.7,
-            edgecolor="#30363d", linewidth=0.5,
+            apogees, bins=bins, color=theme.ACCENT, alpha=0.7,
+            edgecolor=theme.LINE, linewidth=0.5,
         )
 
         # Normal distribution fit overlay
@@ -707,7 +656,7 @@ class MonteCarloWorkspace(QWidget):
             pdf = stats.norm.pdf(x_fit, mu, sigma)
             # Scale PDF to match histogram
             bin_width = bin_edges[1] - bin_edges[0]
-            ax.plot(x_fit, pdf * n * bin_width, color="#c9d1d9",
+            ax.plot(x_fit, pdf * n * bin_width, color=theme.TEXT,
                     linewidth=1.5, alpha=0.8, label="Normal fit")
 
         # Mean line
@@ -715,26 +664,26 @@ class MonteCarloWorkspace(QWidget):
                    alpha=0.9, label=f"Mean: {mu:.1f} m")
 
         # ±1σ lines
-        ax.axvline(mu - sigma, color="#7ee787", linestyle="--", linewidth=1,
+        ax.axvline(mu - sigma, color=theme.OK, linestyle="--", linewidth=1,
                    alpha=0.7, label=f"±1σ: {sigma:.1f} m")
-        ax.axvline(mu + sigma, color="#7ee787", linestyle="--", linewidth=1,
+        ax.axvline(mu + sigma, color=theme.OK, linestyle="--", linewidth=1,
                    alpha=0.7)
 
         # 95% CI bounds
-        ax.axvline(r.apogee_ci_low, color="#f0883e", linestyle="--",
+        ax.axvline(r.apogee_ci_low, color=theme.ACCENT, linestyle="--",
                    linewidth=1, alpha=0.7,
                    label=f"95% CI: {r.apogee_ci_low:.0f}–{r.apogee_ci_high:.0f} m")
-        ax.axvline(r.apogee_ci_high, color="#f0883e", linestyle="--",
+        ax.axvline(r.apogee_ci_high, color=theme.ACCENT, linestyle="--",
                    linewidth=1, alpha=0.7)
 
         # Unstable runs as a red rug along the bottom (apogee of each tumbling run).
         u_ap = getattr(r, "unstable_apogee_values", None)
         if u_ap:
-            ax.scatter(u_ap, [0] * len(u_ap), marker="|", c="#f85149", s=120,
+            ax.scatter(u_ap, [0] * len(u_ap), marker="|", c=theme.ERR, s=120,
                        linewidths=1.3, zorder=6, label=f"Unstable ({len(u_ap)})")
 
-        ax.legend(facecolor="#161b22", edgecolor="#30363d",
-                  labelcolor="#c9d1d9", fontsize=8, loc="upper right")
+        ax.legend(facecolor=theme.PANEL, edgecolor=theme.LINE,
+                  labelcolor=theme.TEXT, fontsize=8, loc="upper right")
 
         self._ax_apogee.figure.tight_layout()
         self._canvas_apogee.draw()
@@ -756,13 +705,13 @@ class MonteCarloWorkspace(QWidget):
         if not len(xs):
             ax.text(0.5, 0.5, "No run reached the ground",
                     transform=ax.transAxes, ha="center", va="center",
-                    color="#484f58", fontsize=12)
+                    color=theme.LINE_STRONG, fontsize=12)
             self._ax_landing.figure.tight_layout()
             self._canvas_landing.draw()
             return
 
         # All points in the filtered set are physics-valid
-        ax.scatter(xs, ys, c="#58a6ff", s=8,
+        ax.scatter(xs, ys, c=theme.ACCENT, s=8,
                    alpha=0.5, label=f"Valid ({len(xs)})", zorder=3)
 
         # ── Dispersion ellipses ──
@@ -789,7 +738,7 @@ class MonteCarloWorkspace(QWidget):
                 h = 2.0 * math.sqrt(chi2 * eigvals[1])
                 ax.add_patch(Ellipse(
                     (cx, cy), max(w, 1.0), max(h, 1.0), angle=angle,
-                    fill=False, edgecolor="#58a6ff", linewidth=1.2,
+                    fill=False, edgecolor=theme.ACCENT, linewidth=1.2,
                     alpha=alpha_val, linestyle="--",
                     label=f"{pct_label} containment",
                 ))
@@ -810,8 +759,8 @@ class MonteCarloWorkspace(QWidget):
             d_pad = np.sqrt(safety_xs ** 2 + safety_ys ** 2)
             r95 = float(np.percentile(d_pad, 95))
             r99 = float(np.percentile(d_pad, 99))
-            for radius, col, lbl in [(r95, "#d29922", f"R95 = {r95:.0f} m"),
-                                     (r99, "#f0883e", f"R99 = {r99:.0f} m")]:
+            for radius, col, lbl in [(r95, theme.WARN, f"R95 = {r95:.0f} m"),
+                                     (r99, theme.ACCENT, f"R99 = {r99:.0f} m")]:
                 ax.add_patch(Circle((0, 0), radius, fill=False, edgecolor=col,
                                     linewidth=1.3, linestyle=":", label=lbl, zorder=4))
 
@@ -821,7 +770,7 @@ class MonteCarloWorkspace(QWidget):
                 n_out = int(np.sum(d_pad > safe_r))
                 pct_in = 100.0 * (len(d_pad) - n_out) / len(d_pad)
                 ok = n_out == 0
-                col = "#3fb950" if ok else "#f85149"
+                col = theme.OK if ok else theme.ERR
                 ax.add_patch(Circle((0, 0), safe_r, fill=False, edgecolor=col,
                                     linewidth=2.0, linestyle="-",
                                     label=f"Safety {safe_r:.0f} m "
@@ -829,7 +778,7 @@ class MonteCarloWorkspace(QWidget):
                 # highlight violating landings
                 if n_out:
                     out_mask = d_pad > safe_r
-                    ax.scatter(safety_xs[out_mask], safety_ys[out_mask], c="#f85149",
+                    ax.scatter(safety_xs[out_mask], safety_ys[out_mask], c=theme.ERR,
                                s=14, marker="x", zorder=6, label=f"Outside ({n_out})")
                 verdict = "PASS" if ok else "FAIL"
                 # Diverged runs have no meaningful landing point, so they cannot
@@ -850,19 +799,19 @@ class MonteCarloWorkspace(QWidget):
         uxs = getattr(r, "unstable_landing_x", None)
         uys = getattr(r, "unstable_landing_y", None)
         if uxs and uys:
-            ax.scatter(uxs, uys, c="#f85149", s=26, marker="D",
+            ax.scatter(uxs, uys, c=theme.ERR, s=26, marker="D",
                        edgecolors="#ffffff", linewidths=0.5, zorder=7,
                        label=f"Unstable ({len(uxs)})")
 
         # Launch point crosshair
-        ax.axhline(0, color="#484f58", linewidth=0.5, alpha=0.5)
-        ax.axvline(0, color="#484f58", linewidth=0.5, alpha=0.5)
+        ax.axhline(0, color=theme.LINE_STRONG, linewidth=0.5, alpha=0.5)
+        ax.axvline(0, color=theme.LINE_STRONG, linewidth=0.5, alpha=0.5)
         ax.plot(0, 0, "+", color="#ffffff", markersize=12, markeredgewidth=2,
                 zorder=5, label="Launch")
 
         ax.set_aspect("equal", adjustable="datalim")
-        ax.legend(facecolor="#161b22", edgecolor="#30363d",
-                  labelcolor="#c9d1d9", fontsize=8, loc="upper right")
+        ax.legend(facecolor=theme.PANEL, edgecolor=theme.LINE,
+                  labelcolor=theme.TEXT, fontsize=8, loc="upper right")
 
         self._ax_landing.figure.tight_layout()
         self._canvas_landing.draw()
@@ -885,24 +834,24 @@ class MonteCarloWorkspace(QWidget):
         if not len(dists):
             ax.text(0.5, 0.5, "No run reached the ground",
                     transform=ax.transAxes, ha="center", va="center",
-                    color="#484f58", fontsize=12)
+                    color=theme.LINE_STRONG, fontsize=12)
             self._ax_dist.figure.tight_layout()
             self._canvas_dist.draw()
             return
         bins = min(50, max(30, len(dists) // 10))
 
         ax.hist(dists, bins=bins, color="#bc8cff", alpha=0.7,
-                edgecolor="#30363d", linewidth=0.5)
+                edgecolor=theme.LINE, linewidth=0.5)
 
         mean_d = float(np.mean(dists))
         max_d = float(np.max(dists))
         ax.axvline(mean_d, color="#ffffff", linestyle="--", linewidth=1.2,
                    alpha=0.9, label=f"Mean: {mean_d:.0f} m")
-        ax.axvline(max_d, color="#f85149", linestyle="--", linewidth=1,
+        ax.axvline(max_d, color=theme.ERR, linestyle="--", linewidth=1,
                    alpha=0.7, label=f"Max: {max_d:.0f} m")
 
-        ax.legend(facecolor="#161b22", edgecolor="#30363d",
-                  labelcolor="#c9d1d9", fontsize=8, loc="upper right")
+        ax.legend(facecolor=theme.PANEL, edgecolor=theme.LINE,
+                  labelcolor=theme.TEXT, fontsize=8, loc="upper right")
 
         self._ax_dist.figure.tight_layout()
         self._canvas_dist.draw()
@@ -919,13 +868,13 @@ class MonteCarloWorkspace(QWidget):
         # Use pre-filtered valid values for box plots (avoids contamination)
         datasets = [
             (r.apogee_values if r.apogee_values else [run.apogee for run in r.runs],
-             "Apogee (m)", "#58a6ff"),
+             "Apogee (m)", theme.ACCENT),
             (r.velocity_values if r.velocity_values else [run.max_velocity for run in r.runs],
-             "Max Velocity (m/s)", "#7ee787"),
+             "Max Velocity (m/s)", theme.OK),
             (r.mach_values if r.mach_values else [run.max_mach for run in r.runs],
              "Max Mach", "#bc8cff"),
             (r.accel_values if r.accel_values else [run.max_acceleration for run in r.runs],
-             "Max Accel (m/s²)", "#f0883e"),
+             "Max Accel (m/s²)", theme.ACCENT),
             (r.landing_distance_values if r.landing_distance_values else [run.landing_distance for run in r.runs],
              "Landing Dist (m)", "#f778ba"),
         ]
@@ -934,7 +883,7 @@ class MonteCarloWorkspace(QWidget):
             arr = np.asarray(data, dtype=float)
             data = arr[np.isfinite(arr)]
             if not len(data):
-                ax.set_title(label, color="#8b949e", fontsize=9, fontweight="bold")
+                ax.set_title(label, color=theme.TEXT_DIM, fontsize=9, fontweight="bold")
                 ax.set_xticks([])
                 continue
             bp = ax.boxplot(
@@ -946,7 +895,7 @@ class MonteCarloWorkspace(QWidget):
                 flierprops=dict(marker="o", markerfacecolor=color,
                                 markeredgecolor=color, markersize=3, alpha=0.5),
             )
-            ax.set_title(label, color="#8b949e", fontsize=9, fontweight="bold")
+            ax.set_title(label, color=theme.TEXT_DIM, fontsize=9, fontweight="bold")
             ax.set_xticks([])
 
         fig.tight_layout()
@@ -1026,19 +975,19 @@ class MonteCarloWorkspace(QWidget):
         n_uns = getattr(r, "n_unstable", 0)
         pct = (n_uns / n_runs * 100.0) if n_runs else 0.0
         self.lbl_r_unstable.setText(f"{n_uns} / {n_runs}  ({pct:.1f}%)")
-        uns_color = "#7ee787" if n_uns == 0 else ("#d29922" if pct < 5 else "#f85149")
+        uns_color = theme.OK if n_uns == 0 else (theme.WARN if pct < 5 else theme.ERR)
         self.lbl_r_unstable.setStyleSheet(
             f"color:{uns_color};font-family:'Cascadia Code',monospace;font-size:13px;"
-            f"font-weight:600;padding:2px 6px;background:#161b22;border-radius:4px;"
+            f"font-weight:600;padding:2px 6px;background:#16161a;border-radius:4px;"
         )
         self._set_rate_label(self.lbl_r_rail, r.p_rail_exit_above_min * 100, " %")
 
         beta = r.reliability_index_beta
-        beta_color = "#7ee787" if beta > 3 else ("#d29922" if beta > 1 else "#f85149")
+        beta_color = theme.OK if beta > 3 else (theme.WARN if beta > 1 else theme.ERR)
         self.lbl_r_beta.setText(f"{beta:+.2f}")
         self.lbl_r_beta.setStyleSheet(
             f"color:{beta_color};font-family:'Cascadia Code',monospace;font-size:13px;"
-            f"font-weight:600;padding:2px 6px;background:#161b22;border-radius:4px;"
+            f"font-weight:600;padding:2px 6px;background:#16161a;border-radius:4px;"
         )
 
         ci_lo, ci_hi = r.reliability_confidence_interval
@@ -1047,15 +996,15 @@ class MonteCarloWorkspace(QWidget):
     def _set_rate_label(self, label: QLabel, value: float, suffix: str):
         """Set label text and colour based on rate thresholds."""
         if value >= 90:
-            color = "#7ee787"
+            color = theme.OK
         elif value >= 70:
-            color = "#d29922"
+            color = theme.WARN
         else:
-            color = "#f85149"
+            color = theme.ERR
         label.setText(f"{value:.1f}{suffix}")
         label.setStyleSheet(
             f"color:{color}; font-family:'Cascadia Code',monospace; font-size:13px;"
-            f"font-weight:600; padding:2px 6px; background:#161b22; border-radius:4px;"
+            f"font-weight:600; padding:2px 6px; background:#16161a; border-radius:4px;"
         )
 
     def _update_failure_breakdown(self, r: MonteCarloResults):
@@ -1068,7 +1017,7 @@ class MonteCarloWorkspace(QWidget):
 
         if not r.failure_breakdown:
             lbl = QLabel("✓ No failures")
-            lbl.setStyleSheet("color:#7ee787; font-size:11px; font-weight:600;")
+            lbl.setStyleSheet(f"color:{theme.OK}; font-size:11px; font-weight:600;")
             self._fail_layout.addWidget(lbl)
             return
 
@@ -1078,7 +1027,7 @@ class MonteCarloWorkspace(QWidget):
             pct = 100.0 * count / n
             lbl = QLabel(f"• {reason}: {count} ({pct:.1f}%)")
             lbl.setStyleSheet(
-                "color:#f85149; font-size:11px; font-weight:500; padding:1px 0;"
+                f"color:{theme.ERR}; font-size:11px; font-weight:500; padding:1px 0;"
             )
             lbl.setWordWrap(True)
             self._fail_layout.addWidget(lbl)
@@ -1101,11 +1050,11 @@ class MonteCarloWorkspace(QWidget):
 
         # Build rich text content
         lines = []
-        lines.append(f"<h3 style='color:#58a6ff;'>Run #{run_index} Detail</h3>")
+        lines.append(f"<h3 style='color:#e8843a;'>Run #{run_index} Detail</h3>")
 
         # Inputs
-        lines.append("<h4 style='color:#7ee787;'>INPUTS</h4>")
-        lines.append("<table style='font-family:monospace;color:#c9d1d9;'>")
+        lines.append(f"<h4 style='color:{theme.OK};'>INPUTS</h4>")
+        lines.append(f"<table style='font-family:monospace;color:{theme.TEXT};'>")
         param_labels = {
             "impulse_scale": ("Motor Impulse Scale", ""),
             "dry_mass": ("Dry Mass", "kg"),
@@ -1120,12 +1069,12 @@ class MonteCarloWorkspace(QWidget):
             if isinstance(val, float):
                 val = f"{val:.4f}"
             lines.append(f"<tr><td style='padding:2px 8px;'>{label}:</td>"
-                        f"<td style='padding:2px 8px;color:#58a6ff;'>{val} {unit}</td></tr>")
+                        f"<td style='padding:2px 8px;color:#e8843a;'>{val} {unit}</td></tr>")
         lines.append("</table>")
 
         # Outputs
-        lines.append("<h4 style='color:#7ee787;'>OUTPUTS</h4>")
-        lines.append("<table style='font-family:monospace;color:#c9d1d9;'>")
+        lines.append(f"<h4 style='color:{theme.OK};'>OUTPUTS</h4>")
+        lines.append(f"<table style='font-family:monospace;color:{theme.TEXT};'>")
         outputs = [
             ("Apogee", f"{run.apogee:.1f} m"),
             ("Max Velocity", f"{run.max_velocity:.1f} m/s"),
@@ -1141,39 +1090,39 @@ class MonteCarloWorkspace(QWidget):
         ]
         for label, val in outputs:
             lines.append(f"<tr><td style='padding:2px 8px;'>{label}:</td>"
-                        f"<td style='padding:2px 8px;color:#58a6ff;'>{val}</td></tr>")
+                        f"<td style='padding:2px 8px;color:#e8843a;'>{val}</td></tr>")
         lines.append("</table>")
 
         # Failures
         if run.failure_reasons:
-            lines.append("<h4 style='color:#f85149;'>FAILURES</h4>")
-            lines.append("<ul style='color:#f85149;'>")
+            lines.append(f"<h4 style='color:{theme.ERR};'>FAILURES</h4>")
+            lines.append(f"<ul style='color:{theme.ERR};'>")
             for fr in run.failure_reasons:
                 lines.append(f"<li>{fr}</li>")
             lines.append("</ul>")
         else:
-            lines.append("<h4 style='color:#7ee787;'>\u2713 No failures</h4>")
+            lines.append(f"<h4 style='color:{theme.OK};'>\u2713 No failures</h4>")
 
         # Create dialog
         dlg = QDialog(self)
         dlg.setWindowTitle(f"Run #{run_index} — Scenario Detail")
         dlg.setMinimumSize(450, 500)
-        dlg.setStyleSheet("background:#0d1117; color:#c9d1d9;")
+        dlg.setStyleSheet(f"background:{theme.BG}; color:{theme.TEXT};")
 
         layout = QVBoxLayout(dlg)
         text = QTextEdit()
         text.setReadOnly(True)
         text.setHtml("".join(lines))
         text.setStyleSheet(
-            "QTextEdit{background:#161b22;color:#c9d1d9;border:1px solid #30363d;"
+            f"QTextEdit{{background:{theme.PANEL};color:{theme.TEXT};border:1px solid {theme.LINE};"
             "border-radius:6px;padding:8px;font-size:12px;}"
         )
         layout.addWidget(text)
 
         btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        btn_box.setStyleSheet("QPushButton{background:#21262d;color:#c9d1d9;border:1px solid #30363d;"
+        btn_box.setStyleSheet(f"QPushButton{{background:{theme.RAISED};color:{theme.TEXT};border:1px solid {theme.LINE};"
                               "border-radius:4px;padding:6px 16px;}"
-                              "QPushButton:hover{background:#30363d;}")
+                              f"QPushButton:hover{{background:{theme.LINE};}}")
         btn_box.rejected.connect(dlg.close)
         layout.addWidget(btn_box)
 
@@ -1194,7 +1143,7 @@ class MonteCarloWorkspace(QWidget):
             ax.text(
                 0.5, 0.5, "Insufficient data for sensitivity analysis",
                 transform=ax.transAxes, ha="center", va="center",
-                color="#484f58", fontsize=12,
+                color=theme.LINE_STRONG, fontsize=12,
             )
             self._ax_tornado.figure.tight_layout()
             self._canvas_tornado.draw()
@@ -1207,10 +1156,10 @@ class MonteCarloWorkspace(QWidget):
         )
         labels = [item[0] for item in sorted_items]
         pearson_vals = [item[1]["pearson_r"] for item in sorted_items]
-        colors = ["#58a6ff" if v >= 0 else "#f85149" for v in pearson_vals]
+        colors = [theme.ACCENT if v >= 0 else theme.ERR for v in pearson_vals]
 
         bars = ax.barh(labels, pearson_vals, color=colors, height=0.55,
-                       alpha=0.85, edgecolor="#30363d", linewidth=0.5)
+                       alpha=0.85, edgecolor=theme.LINE, linewidth=0.5)
 
         # Value labels on bars
         for bar, val in zip(bars, pearson_vals):
@@ -1218,21 +1167,21 @@ class MonteCarloWorkspace(QWidget):
             ha = "left" if val >= 0 else "right"
             ax.text(x_pos, bar.get_y() + bar.get_height() / 2,
                     f"{val:+.3f}", va="center", ha=ha,
-                    color="#c9d1d9", fontsize=9, fontweight="bold")
+                    color=theme.TEXT, fontsize=9, fontweight="bold")
 
-        ax.axvline(0, color="#484f58", linewidth=0.8)
+        ax.axvline(0, color=theme.LINE_STRONG, linewidth=0.8)
         ax.set_xlim(-1.05, 1.05)
-        ax.tick_params(axis="y", labelsize=10, colors="#c9d1d9")
+        ax.tick_params(axis="y", labelsize=10, colors=theme.TEXT)
 
         # Legend explaining colors
         from matplotlib.patches import Patch
         legend_elements = [
-            Patch(facecolor="#58a6ff", alpha=0.85, label="Positive (↑ param → ↑ apogee)"),
-            Patch(facecolor="#f85149", alpha=0.85, label="Negative (↑ param → ↓ apogee)"),
+            Patch(facecolor=theme.ACCENT, alpha=0.85, label="Positive (↑ param → ↑ apogee)"),
+            Patch(facecolor=theme.ERR, alpha=0.85, label="Negative (↑ param → ↓ apogee)"),
         ]
         ax.legend(handles=legend_elements, loc="lower right",
-                  facecolor="#161b22", edgecolor="#30363d",
-                  labelcolor="#c9d1d9", fontsize=8)
+                  facecolor=theme.PANEL, edgecolor=theme.LINE,
+                  labelcolor=theme.TEXT, fontsize=8)
 
         self._ax_tornado.figure.tight_layout()
         self._canvas_tornado.draw()

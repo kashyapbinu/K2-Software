@@ -11,6 +11,8 @@ from ui.icons import icon
 from ui.widgets.plot_widget import PlotWidget
 from core.flight_log import parse_flight_log_file, compare_apogee
 
+from ui import theme
+
 logger = logging.getLogger("K2.ResultsWS")
 
 
@@ -19,9 +21,9 @@ class ReadoutValue(QLabel):
         super().__init__(text, parent)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet(
-            "color: #e6edf3; font-family: 'Cascadia Code', monospace; "
+            f"color: {theme.TEXT_BRIGHT}; font-family: 'Cascadia Code', monospace; "
             "font-size: 13px; font-weight: 600; padding: 4px 8px; "
-            "background-color: #161b22; border: 1px solid #21262d; border-radius: 6px;"
+            f"background-color: {theme.PANEL}; border: 1px solid {theme.RAISED}; border-radius: 6px;"
         )
 
 
@@ -43,7 +45,7 @@ class ResultsWorkspace(QWidget):
         # Header
         top = QHBoxLayout()
         title = QLabel("FLIGHT RESULTS")
-        title.setStyleSheet("color: #58a6ff; font-size: 16px; font-weight: 700; letter-spacing: 2px;")
+        title.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
         top.addWidget(title)
         top.addStretch()
 
@@ -71,14 +73,14 @@ class ResultsWorkspace(QWidget):
 
         # Summary
         self.summary_label = QLabel("No simulation data. Run a simulation first.")
-        self.summary_label.setStyleSheet("color: #8b949e; font-size: 13px; padding: 8px; "
-            "background-color: #161b22; border-radius: 6px;")
+        self.summary_label.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 13px; padding: 8px; "
+            f"background-color: {theme.PANEL}; border-radius: 6px;")
         self.summary_label.setWordWrap(True)
         layout.addWidget(self.summary_label)
 
         # Timeline scrubber
         scrub_frame = QFrame()
-        scrub_frame.setStyleSheet("background-color: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 4px;")
+        scrub_frame.setStyleSheet(f"background-color: {theme.PANEL}; border: 1px solid {theme.RAISED}; border-radius: 6px; padding: 4px;")
         sl = QHBoxLayout(scrub_frame)
         sl.setContentsMargins(8, 4, 8, 4)
         sl.addWidget(QLabel("T+"))
@@ -88,13 +90,13 @@ class ResultsWorkspace(QWidget):
         self.scrub_slider.valueChanged.connect(self._on_scrub)
         sl.addWidget(self.scrub_slider, 1)
         self.scrub_time = QLabel("0.00 s")
-        self.scrub_time.setStyleSheet("color: #58a6ff; font-family: 'Cascadia Code', monospace; font-weight: 600;")
+        self.scrub_time.setStyleSheet(f"color: {theme.ACCENT}; font-family: 'Cascadia Code', monospace; font-weight: 600;")
         sl.addWidget(self.scrub_time)
         layout.addWidget(scrub_frame)
 
         # Cursor readouts
         readout_frame = QFrame()
-        readout_frame.setStyleSheet("background-color: #0d1117; border: 1px solid #21262d; border-radius: 6px;")
+        readout_frame.setStyleSheet(f"background-color: {theme.BG}; border: 1px solid {theme.RAISED}; border-radius: 6px;")
         rg = QGridLayout(readout_frame)
         rg.setContentsMargins(8, 6, 8, 6)
         rg.setSpacing(6)
@@ -109,7 +111,7 @@ class ResultsWorkspace(QWidget):
             col = i % 6
             row = (i // 6) * 2
             header = QLabel(name)
-            header.setStyleSheet("color: #58a6ff; font-weight: 600; font-size: 10px;")
+            header.setStyleSheet(f"color: {theme.TEXT_DIM}; font-weight: 600; font-size: 11px;")
             header.setAlignment(Qt.AlignmentFlag.AlignCenter)
             rg.addWidget(header, row, col)
             val = ReadoutValue("—")
@@ -120,7 +122,7 @@ class ResultsWorkspace(QWidget):
 
         # Plot tabs
         self.tabs = QTabWidget()
-        self.tabs.setStyleSheet("QTabWidget::pane { border: 1px solid #21262d; }")
+        self.tabs.setStyleSheet(f"QTabWidget::pane {{ border: 1px solid {theme.RAISED}; }}")
 
         self.alt_plot = PlotWidget(title="Altitude vs Time", xlabel="Time (s)", ylabel="Altitude (m)")
         self.tabs.addTab(self.alt_plot, "Altitude")
@@ -189,21 +191,21 @@ class ResultsWorkspace(QWidget):
 
         # Plot all
         self._plot_with_overlay(self.alt_plot, t_vals, history.get_values("altitude"),
-            "altitude", "Altitude vs Time", "Time (s)", "Altitude (m)", "#58a6ff")
+            "altitude", "Altitude vs Time", "Time (s)", "Altitude (m)", theme.ACCENT)
 
         self._plot_with_overlay(self.vel_plot, t_vals, history.get_values("velocity"),
-            "velocity", "Velocity vs Time", "Time (s)", "Velocity (m/s)", "#7ee787")
+            "velocity", "Velocity vs Time", "Time (s)", "Velocity (m/s)", theme.OK)
 
         self._plot_with_overlay(self.accel_plot, t_vals, history.get_values("acceleration"),
-            "acceleration", "Acceleration vs Time", "Time (s)", "Accel (m/s²)", "#f0883e")
+            "acceleration", "Acceleration vs Time", "Time (s)", "Accel (m/s²)", theme.ACCENT)
 
         self.thrust_plot.multi_plot([
-            (t_vals, history.get_values("thrust"), "#f0883e", "Thrust"),
-            (t_vals, history.get_values("drag"), "#f85149", "Drag"),
+            (t_vals, history.get_values("thrust"), theme.ACCENT, "Thrust"),
+            (t_vals, history.get_values("drag"), theme.ERR, "Drag"),
         ], "Thrust & Drag vs Time", "Time (s)", "Force (N)")
 
         self.mass_plot.update_plot(t_vals, history.get_values("mass"),
-            "Mass vs Time", "Time (s)", "Mass (kg)", "#d29922")
+            "Mass vs Time", "Time (s)", "Mass (kg)", theme.WARN)
 
         self.mach_plot.update_plot(t_vals, history.get_values("mach"),
             "Mach Number vs Time", "Time (s)", "Mach", "#bc8cff")
@@ -212,7 +214,7 @@ class ResultsWorkspace(QWidget):
             "Stability Margin vs Time", "Time (s)", "Calibers", "#f778ba")
 
         self.dyn_press_plot.update_plot(t_vals, history.get_values("dynamic_pressure"),
-            "Dynamic Pressure vs Time", "Time (s)", "q (Pa)", "#79c0ff")
+            "Dynamic Pressure vs Time", "Time (s)", "q (Pa)", theme.ACCENT_HOVER)
 
         self._plot_landing()
 
@@ -223,8 +225,8 @@ class ResultsWorkspace(QWidget):
             f"Max Mach: {s.max_mach:.3f}  |  Max Accel: {s.max_acceleration:.1f} m/s²  |  "
             f"Flight Time: {t_vals[-1]:.2f} s  |  {history.count} data points"
         )
-        self.summary_label.setStyleSheet("color: #7ee787; font-size: 13px; padding: 8px; "
-            "background-color: #161b22; border: 1px solid #21262d; border-radius: 6px; font-weight: 600;")
+        self.summary_label.setStyleSheet(f"color: {theme.OK}; font-size: 13px; padding: 8px; "
+            f"background-color: {theme.PANEL}; border: 1px solid {theme.RAISED}; border-radius: 6px; font-weight: 600;")
 
         # Append sim-vs-measured comparison when a flight log is loaded.
         if self._flight_log:
@@ -260,19 +262,19 @@ class ResultsWorkspace(QWidget):
         s = self.engine.state
 
         # Collected impact points: (x, y, label, color, impact_velocity).
-        points = [(0.0, 0.0, "Pad", "#8b949e", None)]
+        points = [(0.0, 0.0, "Pad", theme.TEXT_DIM, None)]
 
         main_x = getattr(s, "landing_x", 0.0)
         main_y = getattr(s, "landing_y", 0.0)
         main_v = getattr(s, "main_descent_rate", 0.0) or getattr(s, "touchdown_rate", 0.0)
         if getattr(s, "landing_drift", 0.0) or main_x or main_y:
-            points.append((main_x, main_y, "Main vehicle", "#7ee787", main_v))
+            points.append((main_x, main_y, "Main vehicle", theme.OK, main_v))
 
         # Spent stages (multistage only). Names come from the snapshots; the
         # ballistic results carry the landing position + impact speed.
         results = getattr(self.sim_engine, "spent_stage_results", None) or []
         snaps = getattr(self.sim_engine, "spent_stages", None) or []
-        palette = ["#f0883e", "#f85149", "#d29922", "#bc8cff"]
+        palette = [theme.ACCENT, theme.ERR, theme.WARN, "#bc8cff"]
         for i, r in enumerate(results):
             name = snaps[i].get("name") if i < len(snaps) else None
             name = name or f"Stage {r.get('stage', i)}"
@@ -287,21 +289,21 @@ class ResultsWorkspace(QWidget):
             ring = step
             while ring <= max_r * 1.15 + step:
                 ax.add_patch(Circle((0, 0), ring, fill=False, ls="--",
-                                    ec="#30363d", lw=0.8, alpha=0.7))
+                                    ec=theme.LINE, lw=0.8, alpha=0.7))
                 ax.text(ring * 0.7071, ring * 0.7071, f"{ring:.0f} m",
-                        color="#484f58", fontsize=7, ha="center", va="center")
+                        color=theme.LINE_STRONG, fontsize=7, ha="center", va="center")
                 ring += step
 
         for x, y, label, color, vimp in points:
-            ax.scatter([x], [y], c=color, s=90, edgecolors="#0d1117",
+            ax.scatter([x], [y], c=color, s=90, edgecolors=theme.BG,
                        linewidths=1.2, zorder=5, label=label)
             tag = label if vimp is None else f"{label}\n{vimp:.0f} m/s"
             ax.annotate(tag, (x, y), textcoords="offset points", xytext=(8, 6),
-                        color="#c9d1d9", fontsize=8, zorder=6)
+                        color=theme.TEXT, fontsize=8, zorder=6)
 
         ax.set_aspect("equal", adjustable="datalim")
-        ax.legend(facecolor="#161b22", edgecolor="#30363d",
-                  labelcolor="#c9d1d9", fontsize=8, loc="best")
+        ax.legend(facecolor=theme.PANEL, edgecolor=theme.LINE,
+                  labelcolor=theme.TEXT, fontsize=8, loc="best")
         plot.figure.tight_layout()
         plot.canvas.draw()
 
