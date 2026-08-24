@@ -60,12 +60,19 @@ class PlotWidget(QWidget):
         self.figure.tight_layout()
         self.canvas.draw()
 
-    def update_plot(self, x, y, title="", xlabel="", ylabel="", color=None):
+    def update_plot(self, x, y, title="", xlabel="", ylabel="", color=None,
+                    linestyle="-", fill=True, note=""):
+        """Draw a single series. `note` prints a caption under the title -
+        use it to say where the data came from."""
         color = color or theme.ACCENT
         self.ax.clear()
         self._style_axis(title, xlabel, ylabel)
-        self.ax.plot(x, y, color=color, linewidth=1.5)
-        self.ax.fill_between(x, y, alpha=0.1, color=color)
+        self.ax.plot(x, y, color=color, linewidth=1.5, linestyle=linestyle)
+        if fill:
+            self.ax.fill_between(x, y, alpha=0.1, color=color)
+        if note:
+            self.ax.text(0.5, 1.005, note, transform=self.ax.transAxes,
+                         ha="center", va="bottom", fontsize=8, color=theme.TEXT_DIM)
         self.figure.tight_layout()
         self.canvas.draw()
 
