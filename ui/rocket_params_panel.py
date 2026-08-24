@@ -15,6 +15,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
+from ui import theme
+
 logger = logging.getLogger("K2.RocketParams")
 
 
@@ -126,7 +128,7 @@ class RocketParamsPanel(QWidget):
         # Motor info display
         self.motor_info_label = QLabel("No motor selected")
         self.motor_info_label.setWordWrap(True)
-        self.motor_info_label.setStyleSheet("color: #8b949e; font-size: 11px; padding: 4px;")
+        self.motor_info_label.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; padding: 4px;")
         motor_layout.addRow(self.motor_info_label)
         
         motor_group.setLayout(motor_layout)

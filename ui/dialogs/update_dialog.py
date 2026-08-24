@@ -23,6 +23,8 @@ from core.version import __version__
 from core import updater
 from core.updater import UpdateWorker, UpdateInfo
 
+from ui import theme
+
 logger = logging.getLogger("K2.UpdateDialog")
 
 
@@ -52,7 +54,7 @@ class UpdateDialog(QDialog):
             f"Download: {info.asset_name}"
             + (f"  ({size_mb:.0f} MB)" if size_mb else "")
         )
-        sub.setStyleSheet("color: #8b949e;")
+        sub.setStyleSheet(f"color: {theme.TEXT_DIM};")
         lay.addWidget(sub)
 
         if info.notes.strip():
@@ -69,7 +71,7 @@ class UpdateDialog(QDialog):
         lay.addWidget(self.progress)
 
         self.status = QLabel("")
-        self.status.setStyleSheet("color: #8b949e;")
+        self.status.setStyleSheet(f"color: {theme.TEXT_DIM};")
         lay.addWidget(self.status)
 
         btns = QHBoxLayout()

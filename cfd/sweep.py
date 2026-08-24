@@ -280,6 +280,15 @@ def analytic_friction_cd_cad(
 
 # ── Mesh staging ─────────────────────────────────────────────────────────────
 
+def staged_mesh_matches(mesh_path: Path, work_dir: Path) -> bool:
+    """True if ``work_dir`` already holds *this* mesh, not an older one."""
+    local = Path(work_dir) / Path(mesh_path).name
+    if not local.is_file() or not Path(mesh_path).is_file():
+        return False
+    src, dst = Path(mesh_path).stat(), local.stat()
+    return src.st_size == dst.st_size and abs(src.st_mtime - dst.st_mtime) < 1.0
+
+
 def stage_mesh(mesh_path: Path, work_dir: Path) -> Path:
     """Make the shared mesh reachable from a point's work_dir.
 
@@ -294,7 +303,15 @@ def stage_mesh(mesh_path: Path, work_dir: Path) -> Path:
     work_dir.mkdir(parents=True, exist_ok=True)
     local = work_dir / mesh_path.name
     if local.exists():
-        return local
+        # Only reuse it if it IS the current mesh. A leftover from an earlier
+        # sweep in the same folder — a different refinement, say — would
+        # otherwise be solved silently instead of the mesh just generated, and
+        # the points of one sweep would not all be on the same grid.
+        if staged_mesh_matches(mesh_path, work_dir):
+            return local
+        logger.info(f"Restaging stale mesh in {work_dir.name} "
+                    f"({local.stat().st_size} B -> {mesh_path.stat().st_size} B)")
+        local.unlink()
     try:
         os.link(mesh_path, local)          # hardlink — same NTFS volume
     except Exception:
@@ -304,12 +321,50 @@ def stage_mesh(mesh_path: Path, work_dir: Path) -> Path:
 
 # ── Per-point solve ──────────────────────────────────────────────────────────
 
+def sweep_point_dir(base_work_dir: Path, var: str, value: float) -> Path:
+    """Work directory a given sweep point writes into."""
+    tag = f"{var}_{value:+.3f}".replace("+", "p").replace("-", "m").replace(".", "_")
+    return Path(base_work_dir) / "sweep" / tag
+
+
+def point_is_complete(work_dir: Path, mesh_path: Optional[Path] = None) -> bool:
+    """True if ``work_dir`` holds a SU2 solve that ran to completion.
+
+    A killed run leaves a perfectly parseable ``history.csv`` that simply stops
+    mid-transient, so the history alone cannot be trusted; SU2 prints its exit
+    banner only after the final output files are written.
+
+    Pass ``mesh_path`` to also require that the solve was run on that exact mesh
+    — otherwise results from a superseded grid would look reusable. Two things
+    are checked, because either alone can be fooled: the staged copy must be the
+    current mesh, *and* the history must postdate it. The staged copy is normally
+    a hardlink, so re-meshing to the same path updates the point's copy along with
+    it and makes a stale point look current; only the history's own age shows that
+    its numbers came from the older grid.
+    """
+    wd = Path(work_dir)
+    log = wd / "su2_run.log"
+    history = wd / "history.csv"
+    if not history.is_file() or not log.is_file():
+        return False
+    if mesh_path is not None:
+        if not staged_mesh_matches(mesh_path, wd):
+            return False
+        if history.stat().st_mtime < Path(mesh_path).stat().st_mtime - 1.0:
+            return False
+    try:
+        return "Exit Success" in log.read_text(errors="replace")
+    except OSError:
+        return False
+
+
 def run_sweep_point(
     base_config: CFDConfig,
     var: str,
     value: float,
     mesh_path: Path,
     progress_cb: Optional[Callable[[int, float], None]] = None,
+    reuse_existing: bool = False,
 ) -> CFDResult:
     """Solve ONE sweep point on a pre-built mesh.
 
@@ -318,6 +373,12 @@ def run_sweep_point(
     fresh SU2 case, runs it, and returns the parsed CFDResult.
 
     Each point gets its own work sub-directory so VTK/history files don't clash.
+
+    With ``reuse_existing``, a point whose folder already holds a completed solve
+    is re-parsed instead of re-solved. This makes a long sweep resumable after an
+    interruption. The .cfg is still regenerated — that is what populates the flow
+    metadata (Reynolds, q, reference area) the parse depends on — so a reused
+    point is only trusted when its own solver log shows a clean exit.
     """
     if var not in SWEEP_VARS:
         raise ValueError(f"Unknown sweep variable '{var}'. Use one of {list(SWEEP_VARS)}.")
@@ -326,9 +387,12 @@ def run_sweep_point(
     setattr(cfg, SWEEP_VARS[var], value)
 
     # Isolate each point's outputs in its own folder.
-    tag = f"{var}_{value:+.3f}".replace("+", "p").replace("-", "m").replace(".", "_")
-    cfg.work_dir = Path(base_config.work_dir) / "sweep" / tag
+    cfg.work_dir = sweep_point_dir(base_config.work_dir, var, value)
     cfg.work_dir.mkdir(parents=True, exist_ok=True)
+
+    # Decided before staging: staging is what would make a stale point's mesh
+    # look current again.
+    reused = reuse_existing and point_is_complete(cfg.work_dir, mesh_path)
 
     solver = SU2Solver(cfg)
     # Reuse the shared mesh — stage it into this point's folder, skip remesh.
@@ -337,8 +401,12 @@ def run_sweep_point(
         solver.set_progress_callback(progress_cb)
 
     solver.generate_case()
-    for _it, _rms in solver.run():
-        pass  # progress already streamed via callback
+    if reused:
+        logger.info(f"Sweep point {var}={value:g} already solved in "
+                    f"{cfg.work_dir.name} — re-parsing, not re-solving.")
+    else:
+        for _it, _rms in solver.run():
+            pass  # progress already streamed via callback
     result = solver.parse_results()
 
     # Hybrid Euler polar: the inviscid solve has no skin friction, so add the

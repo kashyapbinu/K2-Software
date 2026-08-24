@@ -28,9 +28,16 @@ import numpy as np
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
-from core.batch_simulation import BatchSimConfig, BatchSimResult, run_batch_simulation
+from core.batch_simulation import (
+    BatchSimConfig, BatchSimResult, run_batch_simulation, is_divergence_reason,
+)
 
 logger = logging.getLogger("K2.MonteCarlo")
+
+
+# Kept as a module-level alias: the classifier now lives next to the result type
+# it classifies, in core.batch_simulation.
+_is_divergence_reason = is_divergence_reason
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -111,6 +118,14 @@ class MonteCarloResults:
     landing_x_values: list = field(default_factory=list)
     landing_y_values: list = field(default_factory=list)
     landing_distance_values: list = field(default_factory=list)
+    # Every real flight's landing point, BEFORE outlier filtering. Range-safety
+    # containment (R95/R99, pad safety radius) must use these — the filtered
+    # `landing_*_values` above drop the apogee outliers, which are exactly the
+    # runs that land farthest, making any containment verdict optimistic.
+    # Numerically diverged runs are still excluded; `n_physics_invalid` counts
+    # them so the plot can say so.
+    all_landing_x: list = field(default_factory=list)
+    all_landing_y: list = field(default_factory=list)
 
     # Mission success / failure
     success_count: int = 0
@@ -136,6 +151,7 @@ class MonteCarloResults:
     n_valid: int = 0
     n_outliers: int = 0
     n_physics_invalid: int = 0
+    n_no_landing: int = 0        # flew, but never touched down inside the sim window
     n_unstable: int = 0          # flew but static margin < required caliber (would tumble)
     unstable_landing_x: list = field(default_factory=list)   # landing East (m) of unstable runs
     unstable_landing_y: list = field(default_factory=list)   # landing North (m) of unstable runs
@@ -245,6 +261,10 @@ class _BatchWorkerThread(QThread):
         total = len(self._work_items)
         last_pct_emitted = -1
 
+        if total == 0:
+            self.all_done.emit(results)
+            return
+
         for run_index, config, seed in self._work_items:
             if self._cancelled:
                 return
@@ -316,7 +336,12 @@ class MonteCarloEngine(QObject):
         Args:
             mc_config: User-specified uncertainty configuration.
         """
-        if self._running:
+        if self._running or (self._worker_thread is not None
+                             and self._worker_thread.isRunning()):
+            # The second clause matters after a cancel: the worker only checks
+            # its flag between sims, so it can still be alive (and owning the
+            # reference below) well after _running has been cleared. Replacing
+            # it here would destroy a live QThread and abort the process.
             logger.warning("Monte Carlo analysis already running")
             return
 
@@ -389,18 +414,41 @@ class MonteCarloEngine(QObject):
         self._worker_thread.progress.connect(self._on_progress)
         self._worker_thread.all_done.connect(self._on_all_done)
         self._worker_thread.failed.connect(self._on_pool_failed)
+        self._worker_thread.finished.connect(self._on_thread_finished)
         self._worker_thread.start()
 
         logger.info(f"Monte Carlo analysis launched: {len(work_items)} runs")
 
     def cancel(self) -> None:
-        """Cancel the running analysis."""
+        """Request cancellation of the running analysis.
+
+        The worker only tests its cancel flag *between* simulations, so it is
+        still inside ``run_batch_simulation`` when this returns. ``_running``
+        therefore stays True and ``analysis_cancelled`` is deferred to
+        ``_on_thread_finished`` — otherwise the UI re-enables Run, ``start()``
+        rebinds ``_worker_thread``, and the live QThread is destroyed.
+        """
+        if not self._running:
+            return
         self._cancelled = True
-        if self._worker_thread is not None:
+        if self._worker_thread is not None and self._worker_thread.isRunning():
             self._worker_thread.cancel()
+            logger.info("Monte Carlo cancel requested — waiting for worker to stop")
+            return
         self._running = False
         logger.info("Monte Carlo analysis cancelled")
         self.analysis_cancelled.emit()
+
+    def _on_thread_finished(self) -> None:
+        """Worker QThread has actually exited — safe to drop the reference."""
+        thread = self._worker_thread
+        self._worker_thread = None
+        if thread is not None:
+            thread.deleteLater()
+        if self._cancelled and self._running:
+            self._running = False
+            logger.info("Monte Carlo analysis cancelled")
+            self.analysis_cancelled.emit()
 
     @property
     def is_running(self) -> bool:
@@ -453,6 +501,10 @@ class MonteCarloEngine(QObject):
             # Log ground-layer values so correlation/scatter plots stay meaningful
             params["wind_speed"] = cfg.wind_layers[0][1]
             params["wind_direction"] = cfg.wind_layers[0][2]
+            # Correlations must use the UNWRAPPED offset. The stored bearing is
+            # taken mod 360, and a linear (or rank) correlation across that wrap
+            # is meaningless — a -3 deg perturbation logs as 357.
+            params["wind_direction_offset"] = dir_offset
         else:
             # Wind speed: σ = base * pct / 100
             ws_sigma = max(base.wind_speed * mc.wind_speed_uncertainty_pct / 100.0, 0.01)
@@ -460,8 +512,10 @@ class MonteCarloEngine(QObject):
             params["wind_speed"] = cfg.wind_speed
 
             # Wind direction: σ = deg
-            cfg.wind_direction = base.wind_direction + _cg(rng, mc.wind_direction_uncertainty_deg)
+            dir_offset = _cg(rng, mc.wind_direction_uncertainty_deg)
+            cfg.wind_direction = base.wind_direction + dir_offset
             params["wind_direction"] = cfg.wind_direction
+            params["wind_direction_offset"] = dir_offset
 
         # Dry mass: σ = base * pct / 100
         dm_sigma = max(base.dry_mass * mc.dry_mass_uncertainty_pct / 100.0, 0.001)
@@ -580,10 +634,16 @@ class MonteCarloEngine(QObject):
         for i, r in enumerate(runs):
             reasons: list[str] = []
 
-            # Check for sim-level failures first (integration errors, etc.)
+            # Sim-level failures — but ONLY the ones that mean "this was never
+            # a real flight". run_batch_simulation also sets failure_reasons
+            # for genuine flight outcomes ("Apogee below 1 m — likely no
+            # thrust", "Simulation timed out"); treating those as divergence
+            # dropped real failures out of every distribution below, so a
+            # config where a third of runs never left the pad still showed a
+            # clean apogee histogram of the runs that did fly.
             if r.failure_reasons:
                 for fr in r.failure_reasons:
-                    if fr not in reasons:
+                    if _is_divergence_reason(fr) and fr not in reasons:
                         reasons.append(fr)
 
             # Physics sanity checks
@@ -597,6 +657,12 @@ class MonteCarloEngine(QObject):
             if reasons:
                 physics_invalid_indices.append(i)
                 r.success = False
+                # Keep the sim's own non-divergence reasons too - overwriting
+                # them lost the actual cause ("no thrust", "timed out") for any
+                # run that also tripped a physics limit.
+                for fr in (r.failure_reasons or []):
+                    if fr not in reasons:
+                        reasons.append(fr)
                 r.failure_reasons = reasons
                 for reason in reasons:
                     failure_breakdown[reason] = failure_breakdown.get(reason, 0) + 1
@@ -618,6 +684,14 @@ class MonteCarloEngine(QObject):
         for i in physics_valid_indices:
             r = runs[i]
             reasons: list[str] = []
+
+            # Carry over the sim's own non-divergence failure reasons ("no
+            # thrust", "timed out"). Tier 1 no longer discards these runs, so
+            # this is where they become mission failures — and the breakdown
+            # keeps naming the actual cause instead of a generic one.
+            for fr in (r.failure_reasons or []):
+                if not _is_divergence_reason(fr) and fr not in reasons:
+                    reasons.append(fr)
 
             # Stability check
             if r.min_stability_margin < mc.min_stability_cal and r.apogee > 1.0:
@@ -679,6 +753,18 @@ class MonteCarloEngine(QObject):
         landing_ys = np.array([r.landing_y for r in pv_runs], dtype=np.float64)
         landing_dists = np.array([r.landing_distance for r in pv_runs], dtype=np.float64)
         rail_vels = np.array([r.rail_exit_velocity for r in pv_runs], dtype=np.float64)
+
+        # A run that never touched down (600 s sim window, or an early
+        # termination) has no landing point: its final position is wherever it
+        # happened to be in mid-air. Blanking those to NaN keeps every array
+        # index-aligned with the apogee statistics while stopping a fictional
+        # touchdown from entering a landing mean or a range-safety radius -
+        # which it silently did, making containment look better than it is.
+        landed_mask = np.array([r.final_phase == "Landed" for r in pv_runs], dtype=bool)
+        n_no_landing = int(np.sum(~landed_mask))
+        landing_xs[~landed_mask] = np.nan
+        landing_ys[~landed_mask] = np.nan
+        landing_dists[~landed_mask] = np.nan
 
         # ══════════════════════════════════════════════════════════
         #  TIER 3: Statistical outlier filtering (IQR + 3σ)
@@ -781,16 +867,25 @@ class MonteCarloEngine(QObject):
         accel_std = float(np.std(v_accels, ddof=1)) if nv > 1 else 0.0
 
         # ── Landing stats ──
-        ldist_mean = float(np.mean(v_landing_dists))
-        ldist_std = float(np.std(v_landing_dists, ddof=1)) if nv > 1 else 0.0
-        ldist_max = float(np.max(v_landing_dists))
+        # nan-aware: runs that never landed are blanked out above.
+        n_landed = int(np.sum(np.isfinite(v_landing_dists)))
+        if n_landed > 0:
+            ldist_mean = float(np.nanmean(v_landing_dists))
+            ldist_std = float(np.nanstd(v_landing_dists, ddof=1)) if n_landed > 1 else 0.0
+            ldist_max = float(np.nanmax(v_landing_dists))
+        else:
+            ldist_mean = ldist_std = ldist_max = 0.0
 
         # ── Rail exit velocity ──
         rev_mean = float(np.mean(v_rail_vels))
         rev_std = float(np.std(v_rail_vels, ddof=1)) if nv > 1 else 0.0
 
         # ── Probabilities (from physics-valid runs) ──
+        # Two distinct quantities that were previously conflated: reaching
+        # within 5% of target, and actually clearing it. `p_apogee_above_target`
+        # was being fed the 95%-of-target number, so it read optimistically.
         prob_target = float(np.sum(v_apogees >= target * 0.95)) / nv if nv > 0 else 0.0
+        prob_above_target = float(np.sum(v_apogees >= target)) / nv if nv > 0 else 0.0
         prob_recovery = float(
             sum(1 for r in pv_runs if r.final_phase == "Landed")
         ) / npv if npv > 0 else 0.0
@@ -810,12 +905,14 @@ class MonteCarloEngine(QObject):
         # below the required caliber, i.e. they would weathercock / tumble.
         # Counted across ALL runs (distinct from the numerically-diverged runs
         # already tallied in n_physics_invalid).
-        unstable_runs = [r for r in runs
+        unstable_runs = [r for r in pv_runs
                          if r.min_stability_margin < mc.min_stability_cal
                          and r.apogee > 1.0]
         n_unstable = len(unstable_runs)
-        unstable_landing_x = [getattr(r, "landing_x", 0.0) for r in unstable_runs]
-        unstable_landing_y = [getattr(r, "landing_y", 0.0) for r in unstable_runs]
+        # Only runs that actually landed have a landing point to plot.
+        unstable_landed = [r for r in unstable_runs if r.final_phase == "Landed"]
+        unstable_landing_x = [getattr(r, "landing_x", 0.0) for r in unstable_landed]
+        unstable_landing_y = [getattr(r, "landing_y", 0.0) for r in unstable_landed]
         unstable_apogee_values = [r.apogee for r in unstable_runs]
 
         # Reliability index beta = (mean - limit) / sigma
@@ -871,6 +968,8 @@ class MonteCarloEngine(QObject):
             landing_distance_mean=ldist_mean,
             landing_distance_std=ldist_std,
             landing_distance_max=ldist_max,
+            all_landing_x=landing_xs.tolist(),
+            all_landing_y=landing_ys.tolist(),
             landing_x_values=v_landing_xs.tolist(),
             landing_y_values=v_landing_ys.tolist(),
             landing_distance_values=v_landing_dists.tolist(),
@@ -894,6 +993,7 @@ class MonteCarloEngine(QObject):
             n_valid=n_valid,
             n_outliers=n_outliers,
             n_physics_invalid=n_physics_invalid,
+            n_no_landing=n_no_landing,
             n_unstable=n_unstable,
             unstable_landing_x=unstable_landing_x,
             unstable_landing_y=unstable_landing_y,
@@ -908,7 +1008,7 @@ class MonteCarloEngine(QObject):
             exceedance_probabilities=exceedance_probabilities,
 
             # Reliability metrics
-            p_apogee_above_target=prob_target,
+            p_apogee_above_target=prob_above_target,
             p_mach_below_limit=p_mach_below,
             p_accel_below_limit=p_accel_below,
             p_stability_above_limit=p_stability_above,
@@ -922,7 +1022,7 @@ class MonteCarloEngine(QObject):
         logger.info(
             f"Monte Carlo complete — {n} runs "
             f"({n_physics_invalid} physics-invalid, {n_unstable} unstable, "
-            f"{n_outliers} outliers, {n_valid} clean) | "
+            f"{n_no_landing} never landed, {n_outliers} outliers, {n_valid} clean) | "
             f"Apogee: {apogee_mean:.1f} ± {apogee_std:.1f} m | "
             f"Success: {success_pct:.1f}% | "
             f"P(target): {prob_target:.1%} | "
@@ -960,7 +1060,7 @@ class MonteCarloEngine(QObject):
 
         param_labels = {
             "wind_speed": "Wind Speed",
-            "wind_direction": "Wind Direction",
+            "wind_direction_offset": "Wind Direction",
             "dry_mass": "Dry Mass",
             "cd": "Drag Coefficient",
             "launch_angle": "Launch Angle",

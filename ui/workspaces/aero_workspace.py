@@ -9,13 +9,15 @@ from PyQt6.QtCore import Qt
 from ui.widgets.plot_widget import PlotWidget
 from physics.aerodynamics import compute_drag_coefficient
 
+from ui import theme
+
 logger = logging.getLogger("K2.AeroWS")
 
 class ValueLabel(QLabel):
     def __init__(self, t="—", parent=None):
         super().__init__(t, parent)
-        self.setStyleSheet("color: #e6edf3; font-family: 'Cascadia Code', monospace; font-size: 13px; "
-            "font-weight: 600; padding: 2px 4px; background-color: #161b22; border-radius: 4px;")
+        self.setStyleSheet(f"color: {theme.TEXT_BRIGHT}; font-family: 'Cascadia Code', monospace; font-size: 13px; "
+            f"font-weight: 600; padding: 2px 4px; background-color: {theme.PANEL}; border-radius: 4px;")
 
 
 class AeroWorkspace(QWidget):
@@ -67,7 +69,7 @@ class AeroWorkspace(QWidget):
         placeholder = QLabel("CFD module will be available in a future release.\n\n"
             "Planned features:\n• Mesh generation\n• Pressure contours\n• Flow visualization\n• External solver coupling")
         placeholder.setWordWrap(True)
-        placeholder.setStyleSheet("color: #484f58; padding: 8px;")
+        placeholder.setStyleSheet(f"color: {theme.LINE_STRONG}; padding: 8px;")
         cf.addWidget(placeholder)
         g4.setLayout(cf); ll.addWidget(g4)
 
@@ -94,7 +96,7 @@ class AeroWorkspace(QWidget):
         fineness = s.length / s.diameter if s.diameter > 0 else 10
         mach = np.linspace(0, 3, 200)
         cd = [compute_drag_coefficient(m, fineness) for m in mach]
-        self.cd_plot.update_plot(mach, cd, "CD vs Mach Number", "Mach", "CD", "#f0883e")
+        self.cd_plot.update_plot(mach, cd, "CD vs Mach Number", "Mach", "CD", theme.ACCENT)
 
     def _refresh(self, state=None):
         s = state or self.engine.state
@@ -109,10 +111,10 @@ class AeroWorkspace(QWidget):
         self.lbl_margin.setText(f"{s.stability_margin:.2f} cal")
 
         if s.stability_margin < 0.5:
-            self.lbl_status.setText("UNSTABLE"); self.lbl_status.setStyleSheet("color: #f85149; font-weight: 600;")
+            self.lbl_status.setText("UNSTABLE"); self.lbl_status.setStyleSheet(f"color: {theme.ERR}; font-weight: 600;")
         elif s.stability_margin < 1.0:
-            self.lbl_status.setText("MARGINAL"); self.lbl_status.setStyleSheet("color: #d29922; font-weight: 600;")
+            self.lbl_status.setText("MARGINAL"); self.lbl_status.setStyleSheet(f"color: {theme.WARN}; font-weight: 600;")
         elif s.stability_margin <= 2.5:
-            self.lbl_status.setText("✓ STABLE"); self.lbl_status.setStyleSheet("color: #7ee787; font-weight: 600;")
+            self.lbl_status.setText("✓ STABLE"); self.lbl_status.setStyleSheet(f"color: {theme.OK}; font-weight: 600;")
         else:
-            self.lbl_status.setText("OVERSTABLE"); self.lbl_status.setStyleSheet("color: #d29922; font-weight: 600;")
+            self.lbl_status.setText("OVERSTABLE"); self.lbl_status.setStyleSheet(f"color: {theme.WARN}; font-weight: 600;")

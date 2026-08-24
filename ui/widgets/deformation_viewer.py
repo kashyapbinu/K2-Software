@@ -28,6 +28,8 @@ from PyQt6.QtCore import Qt
 
 from ui.widgets.stress_viewer import build_rocket_regions
 
+from ui import theme
+
 logger = logging.getLogger("K2.DeformationViewer")
 
 
@@ -46,17 +48,17 @@ class DeformationViewer(QWidget):
         if not _PYVISTA:
             l = QLabel(f"3D viewer unavailable: {_PV_ERR}")
             l.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            l.setStyleSheet("color:#f85149;padding:20px;")
+            l.setStyleSheet(f"color:{theme.ERR};padding:20px;")
             lay.addWidget(l)
             self.plotter = None
             return
         self.plotter = QtInteractor(self)
-        self.plotter.set_background("#0d1117", top="#161b22")
+        self.plotter.set_background(theme.BG, top=theme.PANEL)
         self.plotter.add_axes(interactive=False, line_width=2)
         lay.addWidget(self.plotter.interactor, 1)
         self._empty = QLabel("No Results Available\n\nRun Static Analysis to view deformation.")
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty.setStyleSheet("color:#6e7681;font-size:14px;background:transparent;")
+        self._empty.setStyleSheet(f"color:{theme.TEXT_FAINT};font-size:14px;background:transparent;")
         self._empty.setParent(self.plotter.interactor)
         self._empty.show()
 
@@ -127,14 +129,14 @@ class DeformationViewer(QWidget):
         deformed["Displacement (mm)"] = dmag * self._max_defl_mm
 
         # Ghost (undeformed) reference
-        self.plotter.add_mesh(base, color="#30363d", opacity=0.25,
+        self.plotter.add_mesh(base, color=theme.LINE, opacity=0.25,
                               style="wireframe", line_width=1, name="ghost")
         # Deformed, coloured by displacement
         self.plotter.add_mesh(
             deformed, scalars="Displacement (mm)", cmap="turbo",
             smooth_shading=True, specular=0.3, name="deformed",
             scalar_bar_args=dict(title="Displacement (mm)", title_font_size=12,
-                                 label_font_size=10, color="#c9d1d9",
+                                 label_font_size=10, color=theme.TEXT,
                                  position_x=0.86, position_y=0.12,
                                  width=0.06, height=0.7, fmt="%.2f", n_labels=6))
         # Peak marker at the tip (max displacement)
@@ -142,8 +144,8 @@ class DeformationViewer(QWidget):
         self.plotter.add_point_labels(
             [deformed.points[tip_idx]],
             [f"Max: {self._max_defl_mm:.2f} mm  (shape ×{self._exag:.0f}, auto-fit)"],
-            font_size=11, text_color="#ffffff", point_color="#ff3b30",
-            point_size=8, shape_color="#161b22", shape_opacity=0.7,
+            font_size=11, text_color=theme.TEXT_BRIGHT, point_color="#ff3b30",
+            point_size=8, shape_color=theme.PANEL, shape_opacity=0.7,
             always_visible=True, name="defl_label")
 
         self._side_view()

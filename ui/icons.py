@@ -8,7 +8,7 @@ and buttons.
 Usage:
     from ui.icons import icon
     action.setIcon(icon("save"))
-    btn.setIcon(icon("run", color="#3fb950"))
+    btn.setIcon(icon("run", color="#5fb87a"))
 
 Degrades gracefully: if qtawesome is missing the calls return a null
 QIcon so the UI still runs (just without icons).
@@ -22,6 +22,8 @@ os.environ.setdefault("QT_API", "pyqt6")
 import logging
 from PyQt6.QtGui import QIcon
 
+from ui import theme
+
 logger = logging.getLogger("K2.Icons")
 
 try:
@@ -32,8 +34,17 @@ except Exception as e:  # pragma: no cover - optional dependency
     _HAS_QTA = False
     logger.warning("qtawesome unavailable (%s) — UI icons disabled", e)
 
-# Default tint for the dark theme.
-DEFAULT_COLOR = "#c9d1d9"
+# Fallback tint; the live default follows the active palette.
+DEFAULT_COLOR = "#d8d8dc"
+
+
+def _default_color() -> str:
+    """Icon tint for the palette in force right now."""
+    try:
+        from ui import theme
+        return theme.TEXT
+    except Exception:
+        return DEFAULT_COLOR
 
 # Semantic key -> FontAwesome spec. Colours can be overridden per-call.
 _MAP = {
@@ -80,6 +91,23 @@ _MAP = {
     "inject":        "fa5s.sign-in-alt",
     "map_fem":       "fa5s.project-diagram",
 
+    # ── Rocket components (design palette + tree) ──
+    "comp_nosecone":   "fa5s.location-arrow",
+    "comp_bodytube":   "fa5s.grip-lines-vertical",
+    "comp_transition": "fa5s.compress-alt",
+    "comp_finset":     "fa5s.fighter-jet",
+    "comp_nozzle":     "fa5s.filter",
+    "comp_innertube":  "fa5s.circle-notch",
+    "comp_ring":       "fa5s.dot-circle",
+    "comp_bulkhead":   "fa5s.stop-circle",
+    "comp_block":      "fa5s.square",
+    "comp_parachute":  "fa5s.parachute-box",
+    "comp_cord":       "fa5s.grip-lines",
+    "comp_mass":       "fa5s.weight-hanging",
+    "comp_lug":        "fa5s.minus-square",
+    "comp_railbutton": "fa5s.circle",
+    "comp_stage":      "fa5s.layer-group",
+
     # ── Analysis / structures ──
     "static":        "fa5s.wrench",
     "modal":         "fa5s.music",
@@ -119,7 +147,7 @@ def icon(key, color=None):
         logger.debug("no icon mapped for key %r", key)
         return QIcon()
     try:
-        return qta.icon(spec, color=color or DEFAULT_COLOR)
+        return qta.icon(spec, color=color or _default_color())
     except Exception as e:  # pragma: no cover
         logger.debug("icon(%r) failed: %s", key, e)
         return QIcon()

@@ -12,10 +12,44 @@ Approach:
   6. Run quality checks and export SU2
 
 Boundary Layer Strategy:
+  TWO paths. ``bl_prisms=False`` (default) is the tet-only mesh described below.
+  ``bl_prisms=True`` builds real prism layers via :func:`_build_bl_mesh`.
+
+  Prism layers ARE reachable on this domain — measured 2026-08-19, against the
+  conclusion the rest of this docstring used to draw. What was missing was not a
+  Gmsh capability but a sequence:
+
+  * The extrusion source must be a **reparametrised** surface
+    (``classifySurfaces(forReparametrization=True)`` + ``createGeometry()``).
+    Raw discrete surfaces fail with "Could not find extruded node", and so do
+    exact OCC surfaces — which corrects the claim below that extrusion "runs"
+    on the OCC domain. It runs; it never yields a meshable layer.
+  * The farfield box must be built **after** the extrusion. Built before, its
+    entities make ``extrudeBoundaryLayer`` fail "Could not replace surface N in
+    Coherence" on some tessellations and pass on others, which looks exactly
+    like a fragile dependence on STL resolution and is not.
+  * The outer region must be ``addVolume([box_loop, top_loop])`` — the box with
+    the stack's outer shell as a HOLE. That is what makes the overlap failure
+    below structurally impossible rather than merely detected after the fact.
+
+  Measured on the finned test rocket at M=0.5, Re=1.16e7: y+ median 0.41 with
+  100% of wall points below 1 (tet-only: ~3500), Cf median 2.9e-3 against a
+  1.9e-3 flat-plate reference, wall manifoldness 0 buried of 15,244, and SU2
+  reaching Exit Success with rms[Rho] falling 2.7 decades and CD stationary.
+
+  Known limit, not yet fixed: the workable STL-carrier resolution is not
+  contiguous. Too fine fails ``classifySurfaces``; some values fail
+  "PLC Error: A segment and a facet intersect", which is the stack
+  self-intersecting where extrusion fronts converge at fin trailing edges and
+  tips (Gmsh's BL has no convex-corner treatment). Both raise rather than
+  falling back, deliberately — see _build_bl_mesh.
+
+  ---- The tet-only path, and why it is what it is ----
+
   Tet-only with aggressive near-wall refinement, from the tiered distance
-  fields alone. Prism layers remain out of reach on this domain, and the reason
-  is more specific than "extrudeBoundaryLayer crashes" — that claim was
-  re-tested on Gmsh 4.15.2 and is no longer what happens:
+  fields alone. Prism layers were long believed out of reach on this domain,
+  and the reason is more specific than "extrudeBoundaryLayer crashes" — that
+  claim was re-tested on Gmsh 4.15.2 and is no longer what happens:
 
   * The extrusion itself RUNS. On the OCC boolean-cut domain, at coarse, medium
     and fine, on the finned cone-tipped rocket, it produces attached prisms
@@ -36,13 +70,15 @@ Boundary Layer Strategy:
     "Pyramid top vertex already classified ... non-manifold quad boundaries not
     supported yet". The prism stack's quad faces cannot bound a tet region.
 
-  So the conclusion the module reached before still holds, but the useful
-  version of it is: extrusion is not the blocker, the volume rebuild is, and an
-  extruded mesh that is never volume-rebuilt is WORSE than no prisms because
-  nothing downstream reports it as broken. _check_mesh_quality now audits wall
-  manifoldness for exactly this, so a future attempt fails loudly.
+  The useful version of that: an extruded mesh that is never volume-rebuilt is
+  WORSE than no prisms, because nothing downstream reports it as broken.
+  _check_mesh_quality audits wall manifoldness for exactly this, so a failed
+  attempt fails loudly. (The rebuild is no longer the blocker it looks like
+  here — bounding the tets with a surface-loop hole sidesteps the quad problem
+  entirely. See the top of this docstring.)
 
-  Consequences, unchanged: the first cell sits near y+ 3500, far outside the
+  Consequences on the tet-only path: the first cell sits near y+ 3500, far
+  outside the
   30 < y+ < 300 band a wall function can invert, so neither a low-Re model nor
   a wall model has a valid first cell. Skin friction is under-resolved either
   way — a known accuracy limit, and the reason the sweep offers a hybrid Euler
@@ -70,6 +106,13 @@ from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("K2.CFD.Meshing")
+
+# Bump whenever a change here would produce a different mesh from identical
+# inputs. Callers that cache meshes (the validation sweeps) mix this into their
+# cache key, so an old mesh is never silently reused across a mesher change —
+# which is how an entire AGARD-B sweep once "re-ran" and reproduced the previous
+# numbers to six digits after the size fields had been rewritten.
+MESHER_REVISION = "2026-08-19-prism-bl-optin"
 
 # Refinement levels: mesh size near rocket = fraction of body radius
 _REFINEMENT_FACTORS = {
@@ -121,6 +164,10 @@ def build_wind_tunnel_mesh(
     domain_radius_scale: float = 20.0,
     bl_layers: int = 15,
     bl_growth: float = 1.2,
+    bl_prisms: bool = False,
+    bl_first_height: float | None = None,
+    bl_tessellation: float | None = None,
+    bl_max_apex_radius: float | None = None,
     geometry_dict: dict = None,
     custom_wall_size: float | None = None,
     target_element_count: int | None = None,
@@ -130,6 +177,7 @@ def build_wind_tunnel_mesh(
     cad_units: str = "auto",
     cad_wrap: bool = False,
     cad_wrap_resolution: str = "medium",
+    cad_curvature_elements: int | None = None,
 ) -> Path:
     """
     Generate a volumetric SU2 mesh with prism boundary layers using Gmsh.
@@ -154,6 +202,7 @@ def build_wind_tunnel_mesh(
             cad_units=cad_units,
             cad_wrap=cad_wrap,
             cad_wrap_resolution=cad_wrap_resolution,
+            cad_curvature_elements=cad_curvature_elements,
         )
 
     try:
@@ -243,11 +292,24 @@ def build_wind_tunnel_mesh(
     gmsh.model.add("K2_CFD")
 
     try:
-        _build_mesh(
-            gmsh, rocket, tun_len, tun_radius,
-            lc_far, lc_rocket, output_path,
-            bl_layers, bl_growth,
-        )
+        if bl_prisms:
+            # Opt-in. The tet-only path stays the default until the AGARD-B,
+            # ONERA M6 and cone benchmarks have been re-run on prism meshes;
+            # bl_layers/bl_growth are honoured here and ignored by the other.
+            _build_bl_mesh(
+                gmsh, rocket, tun_len, tun_radius,
+                lc_far, lc_rocket, output_path,
+                bl_layers, bl_growth,
+                bl_first_height=bl_first_height,
+                bl_tessellation=bl_tessellation,
+                bl_max_apex_radius=bl_max_apex_radius,
+            )
+        else:
+            _build_mesh(
+                gmsh, rocket, tun_len, tun_radius,
+                lc_far, lc_rocket, output_path,
+                bl_layers, bl_growth,
+            )
     finally:
         gmsh.finalize()
 
@@ -259,21 +321,20 @@ def build_wind_tunnel_mesh(
 
 # ── Core meshing logic ────────────────────────────────────────────────────────
 
-def _build_mesh(
-    gmsh, rocket, tun_len, tun_radius, lc_far, lc_rocket, output_path,
-    bl_layers, bl_growth,
-):
-    """
-    Build wind-tunnel fluid volume and mesh it with prism boundary layers.
+def _build_rocket_solid(gmsh, rocket, lc_rocket):
+    """Build the fused rocket solid in OCC; return ``(volume_dimtags, profile)``.
 
-    Coordinate convention (CFD frame):
-        +X  = freestream flow direction
-        Nose tip  at x = 0          (faces the incoming flow)
-        Nozzle    at x = total_L    (in the wake)
-        Body axis = X axis
+    The clamped profile comes back with the solid because callers size their
+    refinement regions off the true maximum body radius, which the profile
+    carries and ``rocket["body_radius"]`` does not (a boattail or a flare makes
+    them differ).
+
+    Shared by the tet-only path and the prism-boundary-layer path so the two
+    always mesh the identical outer mold line. Leaves the solid in the model,
+    synchronized; the caller decides whether to cut it out of a tunnel or to
+    tessellate it as a standalone shell.
     """
     occ = gmsh.model.occ
-
     body_r  = rocket["body_radius"]
     body_L  = rocket["body_length"]
     nose_r  = rocket["nose_radius"]
@@ -288,6 +349,7 @@ def _build_mesh(
     # boattails — none of which the cone+cylinder fallback below can express.
     profile = rocket.get("profile") or []
     profile = [(float(p[0]), float(p[1])) for p in profile if len(p) >= 2]
+    profile = _clamp_profile_tip(profile, lc_rocket)
     body_built = False
     if len(profile) >= 2:
         try:
@@ -340,6 +402,32 @@ def _build_mesh(
     occ.synchronize()
     logger.info(f"Rocket solid created: {len(rocket_solid)} volume(s)  "
                 f"[nose@x=0, nozzle@x={total_L:.3f}]")
+    return rocket_solid, profile
+
+
+def _build_mesh(
+    gmsh, rocket, tun_len, tun_radius, lc_far, lc_rocket, output_path,
+    bl_layers, bl_growth,
+):
+    """
+    Build wind-tunnel fluid volume and mesh it with prism boundary layers.
+
+    Coordinate convention (CFD frame):
+        +X  = freestream flow direction
+        Nose tip  at x = 0          (faces the incoming flow)
+        Nozzle    at x = total_L    (in the wake)
+        Body axis = X axis
+    """
+    occ = gmsh.model.occ
+
+    body_r  = rocket["body_radius"]
+    body_L  = rocket["body_length"]
+    nose_r  = rocket["nose_radius"]
+    nose_L  = rocket["nose_length"]
+    total_L = rocket["length"]
+
+    # ── 1. Build rocket solid ─────────────────────────────────────────────────
+    rocket_solid, profile = _build_rocket_solid(gmsh, rocket, lc_rocket)
 
     # ── 2. Wind tunnel domain ─────────────────────────────────────────────────
     upstream_x     = -5.0 * total_L
@@ -524,16 +612,40 @@ def _build_mesh(
     gmsh.model.mesh.field.setNumber(f_wake, "VIn",   lc_wake)
     gmsh.model.mesh.field.setNumber(f_wake, "VOut",  lc_far)
 
+    # ── 5e. Curvature-driven edge refinement ──────────────────────────────────
+    # The boxes above are blunt instruments: f_fin asks for 0.7·lc_rocket
+    # everywhere inside the fin envelope, which sizes the panel faces but says
+    # nothing about the *edge*. A fin leading edge is where the suction peak
+    # that carries the lift forms, and on a swept panel it is the one feature
+    # whose radius is orders of magnitude below the wall size.
+    #
+    # Measured on AGARD-B (a delta wing spanning 4 body diameters): with the box
+    # fields alone the SU2 lift-curve slope came out 10% low at M=0.5 and 18%
+    # low at M=0.8 against the AEDC tunnel data, and the deficit grew when the
+    # mesh was refined uniformly — shape converging, circulation not.
+    #
+    # This path refines off the model's own edge curves rather than off measured
+    # STL curvature (which is what the external-CAD path has to do, having no
+    # exact geometry). Tried the STL route here first and it is the wrong tool
+    # for a B-Rep: on AGARD-B it selected 1,388 of 4,818 surface points — the
+    # whole ogive as well as the wing — and seeding those into the OCC model left
+    # gmsh still inside generate(2) after 20 minutes. The wall curves are exactly
+    # the sharp features, cost nothing to enumerate, and gmsh samples them
+    # directly.
+    f_feature = _edge_refinement_field(gmsh, rocket_wall_surfs, lc_rocket, lc_far)
+
     # Combine: take minimum size from all fields
+    _fields = [f_thr, f_nose, f_fin, f_wake]
+    if f_feature is not None:
+        _fields.append(f_feature)
     f_min = gmsh.model.mesh.field.add("Min")
-    gmsh.model.mesh.field.setNumbers(
-        f_min, "FieldsList", [f_thr, f_nose, f_fin, f_wake]
-    )
+    gmsh.model.mesh.field.setNumbers(f_min, "FieldsList", _fields)
     gmsh.model.mesh.field.setAsBackgroundMesh(f_min)
 
     logger.info(
         f"Mesh fields: wall={lc_rocket:.4f}  nose={lc_nose:.4f}  "
         f"fin={lc_fin:.4f}  wake={lc_wake:.4f}  far={lc_far:.4f}"
+        + ("" if f_feature is None else "  + curvature edge refinement")
     )
 
     # ── 6. Generate 2D surface mesh ───────────────────────────────────────────
@@ -618,23 +730,68 @@ def _build_mesh(
     # Delaunay 3D (Algorithm3D=1) is primary: it gives the proven full-fidelity
     # "fine" mesh (~826k tets). HXT (the multithreaded alternative) only "wins"
     # by coarsening the mesh, which hurts transonic shock resolution, so it is
-    # NOT used as primary. It stays only as the robustness fallback: if Delaunay
-    # intermittently aborts (exit-1) on thin fin-TE / nose-tip slivers, retry
-    # with HXT + a coarser size floor so a valid mesh still comes out.
-    try:
-        gmsh.option.setNumber("Mesh.Algorithm3D", 1)   # Delaunay 3D (full-fidelity fine)
-        gmsh.model.mesh.generate(3)
-    except Exception as e:
-        logger.warning(
-            f"3D mesh (Delaunay) failed: {e}. Retrying with HXT + coarser floor."
-        )
-        gmsh.option.setNumber("Mesh.MeshSizeMin", lc_rocket * 0.15)
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", lc_rocket * 0.15)
-        gmsh.option.setNumber("Mesh.Algorithm3D", 10)  # HXT — robust on bad boundaries
-        gmsh.model.mesh.clear()
-        gmsh.model.mesh.generate(2)
-        gmsh.model.mesh.generate(3)
-        logger.info("3D mesh recovered via HXT fallback.")
+    # NOT used as primary. It stays as the first robustness rung: if Delaunay
+    # aborts on thin fin-TE / nose-tip slivers, retry with a coarser size floor
+    # so a valid mesh still comes out.
+    #
+    # "Try Delaunay, else HXT" was not enough, and the way it failed is the
+    # reason this is a verified ladder now: on the sharp 10° validation cone
+    # Delaunay raised "Invalid boundary mesh (overlapping facets) on surface 2",
+    # HXT then *completed without raising and produced zero elements*, and a
+    # 40-byte .su2 was written and announced as ready. The failure only surfaced
+    # inside SU2 as "0 grid points ... doesn't have any definition for marker".
+    #
+    # Each rung changes the thing that actually matters: first the size floor,
+    # then the 2D algorithm (MeshAdapt is far more forgiving of self-overlapping
+    # facets than Frontal-Delaunay), then the element size itself. Every rung is
+    # verified by element count, because gmsh reports success on an empty mesh.
+    # Rung 0 reuses the 2D mesh generated in step 6.
+    ladder = [
+        ("Delaunay 3D",             None, 1,  1.00, 0.05),
+        ("HXT + coarser floor",     6,    10, 1.00, 0.15),
+        ("MeshAdapt 2D + Delaunay", 1,    1,  1.00, 0.05),
+        ("MeshAdapt 2D + HXT",      1,    10, 1.00, 0.15),
+        ("MeshAdapt 2D, finer",     1,    1,  0.25, 0.05),
+    ]
+
+    def _n_tets() -> int:
+        try:
+            _t, _g, _ = gmsh.model.mesh.getElements(3)
+            return sum(len(g) for g in _g)
+        except Exception:                                # noqa: BLE001
+            return 0
+
+    meshed = False
+    for i, (label, a2d, a3d, scale, floor_frac) in enumerate(ladder):
+        try:
+            if i > 0:
+                gmsh.model.mesh.clear()
+                gmsh.option.setNumber("Mesh.Algorithm", a2d)
+            gmsh.option.setNumber("Mesh.Algorithm3D", a3d)
+            _floor = lc_rocket * scale * floor_frac
+            gmsh.option.setNumber("Mesh.MeshSizeMin", _floor)
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMin", _floor)
+            if scale != 1.0:
+                gmsh.model.mesh.field.setNumber(f_thr, "SizeMin", lc_rocket * scale)
+                gmsh.model.mesh.field.setAsBackgroundMesh(f_min)
+            if i > 0:
+                gmsh.model.mesh.generate(2)
+            gmsh.model.mesh.generate(3)
+            n = _n_tets()
+            if n > 0:
+                logger.info(f"3D mesh built with {label}: {n:,} elements"
+                            + ("" if i == 0 else f" (attempt {i + 1})"))
+                meshed = True
+                break
+            _t2, _g2, _ = gmsh.model.mesh.getElements(2)
+            logger.warning(f"{label} completed but produced no elements — "
+                           f"trying the next strategy. "
+                           f"(2D elements present: {sum(len(g) for g in _g2):,})")
+        except Exception as e:                           # noqa: BLE001, PERF203
+            logger.warning(f"{label} failed: {e}")
+
+    if not meshed:
+        logger.error("Every meshing strategy failed to produce elements.")
 
     # ── 8b. Post-generation mesh optimization ─────────────────────────────────
     # Smooth and untangle distorted elements (especially BL prisms at junctions)
@@ -664,6 +821,17 @@ def _build_mesh(
         except Exception:
             pass
         gmsh.model.addPhysicalGroup(3, all_vol_tags, name="fluid")
+
+    # An empty volume mesh is a FAILURE, not a result — see the ladder above.
+    # Writing it produced a 0.00 MB .su2 that SU2 loaded as "0 grid points" and
+    # then rejected with an unrelated-looking marker error.
+    if not meshed:
+        raise RuntimeError(
+            "3D meshing produced no elements after every strategy. The fluid "
+            "volume is not closed — the body surface self-intersects, or a "
+            "feature (fin trailing edge, nose tip) is too thin to mesh at this "
+            "refinement. Try a coarser refinement level."
+        )
 
     su2_path = output_path.with_suffix(".su2")
     gmsh.write(str(su2_path))
@@ -712,6 +880,582 @@ def _geo_box(gmsh, x0, y0, z0, x1, y1, z1) -> tuple[list, int]:
     return faces, surf_loop
 
 
+# ── Prism boundary-layer meshing ──────────────────────────────────────────────
+
+# 25 degrees, NOT the 40 that cfd/external_geometry.py uses for CAD import.
+#
+# Measured on the parametric rocket: at 40 deg, classifySurfaces produces one
+# patch carrying the whole aft body AND all four fin roots. Remeshing that
+# single patch takes over 417 SECONDS (every other patch finishes in under 1.5)
+# and it is what made the BL path look like a hang. At 25 deg the same shell
+# splits into 65 patches instead of 39 and the entire 2D remesh takes 1.2 s.
+# The curve angle makes no measurable difference either way, so it stays at the
+# don't-split-curves default.
+_BL_CLASSIFY_ANGLE_DEG = 25.0
+_BL_CLASSIFY_CURVE_ANGLE_DEG = 180.0
+
+
+def _bl_heights(first: float, growth: float, n: int) -> list:
+    """Cumulative offsets for ``n`` geometrically growing layers."""
+    h, cum, out = float(first), 0.0, []
+    for _ in range(int(n)):
+        cum += h
+        out.append(cum)
+        h *= float(growth)
+    return out
+
+
+def _bl_thickness_cap(rocket, profile) -> float:
+    """Largest total stack thickness this geometry can carry, or inf.
+
+    Gmsh's boundary layer has no convex-corner treatment: where two extrusion
+    fronts advance toward each other they simply pass through one another, and
+    the failure surfaces later as "PLC Error: A segment and a facet intersect"
+    with nothing pointing at the cause.
+
+    Two places on a rocket close on themselves:
+
+    The one this caps is the FIN: both faces extrude toward the mid-plane, so
+    each side may use less than half the thickness. Measured - a 2.0 mm fin with
+    a 1.05 mm stack per side fails exactly here. The 0.4 margin leaves room for
+    the stack to be non-uniform where fronts merge; it is not derived.
+
+    The nose apex is the other such place and is deliberately NOT capped here.
+    Capping by the apex throttles the stack over the entire body to suit a few
+    square millimetres, and it does not even work: inversions at the apex are not
+    monotonic in the cap (see _bl_apex_clamp). The apex is handled by blunting it
+    just enough instead.
+    """
+    limits = []
+    fin_t = float(rocket.get("fin_thickness") or 0.0)
+    if fin_t > 0.0 and int(rocket.get("fin_count") or 0) > 0:
+        limits.append(0.4 * fin_t / 2.0)
+    return min(limits) if limits else float("inf")
+
+
+# Apex radius needed per unit of stack thickness. Measured by sweeping the apex
+# against a fixed 1.736e-4 m stack and counting inverted prisms:
+#     apex 0.37 mm (ratio 0.47) -> 20 inverted
+#     apex 0.80 mm (ratio 0.22) ->  0
+#     apex 1.50 mm (ratio 0.12) ->  5      <- NOT monotonic
+#     apex 3.00 mm (ratio 0.06) ->  0
+#     apex 6.00 mm (ratio 0.03) ->  0
+# So no ratio is provably safe and this is a heuristic that happens to clear the
+# measured cases; _count_inverted is the actual guarantee. 5 is the smallest
+# multiple that worked, chosen to keep the geometric change small.
+_BL_APEX_RADIUS_PER_THICKNESS = 5.0
+
+
+def _bl_apex_clamp(rocket: dict, total_thickness: float) -> dict:
+    """Return a copy of ``rocket`` whose nose apex is blunt enough to wrap.
+
+    A stack advancing off a cone tip converges circumferentially, and once the
+    tip is finer than the stack the innermost prisms turn inside out. Widening
+    the apex is a REAL geometric change to the body being validated - it is
+    logged, and kept as small as the measurements allow - but it is a smaller
+    lie than a boundary layer with inverted cells in it, and the tet path
+    already blunts the same apex (``_clamp_profile_tip``) for its own reasons.
+    """
+    profile = rocket.get("profile") or []
+    if not profile:
+        return rocket
+    need = _BL_APEX_RADIUS_PER_THICKNESS * total_thickness
+    apex_r = float(profile[0][1])
+    if apex_r >= need:
+        return rocket
+    out = dict(rocket)
+    prof = [list(p) for p in profile]
+    prof[0][1] = need
+    out["profile"] = [tuple(p) for p in prof]
+    logger.warning(
+        f"Prism BL blunted the nose apex {apex_r:.3e} m -> {need:.3e} m "
+        f"({_BL_APEX_RADIUS_PER_THICKNESS:.0f}x the {total_thickness:.3e} m "
+        f"stack). A tip finer than the stack inverts the innermost prisms. "
+        f"THIS CHANGES THE GEOMETRY BEING SOLVED - the body is no longer the one "
+        f"that was designed. Measured on the parametric test rocket at fixed "
+        f"stack and flow, blunting 0.80 -> 3.37 mm moved CD by +5.17%, so the "
+        f"error scales with how much tip is removed. Pass bl_max_apex_radius to "
+        f"bound it (costs boundary-layer coverage), and do not trust this mesh "
+        f"for a sharp-tipped validation case such as a Taylor-Maccoll cone."
+    )
+    return out
+
+
+def _count_inverted(gmsh) -> int:
+    """Number of 3D elements with a negative scaled Jacobian (SICN < 0)."""
+    import numpy as np
+
+    n = 0
+    try:
+        for _, vol in gmsh.model.getEntities(3):
+            types, tags, _ = gmsh.model.mesh.getElements(3, vol)
+            for _et, tg in zip(types, tags):
+                if not len(tg):
+                    continue
+                q = np.asarray(
+                    gmsh.model.mesh.getElementQualities(list(tg), "minSICN")
+                )
+                n += int((q < 0).sum())
+    except Exception as e:                                   # noqa: BLE001
+        logger.warning(f"Inverted-element count could not run: {e}")
+        return 0
+    return n
+
+
+def _audit_bl_direction(gmsh, wall_surfs, top_surfs) -> Optional[bool]:
+    """True when the stack grew into the fluid, False when it grew into the body.
+
+    Measures the volume each closed shell encloses (divergence theorem over its
+    triangles). The BL top must enclose MORE than the wall it grew from.
+
+    This is not a formality. Every topology check — element counts, wall
+    manifoldness, Gmsh's own quality metrics — passes identically for a stack
+    extruded the wrong way, because an inward stack is still a perfectly valid
+    mesh of the wrong region. Only the geometry tells them apart.
+    """
+    import numpy as np
+
+    try:
+        ntags, ncoord, _ = gmsh.model.mesh.getNodes()
+        pos = {int(t): ncoord[3 * i:3 * i + 3] for i, t in enumerate(ntags)}
+
+        def enclosed(surfs):
+            v = 0.0
+            for s in surfs:
+                types, _, nodes = gmsh.model.mesh.getElements(2, s)
+                for et, nd in zip(types, nodes):
+                    _, _, _, nn, _, _ = gmsh.model.mesh.getElementProperties(et)
+                    if nn != 3:
+                        continue
+                    tri = np.asarray(nd, dtype=np.int64).reshape(-1, 3)
+                    a = np.array([pos[int(i)] for i in tri[:, 0]])
+                    b = np.array([pos[int(i)] for i in tri[:, 1]])
+                    c = np.array([pos[int(i)] for i in tri[:, 2]])
+                    v += float(np.sum(np.einsum("ij,ij->i", a, np.cross(b, c))))
+            return abs(v) / 6.0
+
+        v_wall, v_top = enclosed(wall_surfs), enclosed(top_surfs)
+        logger.info(
+            f"BL direction: wall encloses {v_wall:.6g} m^3, stack top encloses "
+            f"{v_top:.6g} m^3"
+        )
+        return v_top > v_wall
+    except Exception as e:                                   # noqa: BLE001
+        logger.warning(f"BL direction audit could not run: {e}")
+        return None
+
+
+def _build_bl_mesh(
+    gmsh, rocket, tun_len, tun_radius, lc_far, lc_rocket, output_path,
+    bl_layers, bl_growth, bl_first_height=None, bl_tessellation=None,
+    bl_max_apex_radius=None,
+):
+    """Mesh the wind tunnel with real prism boundary layers.
+
+    Spiked and measured 2026-08-19. The route is narrow and every step in it is
+    load-bearing; the module docstring records what was tried and rejected.
+
+    1. Build the rocket in OCC and tessellate it to an STL. The STL is a
+       TOPOLOGY CARRIER — its resolution is not the wall resolution, which comes
+       from the size field in step 6. It only has to be coarse enough for
+       ``classifySurfaces`` to parametrise and fine enough to keep the shape.
+    2. Re-import it and re-topologise with ``forReparametrization=True``.
+       Extruding a boundary layer needs analytic patches: raw discrete surfaces
+       AND exact OCC surfaces both fail with "Could not find extruded node".
+    3. Extrude the stack off the reparametrised wall.
+    4. ONLY THEN build the farfield box. Built first, its entities make
+       ``extrudeBoundaryLayer`` fail "Could not replace surface N in Coherence"
+       on some tessellations and pass on others.
+    5. Outer volume = box loop with the BL-top loop as a HOLE. The tets are
+       therefore structurally unable to refill the boundary layer — which is the
+       failure the previous attempt shipped, undetected, for months.
+    """
+    import tempfile
+
+    total_L = rocket["length"]
+    body_r = rocket["body_radius"]
+
+    tess = bl_tessellation or lc_rocket
+    first_h = bl_first_height
+    if first_h is None or first_h <= 0.0:
+        # No flow state here to target a y+ with. Callers that want a resolved
+        # wall must pass bl_first_height, normally
+        # cfd.boundary_layer.predict_wall_yplus(...)["spacing_for_yplus_1"].
+        first_h = lc_rocket * 1e-3
+        logger.warning(
+            f"No bl_first_height given — defaulting to {first_h:.3e} m "
+            f"(lc_rocket/1000). This is a geometric guess, NOT a y+ target; "
+            f"pass spacing_for_yplus_1 from predict_wall_yplus() to resolve the "
+            f"wall on purpose."
+        )
+
+    # ── 1. Size the stack, then build a solid that can carry it ───────────────
+    #
+    # Order matters: how blunt the nose has to be depends on the final stack
+    # thickness, so the layer budget is settled BEFORE the geometry is built.
+    #
+    # Trim the stack to what the thinnest feature can carry. Dropping whole
+    # layers keeps the requested first-layer height — which is what sets y+ and
+    # is the entire point — and gives up only the outer, coarsest layers.
+    n_layers = int(bl_layers)
+    heights = _bl_heights(first_h, bl_growth, n_layers)
+    cap = _bl_thickness_cap(rocket, rocket.get("profile") or [])
+    if heights[-1] > cap:
+        kept = [h for h in heights if h <= cap]
+        if not kept:
+            raise RuntimeError(
+                f"Prism BL cannot fit this geometry: even one layer of "
+                f"{first_h:.3e} m exceeds the {cap:.3e} m the thinnest feature "
+                f"can carry (0.4 x fin half-thickness). Reduce "
+                f"bl_first_height, or thicken the fins."
+            )
+        logger.warning(
+            f"Prism BL trimmed {n_layers} layers -> {len(kept)}: the full stack "
+            f"({heights[-1]:.3e} m) exceeds the {cap:.3e} m this geometry can "
+            f"carry before extrusion fronts collide at the fin mid-plane. "
+            f"First-layer height is unchanged, so the y+ target still "
+            f"holds; the stack just spans less of the boundary layer."
+        )
+        heights, n_layers = kept, len(kept)
+
+    logger.info(
+        f"Prism BL: {n_layers} layers, first={first_h:.3e} m, growth={bl_growth}, "
+        f"total={heights[-1]:.4e} m (fin cap {cap:.3e} m); "
+        f"STL carrier at {tess:.4g} m"
+    )
+
+    # Bound the geometric damage, if the caller asked for a bound.
+    #
+    # The apex has to be blunted to about 5x the stack thickness, so the stack
+    # is what sets how much of the nose is thrown away, and the two trade
+    # directly. Measured on the parametric rocket at fixed stack and flow:
+    # blunting 0.80 -> 3.37 mm moved CD by +5.17%. A sharp-nosed validation case
+    # wants that bound tight and will pay for it in boundary-layer coverage; a
+    # real airframe usually does not care. Trimming layers is the currency.
+    if bl_max_apex_radius and bl_max_apex_radius > 0:
+        while (len(heights) > 1
+               and _BL_APEX_RADIUS_PER_THICKNESS * heights[-1] > bl_max_apex_radius):
+            heights = heights[:-1]
+        n_layers = len(heights)
+        need = _BL_APEX_RADIUS_PER_THICKNESS * heights[-1]
+        if need > bl_max_apex_radius:
+            raise RuntimeError(
+                f"Prism BL cannot honour bl_max_apex_radius={bl_max_apex_radius:.3e} m: "
+                f"even a single {first_h:.3e} m layer needs the apex blunted to "
+                f"{need:.3e} m. Lower bl_first_height or raise the bound."
+            )
+        logger.info(
+            f"Prism BL held to bl_max_apex_radius={bl_max_apex_radius:.3e} m: "
+            f"{n_layers} layers, stack {heights[-1]:.3e} m, apex {need:.3e} m"
+        )
+
+    rocket = _bl_apex_clamp(rocket, heights[-1])
+    rocket_solid, profile = _build_rocket_solid(gmsh, rocket, lc_rocket)
+
+    # Export the solid's OWN boundary, not every surface in the model.
+    #
+    # Revolving a meridian through 2*pi leaves seam faces inside the OCC solid.
+    # They are interior, so they bound nothing — but they are still 2D entities,
+    # and tessellating them into the carrier makes it non-manifold: the STL
+    # comes back with an edge incident to three triangles and classifySurfaces
+    # rejects it ("Wrong topology of triangulation for parametrization"). The
+    # tet-only path dodges this by taking the FLUID volume's boundary after the
+    # boolean cut (step 4 there); there is no cut here, so take the solid's.
+    _bnd = gmsh.model.getBoundary(
+        [(3, v[1]) for v in rocket_solid],
+        combined=True, oriented=False, recursive=False,
+    )
+    shell_surfs = [abs(tag) for dim, tag in _bnd if dim == 2]
+    if not shell_surfs:
+        raise RuntimeError("Prism BL meshing failed: rocket solid has no boundary.")
+    gmsh.model.addPhysicalGroup(2, shell_surfs, name="body_shell")
+    logger.info(f"STL carrier: {len(shell_surfs)} outer surface(s) of the solid")
+
+    gmsh.option.setNumber("Mesh.MeshSizeMin", tess * 0.3)
+    gmsh.option.setNumber("Mesh.MeshSizeMax", tess)
+    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 20)
+    gmsh.model.mesh.generate(2)
+    stl_dir = tempfile.mkdtemp(prefix="k2_bl_")
+    stl_path = str(Path(stl_dir) / "bl_carrier.stl")
+    gmsh.option.setNumber("Mesh.SaveAll", 0)   # physical groups only
+    gmsh.write(stl_path)
+
+    # ── 2. Re-import and reparametrise ────────────────────────────────────────
+    gmsh.model.remove()
+    gmsh.model.add("K2_CFD_BL")
+    gmsh.merge(stl_path)
+    gmsh.model.mesh.removeDuplicateNodes()
+    ang = math.radians(_BL_CLASSIFY_ANGLE_DEG)
+    cang = math.radians(_BL_CLASSIFY_CURVE_ANGLE_DEG)
+    try:
+        gmsh.model.mesh.classifySurfaces(ang, True, True, cang)
+        gmsh.model.mesh.createGeometry()
+    except Exception as e:                                   # noqa: BLE001
+        raise RuntimeError(
+            f"Prism BL meshing failed: could not build a parametrisation for the "
+            f"wall ({e}). The STL carrier at {tess:.4g} m is probably too dense — "
+            f"classifySurfaces throws 'Wrong topology of boundary mesh for "
+            f"parametrization' on fine tessellations. Retry with a coarser "
+            f"bl_tessellation, or use the tet-only mesher. There is deliberately "
+            f"no silent fallback: a tet-only mesh leaves the wall at y+ in the "
+            f"thousands and nothing downstream would say so."
+        ) from e
+    gmsh.model.geo.synchronize()
+    wall_surfs = [s[1] for s in gmsh.model.getEntities(2)]
+    if not wall_surfs:
+        raise RuntimeError("Prism BL meshing failed: no wall surfaces recovered.")
+    logger.info(f"Wall reparametrised into {len(wall_surfs)} patch(es)")
+
+    # ── 3. Extrude the stack ──────────────────────────────────────────────────
+    try:
+        ext = gmsh.model.geo.extrudeBoundaryLayer(
+            [(2, s) for s in wall_surfs], [1] * n_layers, heights, True
+        )
+    except Exception as e:                                   # noqa: BLE001
+        raise RuntimeError(
+            f"Prism BL extrusion failed: {e}. A 'PLC Error: A segment and a facet "
+            f"intersect' here is the stack self-intersecting where extrusion "
+            f"fronts converge — fin trailing edges and tips. Reduce bl_layers or "
+            f"bl_growth so the stack is thinner than the local feature."
+        ) from e
+    tops = [ext[i - 1][1] for i in range(1, len(ext)) if ext[i][0] == 3]
+    bl_vols = [d[1] for d in ext if d[0] == 3]
+    gmsh.model.geo.synchronize()
+
+    # ── 4. Farfield box — AFTER the extrusion, see the docstring ──────────────
+    upstream_x = -5.0 * total_L
+    downstream_x = total_L + 15.0 * total_L
+    box_faces, box_loop = _geo_box(
+        gmsh, upstream_x, -tun_radius, -tun_radius,
+        downstream_x, tun_radius, tun_radius,
+    )
+
+    # ── 5. Outer volume = box with the stack as a hole ────────────────────────
+    top_loop = gmsh.model.geo.addSurfaceLoop(tops)
+    outer_vol = gmsh.model.geo.addVolume([box_loop, top_loop])
+    gmsh.model.geo.synchronize()
+
+    # ── 6. Size field — measured from the WALL, not the stack top ─────────────
+    # The tops carry no mesh when the surfaces are meshed, so a Distance field
+    # on them evaluates to nothing and the wall comes out several times coarser
+    # than lc_rocket without any warning.
+    f_d = gmsh.model.mesh.field.add("Distance")
+    gmsh.model.mesh.field.setNumbers(f_d, "SurfacesList", wall_surfs)
+    gmsh.model.mesh.field.setNumber(f_d, "Sampling", 200)
+    f_t = gmsh.model.mesh.field.add("Threshold")
+    gmsh.model.mesh.field.setNumber(f_t, "InField", f_d)
+    gmsh.model.mesh.field.setNumber(f_t, "SizeMin", lc_rocket)
+    gmsh.model.mesh.field.setNumber(f_t, "SizeMax", lc_far)
+    gmsh.model.mesh.field.setNumber(f_t, "DistMin", body_r)
+    gmsh.model.mesh.field.setNumber(f_t, "DistMax", body_r * 10.0)
+    gmsh.model.mesh.field.setAsBackgroundMesh(f_t)
+    gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
+    gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
+    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
+
+    # Undo the carrier's size clamps from step 1. Gmsh options are global and
+    # survive model.remove(), so the tessellation ceiling (Mesh.MeshSizeMax =
+    # tess) would otherwise cap the ENTIRE wind tunnel at the carrier's element
+    # size — a 21 m domain at 1 cm is order 1e8 cells, which reads as a hang
+    # rather than an error. Same class as the Threshold SizeMax trap in
+    # _curvature_feature_field.
+    gmsh.option.setNumber("Mesh.MeshSizeMin", lc_rocket * 0.05)
+    gmsh.option.setNumber("Mesh.MeshSizeMax", lc_far)
+    logger.info(
+        f"Volume size clamps reset: min={lc_rocket * 0.05:.4g} m  max={lc_far:.4g} m"
+    )
+
+    # ── 7. Volume mesh ────────────────────────────────────────────────────────
+    gmsh.model.mesh.generate(3)
+
+    # ── 8. Markers ────────────────────────────────────────────────────────────
+    gmsh.model.addPhysicalGroup(2, wall_surfs, name="rocket_wall")
+    gmsh.model.addPhysicalGroup(2, box_faces, name="farfield")
+    gmsh.model.addPhysicalGroup(3, bl_vols + [outer_vol], name="fluid")
+
+    # ── 9. Audits ─────────────────────────────────────────────────────────────
+    n_prisms = 0
+    try:
+        types, tags, _ = gmsh.model.mesh.getElements(3)
+        for t, tg in zip(types, tags):
+            _, _, _, nn, _, _ = gmsh.model.mesh.getElementProperties(t)
+            if nn == 6:
+                n_prisms += len(tg)
+    except Exception:                                        # noqa: BLE001
+        pass
+    if n_prisms == 0:
+        raise RuntimeError(
+            "Prism BL meshing produced no prisms — the extrusion silently "
+            "collapsed. Refusing to write a mesh that claims a resolved wall."
+        )
+
+    outward = _audit_bl_direction(gmsh, wall_surfs, tops)
+    if outward is False:
+        raise RuntimeError(
+            "Prism BL grew INTO the body, not into the fluid: every prism sits "
+            "inside the solid and the fluid region is short by the stack's "
+            "thickness. Flip the sign of the layer heights."
+        )
+
+    _check_mesh_quality(gmsh, body_r, n_prisms, wall_surfs=wall_surfs)
+
+    # Inverted cells are a hard stop on this path, not a warning.
+    #
+    # _check_mesh_quality only logs them, which is right for the tet path where
+    # a stray sliver is survivable. Here they are concentrated (measured: all of
+    # them prisms within 2 mm of the nose apex) and they sit in the layer whose
+    # whole purpose is to carry the wall shear. Worse, the count is NOT monotonic
+    # in how blunt the apex is - 0.37 mm gave 20, 0.80 mm gave 0, 1.50 mm gave 5,
+    # 3.00 mm gave 0 - so no clamp ratio can be trusted to prevent them and the
+    # mesh has to be checked rather than argued about.
+    n_negative = _count_inverted(gmsh)
+    if n_negative:
+        raise RuntimeError(
+            f"Prism BL mesh has {n_negative} inverted element(s) (negative "
+            f"Jacobian), concentrated at the nose apex where the stack wraps a "
+            f"tip finer than itself. SU2 may silently re-orient some and still "
+            f"produce wrong wall shear there, so this is refused rather than "
+            f"written. Blunt the nose apex, or lower bl_first_height/bl_layers "
+            f"so the stack is thinner than the tip it has to wrap."
+        )
+
+    # ── 10. Export ────────────────────────────────────────────────────────────
+    su2_path = output_path.with_suffix(".su2")
+    gmsh.option.setNumber("Mesh.SaveAll", 0)
+    gmsh.write(str(su2_path))
+    logger.info(f"Prism BL mesh written: {su2_path}")
+
+
+def _curvature_feature_field(gmsh, surface_stl, lc_wall: float, lc_far: float,
+                             is_brep: bool, max_points: int = 400):
+    """Refine where the body is sharply curved. Returns a field tag, or None.
+
+    Measures the principal curvature of the imported tessellation, keeps the
+    points whose radius of curvature is finer than the wall element about to be
+    used — those are exactly the features the mesh would otherwise flatten — and
+    asks for elements of about half that radius near them.
+
+    Why not gmsh's ``Mesh.MeshSizeFromCurvature``: that reads a surface
+    parametrisation. An exact B-Rep has one; a re-topologised STL has only an
+    approximate one and the option measurably does nothing there.
+
+    Returns None when the body has no such features (a cylinder, a box) or when
+    the curvature computation is unavailable — in both cases the caller's other
+    fields already describe the mesh.
+    """
+    import numpy as np
+
+    try:
+        import pyvista as pv
+        import vtk
+
+        surf = pv.read(str(surface_stl)).extract_surface().triangulate().clean()
+        if surf.n_points == 0:
+            return None
+        surf = surf.compute_normals(point_normals=True, cell_normals=False,
+                                    auto_orient_normals=True)
+        # VTK warns per point on degenerate triangles — a knife-edge trailing
+        # edge produces thousands of them and buries the mesh log. The affected
+        # points report an over-large curvature, which this function treats as a
+        # sharp feature; that is the right answer for a knife edge anyway.
+        vtk.vtkObject.GlobalWarningDisplayOff()
+        try:
+            k = np.abs(np.asarray(surf.curvature("maximum")))
+        finally:
+            vtk.vtkObject.GlobalWarningDisplayOn()
+    except Exception as e:                                   # noqa: BLE001
+        logger.debug(f"Curvature feature field unavailable: {e}")
+        return None
+
+    with np.errstate(divide="ignore"):
+        radius = np.where(k > 1e-9, 1.0 / np.maximum(k, 1e-9), np.inf)
+
+    # A feature is anything the wall element cannot wrap around: it takes several
+    # elements to represent a curve, so the test is against a small multiple of
+    # the element size, not against the element itself. (Testing r < lc/2 would
+    # call a 7 mm leading edge "resolved" by a 10 mm element — one facet across
+    # the whole nose, which is the failure this exists to fix.)
+    sel = radius < 2.0 * lc_wall
+    n_sel = int(sel.sum())
+    if n_sel < 8:
+        return None
+
+    pts = np.asarray(surf.points)[sel]
+    radii = radius[sel]
+    try:
+        normals = np.asarray(surf.point_data["Normals"])[sel]
+    except Exception:                                        # noqa: BLE001
+        normals = None
+
+    # Thin to a few hundred seeds — a Distance field is evaluated against every
+    # one of them at every candidate mesh point, and the leading edge of a wing
+    # can easily contribute tens of thousands of near-identical points. Strided
+    # in surface order, which walks the geometry section by section: taking the
+    # sharpest instead would spend every seed on the trailing edge and leave the
+    # leading edge unrefined.
+    if len(pts) > max_points:
+        step = len(pts) // max_points + 1
+        pts, radii = pts[::step][:max_points], radii[::step][:max_points]
+        if normals is not None:
+            normals = normals[::step][:max_points]
+
+    # Element size at the feature: about a third of the radius, so roughly three
+    # elements wrap the curve instead of one facet chording across it. Driven by
+    # the sharper quartile rather than the median — the selection also catches
+    # the mildly-curved skin either side of an edge, and sizing off the middle of
+    # that population leaves the edge itself under-resolved.
+    # Floored at a tenth of the wall size: a knife-edge trailing edge has a
+    # radius near zero and would otherwise ask for an unmeshable element.
+    r_feature = float(np.percentile(radii, 25))
+    target = min(max(r_feature / 3.0, lc_wall * 0.1), lc_wall * 0.9)
+
+    # Lift the seeds off the wall into the fluid. A free point sitting exactly on
+    # the shell hangs the volume mesher — measured: gmsh ran past a 9-minute
+    # timeout with the seeds on the surface and meshes in ~2 minutes with them
+    # offset. The field only needs to be near the edge, not on it.
+    if normals is not None and len(normals) == len(pts):
+        pts = pts + normals * (1.5 * target)
+    kernel = gmsh.model.occ if is_brep else gmsh.model.geo
+    tags = []
+    for x, y, z in pts:
+        try:
+            tags.append(kernel.addPoint(float(x), float(y), float(z), target))
+        except Exception:                          # noqa: BLE001, PERF203
+            pass
+    if not tags:
+        return None
+    kernel.synchronize()
+
+    f_pts = gmsh.model.mesh.field.add("Distance")
+    gmsh.model.mesh.field.setNumbers(f_pts, "PointsList", tags)
+
+    f_thr = gmsh.model.mesh.field.add("Threshold")
+    gmsh.model.mesh.field.setNumber(f_thr, "InField", f_pts)
+    gmsh.model.mesh.field.setNumber(f_thr, "SizeMin", target)
+    # SizeMax is the FARFIELD size: this is what the field returns outside the
+    # band, and the background field is the minimum over all fields, so a
+    # wall-sized ceiling here caps the entire domain instead of just the edge.
+    # Measured on the equivalent rocket-path field: it put 1.78M of 1.8M surface
+    # triangles on the six farfield faces.
+    gmsh.model.mesh.field.setNumber(f_thr, "SizeMax", lc_far)
+    # The band grows back to the wall size over a few feature widths, NOT over a
+    # multiple of the wall size. Tied to lc_wall it reached 60 mm either side of
+    # every edge on the M6 wing and pushed the mesh past a million cells for
+    # refinement nobody asked for; the suction peak lives within a chord percent
+    # or two of the edge.
+    gmsh.model.mesh.field.setNumber(f_thr, "DistMin", target)
+    gmsh.model.mesh.field.setNumber(f_thr, "DistMax", target * 4.0)
+
+    logger.info(
+        f"Curvature feature refinement: {n_sel:,} of {surf.n_points:,} surface "
+        f"points are curved tighter than the wall size ({lc_wall:.4g} m); "
+        f"seeding {len(tags)} of them at {target:.4g} m "
+        f"(feature radius p25 {r_feature:.4g} m, median "
+        f"{float(np.median(radii)):.4g} m)."
+    )
+    return f_thr
+
+
 def build_external_cad_mesh(
     cad_path: Path,
     output_path: Path,
@@ -725,6 +1469,7 @@ def build_external_cad_mesh(
     cad_units: str = "auto",
     cad_wrap: bool = False,
     cad_wrap_resolution: str = "medium",
+    cad_curvature_elements: int | None = None,
     _force_discrete: bool = False,
 ) -> Path:
     """
@@ -973,6 +1718,20 @@ def build_external_cad_mesh(
             except Exception as e:
                 logger.debug(f"Feature-size clamp unavailable: {e}")
 
+        # ── Curvature-driven feature refinement ───────────────────────────────
+        # gmsh's own MeshSizeFromCurvature reads a surface parametrisation, so on
+        # a re-topologised STL it does nothing at all — measured on the ONERA M6
+        # wing, raising it from 12 to 60 changed the cell count by 0.8% and the
+        # lift not at all. Curvature is therefore measured directly off the
+        # triangulation here and turned into an explicit distance field.
+        #
+        # What it buys: a wing leading edge of radius ~7 mm meshed with 20 mm
+        # elements is a flat facet, and the suction peak that carries the lift
+        # forms on exactly that radius.
+        f_feature = _curvature_feature_field(
+            gmsh, info.preview_stl, lc_wall, lc_far, is_brep=info.is_brep,
+        )
+
         # ── Size fields ───────────────────────────────────────────────────────
         f_dist = gmsh.model.mesh.field.add("Distance")
         gmsh.model.mesh.field.setNumbers(f_dist, "SurfacesList", wall_surfs)
@@ -1009,8 +1768,11 @@ def build_external_cad_mesh(
         gmsh.model.mesh.field.setNumber(f_wake, "VIn",   char * 2.0)
         gmsh.model.mesh.field.setNumber(f_wake, "VOut",  lc_far)
 
+        _fields = [f_thr, f_body, f_wake]
+        if f_feature is not None:
+            _fields.append(f_feature)
         f_min = gmsh.model.mesh.field.add("Min")
-        gmsh.model.mesh.field.setNumbers(f_min, "FieldsList", [f_thr, f_body, f_wake])
+        gmsh.model.mesh.field.setNumbers(f_min, "FieldsList", _fields)
         gmsh.model.mesh.field.setAsBackgroundMesh(f_min)
 
         # ── Generate ──────────────────────────────────────────────────────────
@@ -1022,10 +1784,13 @@ def build_external_cad_mesh(
         # Curvature sizing reads the surface parametrisation. A raw
         # triangulation has none, so asking for it there is meaningless at
         # best and destabilising at worst.
-        gmsh.option.setNumber(
-            "Mesh.MeshSizeFromCurvature",
-            (20 if info.is_brep else 12) if reparametrised else 0,
-        )
+        _curv_default = (20 if info.is_brep else 12) if reparametrised else 0
+        _curv = _curv_default if cad_curvature_elements is None \
+            else (int(cad_curvature_elements) if reparametrised else 0)
+        if _curv != _curv_default:
+            logger.info(f"Curvature sizing: {_curv} elements per 2π "
+                        f"(default for this route {_curv_default})")
+        gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", _curv)
         gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
         gmsh.option.setNumber("Mesh.CharacteristicLengthExtendFromBoundary", 0)
 
@@ -1180,6 +1945,113 @@ def build_external_cad_mesh(
 
 
 # ── Mesh Quality Checks ──────────────────────────────────────────────────────
+
+# Element size on a body edge, as a fraction of the wall size. See
+# _edge_refinement_field. Measured on the AGARD-B medium mesh, surface triangles
+# against this factor: none 10.6k, 0.50 13.8k, 0.35 18.8k, 0.25 24.0k, 0.15
+# 36.2k. 0.25 buys a 4x finer leading edge for 2.3x the surface mesh.
+_EDGE_REFINE_FACTOR = 0.25
+
+
+def _edge_refinement_field(gmsh, wall_surfs: list, lc_rocket: float, lc_far: float,
+                           factor: float = _EDGE_REFINE_FACTOR):
+    """Refine a band around every sharp edge of the body. Returns a field tag.
+
+    The box fields size the fin *region*; they cannot size the fin *edge*. A
+    constant-thickness panel has a knife leading edge, and the suction peak that
+    carries most of its lift forms within a percent or two of chord behind it —
+    on a 14 mm wall element that peak is one facet wide and the circulation it
+    should have produced is simply absent.
+
+    Uses the B-Rep's own curves, so "sharp edge" needs no detection: the fin
+    outline, the fin-root junction, the nose/base rims and the diameter steps
+    are precisely the curves bounding the wall surfaces. Returns None when the
+    body has none of them (it cannot, in practice, but the caller treats the
+    field as optional).
+
+    The band is deliberately narrow — ``factor`` of the wall size at the edge,
+    growing back over four element widths. Wider bands buy cell count, not
+    circulation.
+
+    ``SizeMax`` is the FARFIELD size, not the wall size. It is the value this
+    field returns everywhere outside the band, and the background field is the
+    minimum over all fields, so a wall-sized ceiling here silently caps the
+    entire tunnel: measured on AGARD-B, 14 mm elements out to the 1 m farfield
+    wall turned a 10.6k-triangle surface mesh into 1.8M, of which 1.78M were on
+    the six farfield faces.
+    """
+    curves = set()
+    for s in wall_surfs:
+        try:
+            for (dim, tag) in gmsh.model.getBoundary([(2, s)], combined=False,
+                                                     oriented=False, recursive=False):
+                if dim == 1:
+                    curves.add(abs(int(tag)))
+        except Exception as e:                                # noqa: BLE001, PERF203
+            logger.debug(f"Edge refinement: boundary of surface {s} unavailable: {e}")
+    if not curves:
+        return None
+
+    lc_edge = lc_rocket * factor
+    f_d = gmsh.model.mesh.field.add("Distance")
+    gmsh.model.mesh.field.setNumbers(f_d, "CurvesList", sorted(curves))
+    gmsh.model.mesh.field.setNumber(f_d, "Sampling", 200)
+
+    f_t = gmsh.model.mesh.field.add("Threshold")
+    gmsh.model.mesh.field.setNumber(f_t, "InField", f_d)
+    gmsh.model.mesh.field.setNumber(f_t, "SizeMin", lc_edge)
+    gmsh.model.mesh.field.setNumber(f_t, "SizeMax", lc_far)
+    gmsh.model.mesh.field.setNumber(f_t, "DistMin", lc_edge)
+    gmsh.model.mesh.field.setNumber(f_t, "DistMax", lc_edge * 4.0)
+
+    logger.info(
+        f"Edge refinement: {len(curves)} wall curves seeded at {lc_edge:.4g} m "
+        f"({factor:.0%} of the {lc_rocket:.4g} m wall size), relaxing back over "
+        f"{lc_edge * 4.0:.4g} m."
+    )
+    return f_t
+
+
+def _clamp_profile_tip(profile: list, lc_rocket: float) -> list:
+    """Widen a nose tip that is finer than the mesh can ever represent.
+
+    ``cfd_profile`` floors the apex radius just above zero (1e-4 m) so the
+    revolve closes on a disc rather than a degenerate vertex. That disc is a
+    real B-Rep face with a real bounding circle, and gmsh meshes the circle at
+    its own scale no matter what ``Mesh.MeshSizeMin`` says — a 1e-4 m tip
+    against a 2.2e-3 m size floor gives 3e-5 m facets sitting next to 5e-3 m
+    ones. The transition band folds, and generate(3) dies with
+
+        Invalid boundary mesh (overlapping facets) on surface 2
+
+    which is what skipped the SU2 cone benchmark at coarse and fine (medium
+    survived by luck: the failure is a sliver fold, not a clean size threshold).
+
+    So the apex is snapped out to half the surface size floor. On the 10°
+    validation cone that is a 1.1 mm disc on an 88 mm base radius — under 1.3%
+    of the radius, blunting the first 6 mm of a 500 mm cone, and the Cp
+    comparison window starts at 30 mm. Anything the mesh could have resolved is
+    left alone: the clamp only ever raises a radius the mesher was going to
+    misrepresent anyway, and it says so in the log when it fires.
+    """
+    if len(profile) < 2:
+        return profile
+    r_floor = lc_rocket * 0.05 * 0.5
+    x0, r0 = profile[0]
+    if r0 >= r_floor:
+        return profile
+    # Only the apex station moves, so the body keeps its length and every other
+    # station its declared radius. Guard the case where station 1 is itself
+    # below the floor (a very long, very fine taper): then the whole leading run
+    # of stations under the floor is lifted, otherwise the profile goes backwards.
+    out = [(x, max(r, r_floor)) for x, r in profile]
+    logger.info(
+        f"Nose tip clamped: apex radius {r0:.3e} m -> {r_floor:.3e} m "
+        f"(half the {lc_rocket * 0.05:.3e} m surface size floor). A tip finer "
+        f"than the mesh folds the facets around it."
+    )
+    return out
+
 
 def _revolve_profile_solid(occ, profile: list) -> list:
     """
@@ -1438,6 +2310,81 @@ def _profile_r_at(profile: list, x: float) -> float:
     return float(profile[-1][1])
 
 
+def _fin_section_2d(chord: float, thick: float, kind: str) -> list:
+    """Chordwise section of a fin panel as a closed polygon of ``(s, z)``.
+
+    ``s`` runs 0 (leading edge) to ``chord`` (trailing edge); ``z`` is the
+    half-thickness direction. Points are ordered around the section.
+
+    Why this exists: the mesher used to extrude the planform into a slab and
+    call it a fin, regardless of what the component declared. A slab presents a
+    blunt face across the entire leading edge — on the AGARD-B wing that face is
+    4% of chord, which in an Euler solve stagnates the flow where the suction
+    peak should form. The declared section is now built.
+
+      Square    the slab, unchanged — this is what a square-edged fin is.
+      Airfoil   a symmetric double wedge: sharp LE and TE, full thickness over
+                the middle half. Not a NACA section, but it has the property
+                that matters here — the flow attaches at a point instead of
+                across a step.
+      Rounded   the slab with LE and TE capped by half-cylinders of radius t/2,
+                which is what a filed-round fin edge is.
+    """
+    k = (kind or "Square").strip().lower()
+    # Thickness is clamped against the chord rather than the section being
+    # downgraded to a slab on a short chord: a loft needs the SAME polygon at
+    # both ends, and a root that is an airfoil lofted to a tip that fell back to
+    # a rectangle is not a solid — OCC reports it downstream as
+    # "Difference failed - BOPAlgo_AlertTooFewArguments".
+    t = min(0.5 * thick, 0.2 * chord)
+    if k not in ("airfoil", "rounded") or t <= 0:
+        return [(0.0, -t), (chord, -t), (chord, t), (0.0, t)]
+
+    if k == "airfoil":
+        a, b = 0.25 * chord, 0.75 * chord
+        return [(0.0, 0.0), (a, -t), (b, -t), (chord, 0.0), (b, t), (a, t)]
+
+    # Rounded: walk the lower surface LE→TE, round the TE, walk the upper
+    # surface back, round the LE. Three interior points per cap is enough at the
+    # element sizes this mesher works at and keeps the wire cheap.
+    def _arc(cx, a0, a1, n=5):
+        return [(cx + t * math.cos(a0 + (a1 - a0) * i / (n - 1)),
+                 t * math.sin(a0 + (a1 - a0) * i / (n - 1)))
+                for i in range(n)]
+
+    te_cap = _arc(chord - t, -0.5 * math.pi, 0.5 * math.pi)
+    le_cap = _arc(t, 0.5 * math.pi, 1.5 * math.pi)
+    return te_cap + le_cap
+
+
+def _fin_solid_lofted(occ, section: str, x_root_LE: float, c_root: float,
+                      r_root: float, x_tip_LE: float, c_tip: float,
+                      r_tip: float, thick: float):
+    """Loft a shaped fin between its root and tip sections. Returns a volume tag.
+
+    The panel lies in the x–y plane (span along +y, chord along +x) and is
+    thick in z, matching the extruded construction it replaces. Both sections
+    are the same polygon — see :func:`_fin_section_2d` — so a nearly-pointed
+    delta tip comes out as a scaled-down section rather than a different shape.
+    """
+    wires = []
+    for x_le, chord, span_r in (
+        (x_root_LE, c_root, r_root),
+        (x_tip_LE, c_tip, r_tip),
+    ):
+        pts = [occ.addPoint(x_le + s, span_r, z)
+               for s, z in _fin_section_2d(chord, thick, section)]
+        lines = [occ.addLine(pts[i], pts[(i + 1) % len(pts)])
+                 for i in range(len(pts))]
+        wires.append(occ.addWire(lines))
+
+    out = occ.addThruSections(wires, makeSolid=True, makeRuled=True)
+    vols = [tag for dim, tag in out if dim == 3]
+    if not vols:
+        raise RuntimeError("addThruSections produced no volume")
+    return vols[0]
+
+
 def _add_fins(occ, rocket: dict, total_L: float) -> list:
     """
     Create accurate trapezoidal fins using OCC wire → face → extrude.
@@ -1501,25 +2448,66 @@ def _add_fins(occ, rocket: dict, total_L: float) -> list:
     logger.info(
         f"Fins: n={n_fins}  h={fin_h:.3f}  Cr={fin_Cr:.3f}  Ct={fin_Ct:.3f}  "
         f"sweep={math.degrees(sweep):.1f} deg  t={fin_t:.3f}  "
+        f"section={rocket.get('fin_cross_section', 'Square')}  "
         f"x=[{x_root_LE:.3f}->{x_tip_TE:.3f}]  "
         f"r=[{r_root:.4f}->{r_tip:.4f}] (local body r={r_local_mid:.4f})"
     )
+
+    section = str(rocket.get("fin_cross_section", "Square"))
+    # A shaped section needs two real sections to loft between. A true delta has
+    # no tip chord at all, so it keeps the extruded planform — a sharp-edged
+    # triangle is still the right planform, it just has square edges.
+    want_loft = (section.strip().lower() in ("airfoil", "rounded")
+                 and fin_Ct > max(1e-6, 1e-4 * fin_Cr))
+    if section.strip().lower() != "square" and not want_loft:
+        logger.info(f"Fin cross-section '{section}' requested but the tip chord "
+                    f"({fin_Ct:.4g} m) is degenerate — extruding a square "
+                    f"section instead.")
 
     for i in range(n_fins):
         angle = 2.0 * math.pi * i / n_fins
 
         try:
+            if want_loft:
+                try:
+                    vol_tag = _fin_solid_lofted(
+                        occ, section, x_root_LE, fin_Cr, r_root,
+                        x_tip_LE, fin_Ct, r_tip, fin_t)
+                    occ.rotate([(3, vol_tag)], 0, 0, 0, 1, 0, 0, angle)
+                    parts.append((3, vol_tag))
+                    continue
+                except Exception as e:              # noqa: BLE001
+                    # Fall through to the extruded planform — a square-edged fin
+                    # of the right planform beats no fin, and beats the box.
+                    logger.warning(
+                        f"Lofting the '{section}' fin section failed ({e}); "
+                        f"extruding a square section instead.")
+                    want_loft = False
+
+            # A true delta fin has tip_chord = 0, so the two tip corners are the
+            # SAME point and addLine() between them fails — which used to drop
+            # the fin into the box fallback below. A box has far more planform
+            # area than the delta it replaced (it inflated lift ~25% on the
+            # AGARD-B validation case) and the only trace was a log warning, so
+            # build the triangle the geometry actually describes instead.
+            sharp_tip = fin_Ct <= max(1e-6, 1e-4 * max(fin_Cr, 1e-9))
+
             p0 = occ.addPoint(x_root_LE, r_root, 0.0)
             p1 = occ.addPoint(x_root_TE, r_root, 0.0)
             p2 = occ.addPoint(x_tip_TE,  r_tip,  0.0)
-            p3 = occ.addPoint(x_tip_LE,  r_tip,  0.0)
 
-            l0 = occ.addLine(p0, p1)
-            l1 = occ.addLine(p1, p2)
-            l2 = occ.addLine(p2, p3)
-            l3 = occ.addLine(p3, p0)
+            if sharp_tip:
+                lines = [occ.addLine(p0, p1),
+                         occ.addLine(p1, p2),
+                         occ.addLine(p2, p0)]
+            else:
+                p3 = occ.addPoint(x_tip_LE, r_tip, 0.0)
+                lines = [occ.addLine(p0, p1),
+                         occ.addLine(p1, p2),
+                         occ.addLine(p2, p3),
+                         occ.addLine(p3, p0)]
 
-            loop = occ.addCurveLoop([l0, l1, l2, l3])
+            loop = occ.addCurveLoop(lines)
             face = occ.addPlaneSurface([loop])
 
             extruded = occ.extrude([(2, face)], 0, 0, fin_t)

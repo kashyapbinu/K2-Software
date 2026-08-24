@@ -8,15 +8,17 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
 from PyQt6.QtCore import Qt
 from ui.widgets.gauge_widget import GaugeWidget
 
+from ui import theme
+
 logger = logging.getLogger("K2.AvionicsWS")
 
 
 class TelemetryLabel(QLabel):
     def __init__(self, t="—", parent=None):
         super().__init__(t, parent)
-        self.setStyleSheet("color: #e6edf3; font-family: 'Cascadia Code', monospace; "
+        self.setStyleSheet(f"color: {theme.TEXT_BRIGHT}; font-family: 'Cascadia Code', monospace; "
             "font-size: 15px; font-weight: 600; padding: 4px 8px; "
-            "background-color: #161b22; border: 1px solid #21262d; border-radius: 6px;")
+            f"background-color: {theme.PANEL}; border: 1px solid {theme.RAISED}; border-radius: 6px;")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
 
@@ -24,17 +26,18 @@ class StatusLight(QLabel):
     def __init__(self, label, parent=None):
         super().__init__(label, parent)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setStyleSheet("color: #484f58; font-weight: 600; font-size: 12px; "
-            "padding: 6px 12px; background-color: #161b22; border: 1px solid #21262d; border-radius: 6px;")
+        self.setStyleSheet(f"color: {theme.LINE_STRONG}; font-weight: 600; font-size: 12px; "
+            f"padding: 6px 12px; background-color: {theme.PANEL}; border: 1px solid {theme.RAISED}; border-radius: 6px;")
 
-    def set_active(self, active, color="#7ee787"):
+    def set_active(self, active, color=None):
+        color = color or theme.OK
         if active:
             self.setStyleSheet(f"color: {color}; font-weight: 700; font-size: 12px; "
-                f"padding: 6px 12px; background-color: #0d1117; "
+                f"padding: 6px 12px; background-color: #0e0e10; "
                 f"border: 2px solid {color}; border-radius: 6px;")
         else:
-            self.setStyleSheet("color: #484f58; font-weight: 600; font-size: 12px; "
-                "padding: 6px 12px; background-color: #161b22; border: 1px solid #21262d; border-radius: 6px;")
+            self.setStyleSheet(f"color: {theme.LINE_STRONG}; font-weight: 600; font-size: 12px; "
+                f"padding: 6px 12px; background-color: {theme.PANEL}; border: 1px solid {theme.RAISED}; border-radius: 6px;")
 
 
 class AvionicsWorkspace(QWidget):
@@ -57,7 +60,7 @@ class AvionicsWorkspace(QWidget):
 
         # Title bar
         title = QLabel("FLIGHT COMPUTER TELEMETRY")
-        title.setStyleSheet("color: #58a6ff; font-size: 16px; font-weight: 700; letter-spacing: 2px;")
+        title.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
 
@@ -83,7 +86,7 @@ class AvionicsWorkspace(QWidget):
         self.telem_labels = {}
         for i, name in enumerate(labels):
             header = QLabel(name)
-            header.setStyleSheet("color: #58a6ff; font-weight: 600; font-size: 11px;")
+            header.setStyleSheet(f"color: {theme.TEXT_DIM}; font-weight: 600; font-size: 11px;")
             header.setAlignment(Qt.AlignmentFlag.AlignCenter)
             tg.addWidget(header, 0, i)
             val = TelemetryLabel("—")
@@ -128,7 +131,7 @@ class AvionicsWorkspace(QWidget):
         gl = QGridLayout(); gl.setSpacing(6)
         self.gyro_labels = {}
         for i, axis in enumerate(["X", "Y", "Z"]):
-            h = QLabel(axis); h.setStyleSheet("color: #58a6ff; font-weight: 600;")
+            h = QLabel(axis); h.setStyleSheet(f"color: {theme.TEXT_DIM}; font-weight: 600;")
             h.setAlignment(Qt.AlignmentFlag.AlignCenter)
             gl.addWidget(h, 0, i)
             v = TelemetryLabel("0.00")
@@ -218,12 +221,12 @@ class AvionicsWorkspace(QWidget):
 
         # Status lights
         fc = s.flight_computer_state
-        self.light_armed.set_active(fc in ["ARMED", "BOOST", "COAST", "APOGEE", "RECOVERY", "LANDED"], "#58a6ff")
-        self.light_boost.set_active(fc == "BOOST", "#f0883e")
-        self.light_coast.set_active(fc in ["COAST", "APOGEE"], "#d29922")
-        self.light_drogue.set_active(s.sim_phase in ["Drogue Descent", "Main Descent"], "#7ee787")
-        self.light_main.set_active(s.sim_phase == "Main Descent", "#3fb950")
-        self.light_land.set_active(fc == "LANDED", "#7ee787")
+        self.light_armed.set_active(fc in ["ARMED", "BOOST", "COAST", "APOGEE", "RECOVERY", "LANDED"], theme.ACCENT)
+        self.light_boost.set_active(fc == "BOOST", theme.ACCENT)
+        self.light_coast.set_active(fc in ["COAST", "APOGEE"], theme.WARN)
+        self.light_drogue.set_active(s.sim_phase in ["Drogue Descent", "Main Descent"], theme.OK)
+        self.light_main.set_active(s.sim_phase == "Main Descent", theme.OK)
+        self.light_land.set_active(fc == "LANDED", theme.OK)
 
     def _on_state_changed(self, s):
         self._update(s)

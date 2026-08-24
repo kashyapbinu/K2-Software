@@ -37,7 +37,9 @@ from scipy.stats import qmc
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
-from core.batch_simulation import BatchSimConfig, BatchSimResult, run_batch_simulation
+from core.batch_simulation import (
+    BatchSimConfig, BatchSimResult, run_batch_simulation, result_diverged,
+)
 
 logger = logging.getLogger("K2.Optimization")
 
@@ -261,21 +263,45 @@ def get_default_correlations() -> list:
 #  PHYSICS VALIDATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-def validate_candidate(variables: dict, design_vars: list) -> tuple:
+def _geom_value(variables: dict, base, key: str, default: float) -> float:
+    """Resolve a geometry/mass value for a candidate.
+
+    A candidate's ``variables`` dict only carries the quantities the optimiser
+    is actually varying. Everything else still has a real value — the rocket's
+    own — and reading a hardcoded default instead silently validated and
+    repaired candidates against a fictional 80 mm / 1 m airframe. Prefer the
+    candidate's value, then *base* (the BatchSimConfig built from the rocket
+    state), and only then the literal fallback.
+    """
+    val = variables.get(key)
+    if val is None and base is not None:
+        val = getattr(base, key, None)
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def validate_candidate(variables: dict, design_vars: list, base=None) -> tuple:
     """Validate that a candidate design is physically realisable.
+
+    *base* is the BatchSimConfig the candidate is built on; dimensions the
+    optimiser is not varying are read from it rather than guessed.
 
     Returns (valid: bool, warnings: list[str]).
     """
     warnings = []
     v = variables
 
-    d = v.get("diameter", 0.08)
-    L = v.get("length", 1.0)
-    fs = v.get("fin_span", 0.05)
-    frc = v.get("fin_root_chord", 0.1)
-    ftc = v.get("fin_tip_chord", 0.05)
-    dm = v.get("dry_mass", 1.0)
-    nl = v.get("nose_length", 0.2)
+    d = _geom_value(v, base, "diameter", 0.08)
+    L = _geom_value(v, base, "length", 1.0)
+    fs = _geom_value(v, base, "fin_span", 0.05)
+    frc = _geom_value(v, base, "fin_root_chord", 0.1)
+    ftc = _geom_value(v, base, "fin_tip_chord", 0.05)
+    dm = _geom_value(v, base, "dry_mass", 1.0)
+    nl = _geom_value(v, base, "nose_length", 0.2)
 
     if d <= 0.01:
         warnings.append(f"Diameter too small: {d:.4f} m")
@@ -297,6 +323,12 @@ def validate_candidate(variables: dict, design_vars: list) -> tuple:
         warnings.append(f"Nose length must be positive: {nl:.4f}")
     if nl > L * 0.8:
         warnings.append(f"Nose length ({nl:.3f}) > 80% of body ({L*0.8:.3f})")
+
+    # The fin-count spin box's own range floor is vmin*0.1, so a user can set
+    # the minimum below 1 and have the sampler draw a finless rocket.
+    fc = _geom_value(v, base, "fin_count", 4)
+    if fc < 1:
+        warnings.append(f"Fin count must be at least 1: {fc:.0f}")
 
     cd = v.get("cd", 0.5)
     if cd < 0.05 or cd > 3.0:
@@ -339,22 +371,70 @@ def build_candidate_config(base_config: BatchSimConfig,
         elif hasattr(cfg, key):
             setattr(cfg, key, val)
 
+    # Axial stations must follow the body when the optimizer changes its length.
+    # cg / dry_cg / motor_position / fin_position are absolute distances from
+    # the nose; leaving them at the base rocket's values while the body is
+    # stretched meant the candidate's CG, motor and fins all stayed put. A
+    # rocket stretched from 1.6 m to 3.2 m reported a bit-identical 6.44 cal
+    # stability margin with its fins now sitting mid-body — so the search could
+    # buy length for free, with no stability consequence at all.
+    #
+    # Holding each station's FRACTION of body length is the same assumption
+    # RocketStateEngine._recompute_derived makes when it auto-estimates
+    # (body_cg = 0.45 L, motor_cg = 0.85 L), and it preserves a high-fidelity
+    # assembly's real CG fraction rather than inventing one. CP needs no such
+    # treatment: AeroModel recomputes it from the candidate's own geometry.
+    if base_config.length > 0 and abs(cfg.length - base_config.length) > 1e-12:
+        _len_scale = cfg.length / base_config.length
+        for _station in ("cg", "dry_cg", "motor_position", "fin_position"):
+            setattr(cfg, _station, getattr(base_config, _station, 0.0) * _len_scale)
+
     # Derived fields
     if cfg.motor_burn_time > 0 and cfg.motor_total_impulse > 0:
         cfg.motor_avg_thrust = cfg.motor_total_impulse / cfg.motor_burn_time
-    if cfg.motor_avg_thrust > 0:
-        cfg.motor_max_thrust = max(cfg.motor_max_thrust, cfg.motor_avg_thrust * 1.3)
 
-    # Couple propellant mass to total impulse: I = m_prop · Isp · g0. When the
-    # optimizer varies motor_total_impulse but NOT propellant_mass directly, the
-    # propellant must scale with impulse — otherwise impulse is bought for free
-    # (fixed 0.18 kg delivering 5000 N·s ⇒ Isp ~2800 s) and apogees run away to
-    # tens of km. Skipped when propellant_mass is itself an optimized variable.
+    # Peak thrust must track the candidate's own average, not the base motor's.
+    # `max(cfg.motor_max_thrust, ...)` let a shrunk motor keep the inherited
+    # peak (base 260 N still reported for a 20 N·s candidate), which then fed
+    # the accel_max constraint and the structural safety factor. Rescale the
+    # base peak:average ratio instead, and keep it physical.
+    if cfg.motor_avg_thrust > 0:
+        base_ratio = (base_config.motor_max_thrust / base_config.motor_avg_thrust
+                      if base_config.motor_avg_thrust > 0 else 1.3)
+        base_ratio = max(1.05, min(3.0, base_ratio))
+        cfg.motor_max_thrust = cfg.motor_avg_thrust * base_ratio
+
+    # Enforce the rocket equation's bookkeeping: I = m_prop · Isp · g0. Any two
+    # of (impulse, propellant mass, Isp) fix the third, so whichever the
+    # optimizer is free to vary, the trio must stay consistent — otherwise
+    # impulse is bought for free (0.01 kg delivering 5000 N·s ⇒ Isp ~51000 s)
+    # and apogees run away to tens of km.
+    #
+    # Previously this only fired when impulse was optimised and propellant was
+    # NOT, so enabling BOTH (adjacent checkboxes in the Propulsion group)
+    # reopened the hole. Now the consistency is unconditional: propellant mass
+    # is the dependent quantity unless the user is optimising it directly, in
+    # which case Isp is re-derived and sanity-clamped.
     prop_optimized = any(dv.enabled and dv.name == "propellant_mass" for dv in design_vars)
-    impulse_optimized = any(dv.enabled and dv.name == "motor_total_impulse" for dv in design_vars)
-    if impulse_optimized and not prop_optimized and cfg.motor_total_impulse > 0:
-        isp = cfg.motor_isp if cfg.motor_isp > 10 else 200.0
-        cfg.propellant_mass = cfg.motor_total_impulse / (isp * 9.80665)
+    isp = cfg.motor_isp if cfg.motor_isp > 10 else 200.0
+
+    if cfg.motor_total_impulse > 0:
+        if prop_optimized and cfg.propellant_mass > 0:
+            # Propellant is a free variable — impulse and propellant together
+            # imply an Isp. Clamp it to a physically achievable band for solid
+            # / hybrid / liquid chemical propulsion and rescale impulse to match
+            # whatever Isp survived the clamp.
+            implied_isp = cfg.motor_total_impulse / (cfg.propellant_mass * 9.80665)
+            cfg.motor_isp = max(50.0, min(450.0, implied_isp))
+            cfg.motor_total_impulse = cfg.propellant_mass * cfg.motor_isp * 9.80665
+            if cfg.motor_burn_time > 0:
+                cfg.motor_avg_thrust = cfg.motor_total_impulse / cfg.motor_burn_time
+                if cfg.motor_avg_thrust > 0:
+                    base_ratio = (base_config.motor_max_thrust / base_config.motor_avg_thrust
+                                  if base_config.motor_avg_thrust > 0 else 1.3)
+                    cfg.motor_max_thrust = cfg.motor_avg_thrust * max(1.05, min(3.0, base_ratio))
+        else:
+            cfg.propellant_mass = cfg.motor_total_impulse / (isp * 9.80665)
 
     return cfg
 
@@ -459,21 +539,31 @@ def evaluate_candidate(base_config: BatchSimConfig,
     else:
         mc_configs = [cfg] * max(mc_sims, 1)
 
-    apogees, machs, accels, stabs, landings = [], [], [], [], []
+    apogees, machs, accels, stabs = [], [], [], []
     rail_exits, successes, velocities = [], [], []
+    # Only runs that actually reached the ground contribute a landing distance.
+    landed_dists: list = []
+    n_no_landing = 0
 
     for i, mc_cfg in enumerate(mc_configs):
         try:
             res = run_batch_simulation(mc_cfg, seed=seed + i * 7)
-            # A diverged/failed run (e.g. the >2000 m/s guard truncated a
-            # too-fast trajectory) reports a meaningless truncated apogee.
-            # Don't let it score as a real altitude — zero it so the optimizer
-            # neither rewards nor selects numerically fragile designs.
-            apogees.append(res.apogee if res.success else 0.0)
+            # Zero the apogee ONLY for a numerically diverged run (the >2000 m/s
+            # or >100 km guard truncated it) — that trajectory is meaningless.
+            # A run that merely ran out the simulation window still climbed to a
+            # real apogee: apogee happens early, only the descent is cut short.
+            # Scoring those as 0 m steered the optimizer away from exactly the
+            # high-flying designs it was asked to find.
+            apogees.append(0.0 if result_diverged(res) else res.apogee)
             machs.append(res.max_mach)
             accels.append(res.max_acceleration)
             stabs.append(res.min_stability_margin)
-            landings.append(res.landing_distance)
+            if res.final_phase == "Landed":
+                landed_dists.append(res.landing_distance)
+            else:
+                # Still airborne when the run ended — its position is mid-air,
+                # a lower bound on where it comes down, not a landing point.
+                n_no_landing += 1
             rail_exits.append(res.rail_exit_velocity)
             successes.append(1.0 if res.success else 0.0)
             velocities.append(res.max_velocity)
@@ -482,7 +572,7 @@ def evaluate_candidate(base_config: BatchSimConfig,
             machs.append(0.0)
             accels.append(0.0)
             stabs.append(0.0)
-            landings.append(9999.0)
+            n_no_landing += 1
             rail_exits.append(0.0)
             successes.append(0.0)
             velocities.append(0.0)
@@ -490,7 +580,10 @@ def evaluate_candidate(base_config: BatchSimConfig,
     arr_apogee = np.array(apogees)
     arr_mach = np.array(machs)
     arr_stab = np.array(stabs)
-    arr_landing = np.array(landings)
+    # No verified landing at all → the sentinel the failed-run path already
+    # uses, so "we could not confirm where this lands" reads as a bad landing
+    # rather than as a suspiciously short one.
+    arr_landing = np.array(landed_dists) if landed_dists else np.array([9999.0])
     arr_rail = np.array(rail_exits)
     arr_accel = np.array(accels)
     arr_success = np.array(successes)
@@ -533,8 +626,22 @@ def evaluate_candidate(base_config: BatchSimConfig,
         "mean_rail_exit": float(np.mean(arr_rail)),
         "mean_accel": float(np.mean(arr_accel)),
         "success_rate": success_rate,
+        "n_no_landing": n_no_landing,
         "p_target": p_target,
         "p5_apogee": float(np.percentile(arr_apogee, 5)) if len(arr_apogee) > 1 else mean_apogee,
+        # Per-objective MC samples, keyed by objective name. Robust modes used
+        # to read apogee statistics for EVERY objective, so a robust "worst
+        # case" on landing distance silently optimised -max(apogee). Kept as
+        # plain lists so the dict pickles cleanly to pool workers.
+        "samples": {
+            "max_apogee": arr_apogee.tolist(),
+            "max_rail_exit_velocity": arr_rail.tolist(),
+            "max_velocity": [float(v) for v in velocities],
+            "max_stability_margin": arr_stab.tolist(),
+            "min_landing_distance": arr_landing.tolist(),
+            "max_mach": arr_mach.tolist(),
+            "max_accel": arr_accel.tolist(),
+        },
     }
 
     # ── Structural analysis ──
@@ -646,66 +753,140 @@ def _constraint_value(name: str, obj_vals: dict, variables: dict, cfg) -> float:
     key = mapping.get(name, name)
     if key in obj_vals:
         return obj_vals[key]
-    return variables.get(key, 0.0)
+    if key in variables:
+        return float(variables[key])
+    # Not an objective and not an optimised variable — it still has a real
+    # value on the candidate's config. Returning 0.0 here made `diameter_min`
+    # fail for every candidate whenever diameter wasn't being optimised, which
+    # marked the whole population infeasible and penalised it uniformly.
+    if cfg is not None:
+        val = getattr(cfg, key, None)
+        if val is not None:
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                pass
+    return 0.0
+
+
+# Reference magnitudes used to normalise objectives before the weighted sum.
+# Without them the sum mixes units outright: apogee (~10^3 m) buries stability
+# (~2 cal) and payload fraction (~0.5), so a nominally equal-weighted run is in
+# practice a pure apogee run. Dividing by these puts every objective near O(1),
+# which is what makes the user's `weight` field mean what it says.
+_OBJECTIVE_SCALES = {
+    "max_apogee": 1000.0,            # m
+    "max_rail_exit_velocity": 20.0,  # m/s
+    "max_velocity": 200.0,           # m/s
+    "max_payload_fraction": 1.0,     # fraction
+    "max_stability_margin": 2.0,     # calibers
+    "min_landing_distance": 500.0,   # m
+    "max_prob_target": 1.0,          # probability
+    "max_mission_success": 1.0,      # probability
+    "min_mass": 5.0,                 # kg
+    "min_cost": 250.0,               # currency units
+    "max_mach": 1.0,                 # Mach
+    "max_accel": 100.0,              # m/s^2
+}
+
+
+def _normalise(name: str, value: float) -> float:
+    """Scale an objective value into O(1) units."""
+    return value / _OBJECTIVE_SCALES.get(name, 1.0)
+
+
+def _constraint_penalty(constraints, cons_eval) -> float:
+    """Total quadratic penalty for violated constraints.
+
+    Uses violation RELATIVE to the limit. The absolute form was unusable across
+    constraints of different magnitude: a 500 m overshoot of a 1000 m landing
+    limit cost 500 * 500^2 = 1.25e8, swamping every objective and every other
+    constraint, while a 0.3 caliber stability miss cost 90. Relative violation
+    makes `penalty_weight` comparable between constraints, and squaring still
+    grows the pressure as a design drifts further out of bounds.
+    """
+    penalty = 0.0
+    for c in constraints:
+        if not c.enabled:
+            continue
+        info = cons_eval.get(c.name)
+        if info and not info["satisfied"]:
+            scale = max(abs(info["limit"]), 1e-6)
+            rel_violation = abs(info["value"] - info["limit"]) / scale
+            penalty += c.penalty_weight * rel_violation ** 2
+    return penalty
 
 
 def _standard_fitness(obj_vals, objectives, constraints, cons_eval) -> float:
-    """Weighted-sum fitness with quadratic constraint penalties."""
+    """Weighted-sum fitness over normalised objectives, with penalties."""
     fitness = 0.0
     for o in objectives:
         if not o.enabled:
             continue
-        val = obj_vals.get(o.name, 0.0)
+        val = _normalise(o.name, obj_vals.get(o.name, 0.0))
         if o.direction == "minimize":
             val = -val
         fitness += o.weight * val
 
-    # Penalties
-    for c in constraints:
-        if not c.enabled:
-            continue
-        info = cons_eval.get(c.name)
-        if info and not info["satisfied"]:
-            violation = abs(info["value"] - info["limit"])
-            fitness -= c.penalty_weight * violation ** 2
+    return fitness - _constraint_penalty(constraints, cons_eval)
 
-    return fitness
+
+def _robust_objective_value(o, obj_vals, mc_stats) -> float:
+    """Robust statistic for ONE objective, in its own units.
+
+    Every branch reads that objective's own MC samples. The previous version
+    hardcoded apogee statistics regardless of `o.name`, so robust "worst" on
+    Min Landing Distance optimised -max(apogee) instead.
+    """
+    samples = (mc_stats.get("samples") or {}).get(o.name)
+    mean_val = obj_vals.get(o.name, 0.0)
+
+    if o.robust_mode == "reliability":
+        # Direction-independent: the fraction of MC runs that flew successfully.
+        return mc_stats.get("success_rate", 0.0)
+
+    if not samples:
+        # No per-objective samples (derived metrics like payload fraction) —
+        # fall back to the deterministic mean.
+        return -mean_val if o.direction == "minimize" else mean_val
+
+    arr = np.asarray(samples, dtype=np.float64)
+
+    if o.robust_mode == "std":
+        # Spread is always bad, whichever way the objective points.
+        return -float(np.std(arr))
+
+    if o.robust_mode == "worst":
+        # Pessimistic tail: the low end when maximising, the high end when
+        # minimising.
+        return float(np.min(arr)) if o.direction == "maximize" else -float(np.max(arr))
+
+    if o.robust_mode == "p5":
+        # 5th percentile is only the pessimistic tail for a MAXIMISED objective;
+        # for a minimised one the bad tail is the 95th.
+        if o.direction == "maximize":
+            return float(np.percentile(arr, 5))
+        return -float(np.percentile(arr, 95))
+
+    # "mean"
+    return -mean_val if o.direction == "minimize" else mean_val
 
 
 def _robust_fitness(obj_vals, mc_stats, objectives, constraints, cons_eval) -> float:
-    """Robust fitness using MC statistics."""
+    """Robust fitness using each objective's own MC statistics."""
     fitness = 0.0
     for o in objectives:
         if not o.enabled:
             continue
-        if o.robust_mode == "std":
-            val = -mc_stats.get("std_apogee", 0.0)
-        elif o.robust_mode == "worst":
-            if o.direction == "maximize":
-                val = mc_stats.get("min_apogee", 0.0)
-            else:
-                val = -mc_stats.get("max_apogee", 0.0)
-        elif o.robust_mode == "reliability":
-            val = mc_stats.get("success_rate", 0.0)
-        elif o.robust_mode == "p5":
-            val = mc_stats.get("p5_apogee", 0.0)
-            if o.direction == "minimize":
-                val = -val
-        else:  # "mean"
-            val = obj_vals.get(o.name, 0.0)
-            if o.direction == "minimize":
-                val = -val
+        val = _robust_objective_value(o, obj_vals, mc_stats)
+        # "reliability" is already a probability in [0, 1]; everything else is
+        # in the objective's native units and needs the same normalisation the
+        # standard fitness applies.
+        if o.robust_mode != "reliability":
+            val = _normalise(o.name, val)
         fitness += o.weight * val
 
-    for c in constraints:
-        if not c.enabled:
-            continue
-        info = cons_eval.get(c.name)
-        if info and not info["satisfied"]:
-            violation = abs(info["value"] - info["limit"])
-            fitness -= c.penalty_weight * violation ** 2
-
-    return fitness
+    return fitness - _constraint_penalty(constraints, cons_eval)
 
 
 def _mission_fitness(obj_vals, mc_stats, target, objectives, constraints, cons_eval) -> float:
@@ -729,25 +910,17 @@ def _mission_fitness(obj_vals, mc_stats, target, objectives, constraints, cons_e
     # but as a secondary term so it can't dominate the smooth proximity signal.
     fitness += 200.0 * p_target * success
 
-    # Secondary objectives
+    # Secondary objectives — normalised, so a large-magnitude secondary (e.g.
+    # max_velocity in m/s) cannot outweigh the 1000-point mission term.
     for o in objectives:
         if not o.enabled or o.name in ("max_apogee", "max_prob_target", "max_mission_success"):
             continue
-        val = obj_vals.get(o.name, 0.0)
+        val = _normalise(o.name, obj_vals.get(o.name, 0.0))
         if o.direction == "minimize":
             val = -val
         fitness += o.weight * 0.1 * val
 
-    # Constraint penalties
-    for c in constraints:
-        if not c.enabled:
-            continue
-        info = cons_eval.get(c.name)
-        if info and not info["satisfied"]:
-            violation = abs(info["value"] - info["limit"])
-            fitness -= c.penalty_weight * violation ** 2
-
-    return fitness
+    return fitness - _constraint_penalty(constraints, cons_eval)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -796,6 +969,11 @@ def _parallel_eval(executor,
     are assigned per-position so results are identical to the serial path
     regardless of completion order (deterministic). *on_result(i, cd)* is called
     as each candidate finishes — used for live progress.
+
+    Slots left None mean "not evaluated" (cancelled); callers must filter them.
+    A candidate whose evaluation *raised* is not None — it comes back as an
+    infeasible design with -inf fitness, so one bad candidate cannot take the
+    whole run down with it.
     """
     tasks = [
         (base_config, vd, config.design_variables, config.objectives,
@@ -809,18 +987,52 @@ def _parallel_eval(executor,
         for i, t in enumerate(tasks):
             if cancel_flag and cancel_flag[0]:
                 break
-            results[i] = _eval_task(t)
+            try:
+                results[i] = _eval_task(t)
+            except Exception as e:
+                logger.warning(f"Candidate {i} evaluation failed: {e}")
+                results[i] = _failed_candidate(var_dicts[i])
             if on_result:
                 on_result(i, results[i])
         return results
 
     futures = {executor.submit(_eval_task, t): i for i, t in enumerate(tasks)}
-    for fut in as_completed(futures):
-        i = futures[fut]
-        results[i] = fut.result()
-        if on_result:
-            on_result(i, results[i])
+    try:
+        for fut in as_completed(futures):
+            if cancel_flag and cancel_flag[0]:
+                # Stop collecting and drop whatever is still queued. Remaining
+                # slots stay None so the caller sees them as unevaluated.
+                break
+            i = futures[fut]
+            try:
+                results[i] = fut.result()
+            except Exception as e:
+                # A dead worker (BrokenProcessPool, pickling failure) must not
+                # abort the whole optimisation — score the candidate as failed.
+                logger.warning(f"Candidate {i} evaluation failed in worker: {e}")
+                results[i] = _failed_candidate(var_dicts[i])
+            if on_result:
+                on_result(i, results[i])
+    finally:
+        for fut in futures:
+            fut.cancel()
     return results
+
+
+def _failed_candidate(variables: dict) -> CandidateDesign:
+    """Placeholder for a candidate whose evaluation raised.
+
+    -inf fitness guarantees selection/elitism never carries it forward, while
+    keeping the population size (and every array indexed alongside it) intact.
+    """
+    return CandidateDesign(
+        variables=dict(variables),
+        fitness=float("-inf"),
+        objectives={},
+        constraints_eval={},
+        feasible=False,
+        mc_stats={},
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -843,14 +1055,77 @@ def _random_individual(design_vars: list, rng: np.random.Generator) -> dict:
     return ind
 
 
+def _repair_individual(ind: dict, design_vars: list, base=None) -> dict:
+    """Pull a candidate back into the physically realisable region.
+
+    Only the initial population was ever validated — crossover and mutation
+    then produced offspring with tip chord > root chord, nose > 80% of body,
+    fin span > 5x diameter and so on, which went straight to the simulator from
+    generation 1 onward. Repairing (rather than rejecting) keeps the search
+    inside the feasible region without throwing away the evaluation budget.
+
+    Dimensions the optimiser is NOT varying come from *base* (the rocket's own
+    geometry). Reading a hardcoded default for them was actively destructive:
+    with only tip chord enabled, root chord read as 0.0, so every child had its
+    tip chord clamped to its lower bound — the variable was frozen there for
+    the whole run.
+
+    Only keys the candidate actually owns are written; a fixed dimension is not
+    the repair's to change. Each correction is re-clamped to the variable's own
+    bounds, so a repair can never push a value outside the box the user
+    configured. Fixes are ordered by dependency: body proportions first, then
+    everything measured against them.
+    """
+    r = dict(ind)
+    bounds = {dv.name: (dv.min_val, dv.max_val) for dv in design_vars}
+
+    def _get(key, default):
+        return _geom_value(r, base, key, default)
+
+    def _set(key, value):
+        # Not an optimised variable → nothing to repair, keep the real value.
+        if key not in r:
+            return _get(key, value)
+        lo, hi = bounds.get(key, (None, None))
+        if lo is not None:
+            value = max(lo, min(hi, value))
+        r[key] = value
+        return value
+
+    d = _get("diameter", 0.08)
+    L = _get("length", 1.0)
+
+    # Body must be longer than it is wide.
+    if L <= d:
+        L = _set("length", d * 1.5)
+        if L <= d:                       # bounds too tight to fix via length
+            d = _set("diameter", L / 1.5)
+
+    # Nose cone cannot eat more than 80% of the body.
+    if _get("nose_length", 0.0) > L * 0.8:
+        _set("nose_length", L * 0.8)
+
+    # Fin span capped at 5x body diameter.
+    if _get("fin_span", 0.0) > 5.0 * d:
+        _set("fin_span", 5.0 * d)
+
+    # Tip chord cannot exceed root chord.
+    frc = _get("fin_root_chord", 0.0)
+    if frc > 0.0 and _get("fin_tip_chord", 0.0) > frc:
+        _set("fin_tip_chord", frc)
+
+    return r
+
+
 def _valid_individual(design_vars: list, enabled_dvs: list,
-                      rng: np.random.Generator, tries: int = 10) -> dict:
+                      rng: np.random.Generator, tries: int = 10,
+                      base=None) -> dict:
     """Random individual that passes physical validation, resampling up to
     *tries* times. Returns the last attempt if none validate (bounds still
     clamped, sim is robust to it)."""
     ind = _random_individual(design_vars, rng)
     for _ in range(tries):
-        valid, _ = validate_candidate(ind, enabled_dvs)
+        valid, _ = validate_candidate(ind, enabled_dvs, base)
         if valid:
             break
         ind = _random_individual(design_vars, rng)
@@ -859,12 +1134,13 @@ def _valid_individual(design_vars: list, enabled_dvs: list,
 
 def _valid_vector(pop_vec: np.ndarray, idx: int, enabled_dvs: list,
                   all_dvs: list, lo: np.ndarray, hi: np.ndarray,
-                  rng: np.random.Generator, tries: int = 10) -> None:
+                  rng: np.random.Generator, tries: int = 10,
+                  base=None) -> None:
     """Resample row *idx* of *pop_vec* in place until it validates (or tries
     exhausted). Used by DE/PSO whose populations are numpy vectors."""
     for _ in range(tries):
         d = _vec_to_dict(pop_vec[idx], enabled_dvs, all_dvs)
-        valid, _ = validate_candidate(d, enabled_dvs)
+        valid, _ = validate_candidate(d, enabled_dvs, base)
         if valid:
             return
         pop_vec[idx] = rng.uniform(lo, hi)
@@ -947,8 +1223,28 @@ def _tournament_select(pop: list, k: int, rng: np.random.Generator) -> Candidate
 #  NSGA-II  HELPER FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _is_failed(cd: CandidateDesign) -> bool:
+    """True for a placeholder from a candidate whose evaluation raised.
+
+    Its ``objectives`` dict is empty, so the ``.get(name, 0.0)`` defaults used
+    for domination and crowding would read as a *perfect* score on any
+    minimised objective. Every ranking path has to skip these explicitly.
+    """
+    return not math.isfinite(cd.fitness)
+
+
+def _finite_fitnesses(pop: list) -> list:
+    """Fitnesses of the evaluable designs — for generation summary stats."""
+    return [c.fitness for c in pop if not _is_failed(c)]
+
+
 def _dominates(a: CandidateDesign, b: CandidateDesign, objectives: list) -> bool:
     """Return True if design *a* dominates design *b*."""
+    a_failed, b_failed = _is_failed(a), _is_failed(b)
+    if a_failed or b_failed:
+        # A failed evaluation is dominated by anything real, dominates nothing.
+        return b_failed and not a_failed
+
     dominated_in_all = True
     strictly_better_in_one = False
     for o in objectives:
@@ -1064,7 +1360,7 @@ def _run_genetic_algorithm(config: OptimizationConfig,
     executor = _make_executor(config)
     try:
         # Initialise population — build all candidates, evaluate as one batch
-        init_dicts = [_valid_individual(config.design_variables, dvs, rng)
+        init_dicts = [_valid_individual(config.design_variables, dvs, rng, base=base_config)
                       for _ in range(pop_size)]
         init_seeds = [i * 13 for i in range(pop_size)]
 
@@ -1108,16 +1404,16 @@ def _run_genetic_algorithm(config: OptimizationConfig,
             population.sort(key=lambda c: c.fitness, reverse=True)
 
             # Record generation data
-            fitnesses = [c.fitness for c in population]
+            fitnesses = _finite_fitnesses(population)
             apogees = [c.mc_stats.get("mean_apogee", 0) if c.mc_stats else 0 for c in population]
             feasible_pct = sum(1 for c in population if c.feasible) / len(population) * 100
 
             gen_data = {
                 "phase": "generation",
                 "generation": gen,
-                "best_fitness": fitnesses[0],
-                "mean_fitness": float(np.mean(fitnesses)),
-                "worst_fitness": fitnesses[-1],
+                "best_fitness": fitnesses[0] if fitnesses else 0.0,
+                "mean_fitness": float(np.mean(fitnesses)) if fitnesses else 0.0,
+                "worst_fitness": fitnesses[-1] if fitnesses else 0.0,
                 "feasible_pct": feasible_pct,
                 "best_apogee": apogees[0],
                 "evaluations": total_evals,
@@ -1147,6 +1443,11 @@ def _run_genetic_algorithm(config: OptimizationConfig,
                                                 20.0, config.mutation_rate, rng)
                 c2_vars = _polynomial_mutation(c2_vars, config.design_variables,
                                                 20.0, config.mutation_rate, rng)
+                # Crossover/mutation can leave geometry unphysical — repair
+                # before it reaches the simulator (only the initial population
+                # was ever validated).
+                c1_vars = _repair_individual(c1_vars, config.design_variables, base_config)
+                c2_vars = _repair_individual(c2_vars, config.design_variables, base_config)
                 child_dicts.append(c1_vars)
                 if len(child_dicts) < pop_size - n_elite:
                     child_dicts.append(c2_vars)
@@ -1215,7 +1516,7 @@ def _run_nsga2(config: OptimizationConfig,
     executor = _make_executor(config)
     try:
         # Initialise — batch-evaluate the random population
-        init_dicts = [_valid_individual(config.design_variables, dvs, rng)
+        init_dicts = [_valid_individual(config.design_variables, dvs, rng, base=base_config)
                       for _ in range(pop_size)]
         init_seeds = [i * 17 for i in range(pop_size)]
         population = _parallel_eval(executor, base_config, init_dicts, config,
@@ -1224,6 +1525,15 @@ def _run_nsga2(config: OptimizationConfig,
         total_evals += config.mc_sims_per_candidate * len(population)
 
         gen_history = []
+
+        # Binary tournament draws two distinct members; cancel-filtering above
+        # can leave fewer, and rng.choice would raise.
+        if len(population) < 2:
+            logger.warning(
+                f"NSGA-II needs a population of 2+, have {len(population)} — "
+                f"stopping after init")
+            config = copy.copy(config)
+            config.max_generations = 0
 
         for gen in range(config.max_generations):
             if cancel_flag and cancel_flag[0]:
@@ -1235,7 +1545,7 @@ def _run_nsga2(config: OptimizationConfig,
                 _crowding_distance(population, front, sort_objs)
 
             # Record
-            fitnesses = [c.fitness for c in population]
+            fitnesses = _finite_fitnesses(population)
             apogees = [c.mc_stats.get("mean_apogee", 0) if c.mc_stats else 0 for c in population]
             feasible_pct = sum(1 for c in population if c.feasible) / max(len(population), 1) * 100
 
@@ -1277,6 +1587,7 @@ def _run_nsga2(config: OptimizationConfig,
 
                 c1_vars = _polynomial_mutation(c1_vars, config.design_variables,
                                                 20.0, config.mutation_rate, rng)
+                c1_vars = _repair_individual(c1_vars, config.design_variables, base_config)
                 child_dicts.append(c1_vars)
 
             child_seeds = [total_evals + k for k in range(len(child_dicts))]
@@ -1352,14 +1663,39 @@ def _run_differential_evolution(config: OptimizationConfig,
         # Initialise — batch-evaluate random population
         pop_vec = rng.uniform(lo, hi, size=(pop_size, len(dvs)))
         for i in range(pop_size):
-            _valid_vector(pop_vec, i, dvs, config.design_variables, lo, hi, rng)
+            _valid_vector(pop_vec, i, dvs, config.design_variables, lo, hi, rng,
+                          base=base_config)
         init_dicts = [_vec_to_dict(pop_vec[i], dvs, config.design_variables)
                       for i in range(pop_size)]
         init_seeds = [i * 19 for i in range(pop_size)]
         population = _parallel_eval(executor, base_config, init_dicts, config,
                                     init_seeds, cancel_flag=cancel_flag)
-        population = [c for c in population if c is not None]
-        total_evals += config.mc_sims_per_candidate * len(population)
+        # Cancelling mid-initialisation leaves None slots. Drop those rows from
+        # BOTH the candidate list and the vector population so the two stay
+        # index-aligned — the selection loop below indexes them in lockstep.
+        keep = [i for i, c in enumerate(population) if c is not None]
+        population = [population[i] for i in keep]
+        pop_vec = pop_vec[keep]
+        pop_size = len(population)
+        total_evals += config.mc_sims_per_candidate * pop_size
+
+        # DE/rand/1 draws three DISTINCT donors other than the target, so it
+        # needs at least four members. Cancel-filtering above can shrink the
+        # population below that, and rng.choice would then raise.
+        if pop_size < 4:
+            logger.warning(
+                f"DE needs a population of 4+, have {pop_size} — stopping after init")
+            best = (max(population, key=lambda c: c.fitness)
+                    if population else CandidateDesign())
+            return OptimizationResult(
+                best_design=best if population else None,
+                pareto_front=_pareto_from_population(
+                    population, config.objectives, best) if population else [],
+                all_designs=population,
+                total_evaluations=total_evals,
+                elapsed_time=time.time() - t0,
+                algorithm_used="de",
+            )
 
         gen_history = []
 
@@ -1396,7 +1732,12 @@ def _run_differential_evolution(config: OptimizationConfig,
                         trial[d] = round(trial[d])
                 trials.append(trial)
 
-            trial_dicts = [_vec_to_dict(t, dvs, config.design_variables) for t in trials]
+            trial_dicts = [_repair_individual(_vec_to_dict(t, dvs, config.design_variables),
+                                              config.design_variables, base_config)
+                           for t in trials]
+            # Keep the numeric trial vectors in step with the repaired dicts —
+            # selection below stores trials[i] into pop_vec on acceptance.
+            trials = [_dict_to_vec(td, dvs) for td in trial_dicts]
             trial_seeds = [total_evals + k for k in range(pop_size)]
             trial_cds = _parallel_eval(executor, base_config, trial_dicts, config,
                                        trial_seeds, cancel_flag=cancel_flag)
@@ -1409,15 +1750,15 @@ def _run_differential_evolution(config: OptimizationConfig,
                     population[i] = trial_cd
                     pop_vec[i] = trials[i]
 
-            fitnesses = [c.fitness for c in population]
+            fitnesses = _finite_fitnesses(population)
             apogees = [c.mc_stats.get("mean_apogee", 0) if c.mc_stats else 0 for c in population]
             feasible_pct = sum(1 for c in population if c.feasible) / len(population) * 100
             gen_data = {
                 "phase": "generation",
                 "generation": gen,
-                "best_fitness": max(fitnesses),
-                "mean_fitness": float(np.mean(fitnesses)),
-                "worst_fitness": min(fitnesses),
+                "best_fitness": max(fitnesses) if fitnesses else 0.0,
+                "mean_fitness": float(np.mean(fitnesses)) if fitnesses else 0.0,
+                "worst_fitness": min(fitnesses) if fitnesses else 0.0,
                 "feasible_pct": feasible_pct,
                 "best_apogee": max(apogees),
             }
@@ -1425,7 +1766,7 @@ def _run_differential_evolution(config: OptimizationConfig,
             if callback:
                 callback(gen, config.max_generations, gen_data["best_fitness"], gen_data)
 
-        best = max(population, key=lambda c: c.fitness)
+        best = max(population, key=lambda c: c.fitness) if population else CandidateDesign()
         return OptimizationResult(
             best_design=best,
             pareto_front=_pareto_from_population(population, config.objectives, best),
@@ -1463,20 +1804,42 @@ def _run_particle_swarm(config: OptimizationConfig,
         # Initialise
         positions = rng.uniform(lo, hi, size=(pop_size, n))
         for i in range(pop_size):
-            _valid_vector(positions, i, dvs, config.design_variables, lo, hi, rng)
+            _valid_vector(positions, i, dvs, config.design_variables, lo, hi, rng,
+                          base=base_config)
         velocities = rng.uniform(-v_max, v_max, size=(pop_size, n))
         p_best_pos = positions.copy()
         p_best_fit = np.full(pop_size, -np.inf)
         g_best_pos = positions[0].copy()
         g_best_fit = -np.inf
+        # PSO is not elitist: particles fly away from the global best, so the
+        # final swarm need not contain it. Keep the winning design itself, or
+        # the reported best_fitness and the returned best_design disagree.
+        g_best_design = None
 
         init_dicts = [_vec_to_dict(positions[i], dvs, config.design_variables)
                       for i in range(pop_size)]
         init_seeds = [i * 23 for i in range(pop_size)]
         population = _parallel_eval(executor, base_config, init_dicts, config,
                                     init_seeds, cancel_flag=cancel_flag)
-        population = [c for c in population if c is not None]
-        total_evals += config.mc_sims_per_candidate * len(population)
+        # Cancelling mid-initialisation leaves None slots. Drop those particles
+        # from EVERY per-particle array at once, so positions / velocities /
+        # personal bests stay index-aligned with the candidate list below.
+        keep = [i for i, c in enumerate(population) if c is not None]
+        population = [population[i] for i in keep]
+        positions = positions[keep]
+        velocities = velocities[keep]
+        p_best_pos = p_best_pos[keep]
+        p_best_fit = p_best_fit[keep]
+        pop_size = len(population)
+        total_evals += config.mc_sims_per_candidate * pop_size
+
+        if pop_size == 0:
+            return OptimizationResult(
+                all_designs=[],
+                total_evaluations=total_evals,
+                elapsed_time=time.time() - t0,
+                algorithm_used="pso",
+            )
 
         for i in range(pop_size):
             cd = population[i]
@@ -1486,6 +1849,7 @@ def _run_particle_swarm(config: OptimizationConfig,
             if cd.fitness > g_best_fit:
                 g_best_fit = cd.fitness
                 g_best_pos = positions[i].copy()
+                g_best_design = cd
 
         gen_history = []
 
@@ -1516,8 +1880,14 @@ def _run_particle_swarm(config: OptimizationConfig,
                     if dv.var_type == "integer":
                         positions[i, d] = round(positions[i, d])
 
-            swarm_dicts = [_vec_to_dict(positions[i], dvs, config.design_variables)
+            swarm_dicts = [_repair_individual(
+                               _vec_to_dict(positions[i], dvs, config.design_variables),
+                               config.design_variables, base_config)
                            for i in range(pop_size)]
+            # Fold the repair back into the swarm, so personal/global bests
+            # record the design that was actually flown.
+            for i in range(pop_size):
+                positions[i] = _dict_to_vec(swarm_dicts[i], dvs)
             swarm_seeds = [total_evals + k for k in range(pop_size)]
             new_cds = _parallel_eval(executor, base_config, swarm_dicts, config,
                                      swarm_seeds, cancel_flag=cancel_flag)
@@ -1535,16 +1905,17 @@ def _run_particle_swarm(config: OptimizationConfig,
                 if cd.fitness > g_best_fit:
                     g_best_fit = cd.fitness
                     g_best_pos = positions[i].copy()
+                    g_best_design = cd
 
-            fitnesses = [c.fitness for c in population]
+            fitnesses = _finite_fitnesses(population)
             apogees = [c.mc_stats.get("mean_apogee", 0) if c.mc_stats else 0 for c in population]
             feasible_pct = sum(1 for c in population if c.feasible) / len(population) * 100
             gen_data = {
                 "phase": "generation",
                 "generation": gen,
                 "best_fitness": g_best_fit,
-                "mean_fitness": float(np.mean(fitnesses)),
-                "worst_fitness": min(fitnesses),
+                "mean_fitness": float(np.mean(fitnesses)) if fitnesses else 0.0,
+                "worst_fitness": min(fitnesses) if fitnesses else 0.0,
                 "feasible_pct": feasible_pct,
                 "best_apogee": max(apogees),
             }
@@ -1552,7 +1923,10 @@ def _run_particle_swarm(config: OptimizationConfig,
             if callback:
                 callback(gen, config.max_generations, g_best_fit, gen_data)
 
-        best = max(population, key=lambda c: c.fitness)
+        if g_best_design is not None:
+            best = g_best_design
+        else:
+            best = max(population, key=lambda c: c.fitness) if population else CandidateDesign()
         return OptimizationResult(
             best_design=best,
             pareto_front=_pareto_from_population(population, config.objectives, best),
@@ -1565,6 +1939,15 @@ def _run_particle_swarm(config: OptimizationConfig,
     finally:
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _dict_to_vec(d: dict, enabled_dvs: list) -> np.ndarray:
+    """Inverse of :func:`_vec_to_dict` over the enabled variables.
+
+    Lets DE/PSO write a repaired candidate back into their numeric population,
+    so the stored vector always matches the design that was actually simulated.
+    """
+    return np.array([float(d[dv.name]) for dv in enabled_dvs], dtype=float)
 
 
 def _vec_to_dict(vec: np.ndarray, enabled_dvs: list, all_dvs: list) -> dict:
@@ -1626,11 +2009,59 @@ class _OptimizationWorkerThread(QThread):
             if self._cancel[0]:
                 return
 
+            result = self._validate_best(result)
+
+            if self._cancel[0]:
+                return
+
             self.all_done.emit(result)
 
         except Exception as e:
             logger.error(f"Optimisation worker failed: {e}", exc_info=True)
             self.failed.emit(str(e))
+
+    def _validate_best(self, result: OptimizationResult) -> OptimizationResult:
+        """Re-score the winning design with the configured validation sample count.
+
+        The 'Validation Sims' control promised "MC simulations for final
+        validation of top designs", but ``validation_mc_sims`` was never read by
+        anything — the reported winner carried whatever noise a
+        ``mc_sims_per_candidate``-sized sample gave it. Re-evaluating the single
+        best design at the larger sample size costs one extra batch and makes
+        the headline numbers trustworthy.
+        """
+        cfg = self._config
+        n_val = getattr(cfg, "validation_mc_sims", 0) or 0
+        best = result.best_design
+
+        if best is None or not best.variables or n_val <= cfg.mc_sims_per_candidate:
+            return result
+
+        self.status_update.emit({
+            "phase": "validating",
+            "message": f"Validating best design ({n_val} MC sims)",
+            "generation": cfg.max_generations,
+            "evaluations": result.total_evaluations,
+            "best_fitness": best.fitness,
+        })
+
+        try:
+            validated = evaluate_candidate(
+                self._base, best.variables, cfg.design_variables, cfg.objectives,
+                cfg.constraints, cfg.correlations, n_val, seed=99991,
+                target_apogee=cfg.target_apogee, mission_mode=cfg.mission_mode,
+                robust_mode=cfg.robust_mode)
+        except Exception as e:
+            logger.warning(f"Validation pass failed, keeping search estimate: {e}")
+            return result
+
+        validated.mc_stats["validated_sims"] = n_val
+        result.best_design = validated
+        result.total_evaluations += n_val
+        logger.info(
+            f"Validation pass: fitness {best.fitness:.2f} -> {validated.fitness:.2f} "
+            f"over {n_val} MC sims")
+        return result
 
 
 class OptimizationEngine(QObject):
@@ -1658,7 +2089,14 @@ class OptimizationEngine(QObject):
             logger.warning("Optimisation already running")
             return
 
-        base = BatchSimConfig.from_rocket_state(self.engine.state)
+        try:
+            base = BatchSimConfig.from_rocket_state(self.engine.state)
+        except Exception as exc:
+            # Mirror the Monte Carlo engine: report a bad rocket state through
+            # the failure signal instead of raising into the caller's click.
+            logger.error(f"Failed to build base config: {exc}")
+            self.optimization_failed.emit(f"Failed to build base config: {exc}")
+            return
         self._worker = _OptimizationWorkerThread(config, base)
         self._worker.progress.connect(self.progress)
         self._worker.status_update.connect(self.status_update)
@@ -1681,6 +2119,15 @@ class OptimizationEngine(QObject):
         self.optimization_failed.emit(msg)
 
     def _on_finished(self):
-        if self._worker and self._worker._cancel[0]:
-            self.optimization_cancelled.emit()
+        """Worker QThread has exited — safe to drop the reference.
+
+        ``is_running`` guards ``start()`` against rebinding a live thread, so
+        the reference is only cleared here, never on cancel.
+        """
+        worker = self._worker
         self._worker = None
+        cancelled = worker is not None and worker._cancel[0]
+        if worker is not None:
+            worker.deleteLater()
+        if cancelled:
+            self.optimization_cancelled.emit()

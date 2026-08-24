@@ -34,8 +34,19 @@ def rel_error(k2: float, ref: float) -> float:
 
 
 def passes(k2: float, ref: float, tol_rel: float = 0.0,
-           tol_abs: float = 0.0) -> bool:
-    """True if k2 is within EITHER the relative OR absolute tolerance of ref."""
+           tol_abs: float = 0.0, one_sided: str = "") -> bool:
+    """True if k2 is within EITHER the relative OR absolute tolerance of ref.
+
+    ``one_sided`` turns the tolerance into a bound rather than a band, for
+    comparisons where only one direction is a failure: ``"below"`` passes any k2
+    at or under ``ref`` (plus the tolerance as slack), ``"above"`` any k2 at or
+    over it. A mesh-refinement gate needs this — an error that gets *smaller*
+    than the coarse level is the desired outcome, not a deviation from it.
+    """
+    if one_sided == "below" and k2 <= ref:
+        return True
+    if one_sided == "above" and k2 >= ref:
+        return True
     if tol_abs > 0 and abs(k2 - ref) <= tol_abs:
         return True
     if tol_rel > 0 and rel_error(k2, ref) <= tol_rel:
@@ -94,15 +105,16 @@ class Comparison:
     passed: bool = False
     rel_err: float = 0.0
     note: str = ""
+    one_sided: str = ""       # "" | "below" | "above" — see passes()
 
     @classmethod
     def make(cls, label, k2, ref, source, units="", tol_rel=0.0,
-             tol_abs=0.0, note="") -> "Comparison":
+             tol_abs=0.0, note="", one_sided="") -> "Comparison":
         return cls(
             label=label, k2=float(k2), ref=float(ref), source=source,
             units=units, tol_rel=tol_rel, tol_abs=tol_abs,
-            passed=passes(k2, ref, tol_rel, tol_abs),
-            rel_err=rel_error(k2, ref), note=note,
+            passed=passes(k2, ref, tol_rel, tol_abs, one_sided),
+            rel_err=rel_error(k2, ref), note=note, one_sided=one_sided,
         )
 
 

@@ -43,52 +43,17 @@ from PyQt6.QtCore import Qt, pyqtSignal, QThread
 
 from ui.icons import icon as app_icon
 
+from ui import theme
+
 logger = logging.getLogger("K2.OptimizationWS")
 
 # ── Stylesheet constants (matches Monte Carlo workspace) ────────────────────
 
-_GRP = """
-QGroupBox { color:#8b949e; font-size:11px; font-weight:600;
-  border:1px solid #21262d; border-radius:6px; margin-top:10px; padding-top:6px; }
-QGroupBox::title { subcontrol-origin:margin; left:10px; padding:0 4px; }
-"""
-
-_BTN_P = """
-QPushButton { background:#1f6feb; color:#fff; font-weight:700; font-size:12px;
-  border:none; border-radius:6px; padding:9px 14px; }
-QPushButton:hover { background:#388bfd; }
-QPushButton:disabled { background:#21262d; color:#484f58; }
-"""
-
-_BTN_D = """
-QPushButton { background:#da3633; color:#fff; font-weight:700; font-size:12px;
-  border:none; border-radius:6px; padding:9px 14px; }
-QPushButton:hover { background:#f85149; }
-QPushButton:disabled { background:#21262d; color:#484f58; }
-"""
-
-_BTN_S = """
-QPushButton { background:#21262d; color:#c9d1d9; font-weight:600; font-size:11px;
-  border:1px solid #30363d; border-radius:6px; padding:7px 12px; }
-QPushButton:hover { background:#30363d; border-color:#58a6ff; }
-QPushButton:disabled { color:#484f58; }
-"""
-
-_BTN_SUCCESS = """
-QPushButton { background:#238636; color:#fff; font-weight:600; font-size:11px;
-  border:none; border-radius:6px; padding:7px 12px; }
-QPushButton:hover { background:#2ea043; }
-QPushButton:disabled { background:#21262d; color:#484f58; }
-"""
-
-_VAL = ("color:#e6edf3; font-family:'Cascadia Code',monospace; font-size:13px;"
-        "font-weight:600; padding:2px 6px; background:#161b22; border-radius:4px;")
-
-_CHK = """
-QCheckBox { color:#c9d1d9; spacing:6px; font-size:11px; }
-QCheckBox::indicator { width:14px; height:14px; border:1px solid #30363d; border-radius:3px;
-  background:#0d1117; }
-QCheckBox::indicator:checked { background:#1f6feb; border-color:#1f6feb; }
+_CHK = f"""
+QCheckBox {{ color:{theme.TEXT}; spacing:6px; font-size:11px; }}
+QCheckBox::indicator {{ width:14px; height:14px; border:1px solid {theme.LINE}; border-radius:3px;
+  background:{theme.BG}; }}
+QCheckBox::indicator:checked {{ background:{theme.ACCENT_DEEP}; border-color:{theme.ACCENT_DEEP}; }}
 """
 
 _COMBO_SMALL = """
@@ -98,28 +63,28 @@ QComboBox { font-size:11px; padding:3px 6px; min-width:90px; }
 
 def _vl(text: str = "—") -> QLabel:
     lbl = QLabel(text)
-    lbl.setStyleSheet(_VAL)
+    lbl.setProperty("value", True)
     return lbl
 
 
 # ── Dark-themed matplotlib helpers ───────────────────────────────────────────
 
 def _style_ax(ax, title="", xlabel="", ylabel=""):
-    ax.set_facecolor("#161b22")
-    ax.set_title(title, color="#58a6ff", fontsize=12, fontweight="bold", pad=10)
-    ax.set_xlabel(xlabel, color="#8b949e", fontsize=10)
-    ax.set_ylabel(ylabel, color="#8b949e", fontsize=10)
-    ax.tick_params(colors="#484f58", labelsize=9)
+    ax.set_facecolor(theme.PANEL)
+    ax.set_title(title, color=theme.TEXT, fontsize=12, fontweight="bold", pad=10)
+    ax.set_xlabel(xlabel, color=theme.TEXT_DIM, fontsize=10)
+    ax.set_ylabel(ylabel, color=theme.TEXT_DIM, fontsize=10)
+    ax.tick_params(colors=theme.LINE_STRONG, labelsize=9)
     for spine in ("bottom", "left"):
-        ax.spines[spine].set_color("#30363d")
+        ax.spines[spine].set_color(theme.LINE)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
-    ax.grid(True, alpha=0.15, color="#30363d")
+    ax.grid(True, alpha=0.15, color=theme.LINE)
 
 
 def _dark_figure(rows=1, cols=1, figsize=(8, 5)):
     fig = Figure(figsize=figsize, dpi=100)
-    fig.patch.set_facecolor("#0d1117")
+    fig.patch.set_facecolor(theme.BG)
     if rows == 1 and cols == 1:
         ax = fig.add_subplot(111)
         _style_ax(ax)
@@ -153,9 +118,16 @@ class _DOEWorker(QThread):
             from core.batch_simulation import run_batch_simulation
             n_vars = len(self._ev)
             if self._method == "Full Factorial":
-                levels = max(2, int(round(self._n ** (1.0 / n_vars))))
+                # Pick the largest level count whose FULL grid fits the sample
+                # budget. Rounding up and then slicing [:n] chopped a
+                # contiguous slab off the grid - one whole level of the first
+                # variable - which unbalanced the median split the main-effects
+                # plot is built on.
+                levels = max(2, int(np.floor(self._n ** (1.0 / n_vars))))
+                while levels > 2 and levels ** n_vars > self._n:
+                    levels -= 1
                 grids = [np.linspace(0, 1, levels) for _ in range(n_vars)]
-                dm = np.array(np.meshgrid(*grids)).T.reshape(-1, n_vars)[:self._n]
+                dm = np.array(np.meshgrid(*grids)).T.reshape(-1, n_vars)
             else:  # Latin Hypercube / Taguchi
                 from scipy.stats.qmc import LatinHypercube
                 n = min(self._n, 27) if self._method == "Taguchi" else self._n
@@ -173,6 +145,12 @@ class _DOEWorker(QThread):
             self.finished_ok.emit(dm, responses)
         except Exception as e:
             self.failed.emit(str(e))
+
+
+def _rankdata(a) -> np.ndarray:
+    """Average-tie ranks of *a* — the rank transform PRCC is built on."""
+    from scipy.stats import rankdata
+    return np.asarray(rankdata(a), dtype=np.float64)
 
 
 class _SensitivityWorker(QThread):
@@ -237,20 +215,38 @@ class _SensitivityWorker(QThread):
                     st.append(min(max(stv, s1v), 1.0))
                 out["s1"], out["st"] = s1, st
             elif self._method == "PRCC":
-                from scipy.stats import spearmanr
+                # Partial Rank Correlation Coefficient. The previous version
+                # was a bare Spearman rank correlation with nothing partialled
+                # out — the marginal correlation, not the partial one. Proper
+                # PRCC: rank-transform everything, linearly regress both the
+                # input and the response on the OTHER inputs, then correlate
+                # the residuals.
                 prcc = []
+                ranks_X = np.apply_along_axis(_rankdata, 0, X)
+                ranks_y = _rankdata(y)
                 for j in range(n_vars):
                     try:
-                        r, _ = spearmanr(X[:, j], y)
-                        prcc.append(r)
+                        others = np.delete(ranks_X, j, axis=1)
+                        # Design matrix with intercept for the nuisance regression.
+                        A = np.column_stack([np.ones(len(ranks_y)), others])
+                        # Residuals of X_j and y after removing the other inputs.
+                        res_x = ranks_X[:, j] - A @ np.linalg.lstsq(A, ranks_X[:, j], rcond=None)[0]
+                        res_y = ranks_y - A @ np.linalg.lstsq(A, ranks_y, rcond=None)[0]
+                        sx, sy = np.std(res_x), np.std(res_y)
+                        if sx < 1e-12 or sy < 1e-12:
+                            prcc.append(0.0)
+                        else:
+                            prcc.append(float(np.mean(
+                                (res_x - res_x.mean()) * (res_y - res_y.mean())) / (sx * sy)))
                     except Exception:
-                        prcc.append(0)
+                        prcc.append(0.0)
                 out["prcc"] = prcc
             else:  # Morris Screening — extra paired elementary-effect sims
                 mu_star, sigma_vals = [], []
                 for j in range(n_vars):
                     key, vmin, vmax = ev[j]
                     delta = 0.1
+                    span = (vmax - vmin) or 1.0
                     effects = []
                     for i in range(min(n - 1, 50)):
                         v1 = X[i, j]
@@ -263,7 +259,15 @@ class _SensitivityWorker(QThread):
                         try:
                             r1 = run_batch_simulation(cfg1, seed=1000 + i).apogee
                             r2 = run_batch_simulation(cfg2, seed=1000 + i).apogee
-                            dx = v2 - v1
+                            # Normalise the step by the variable's own range.
+                            # Raw (r2-r1)/dx is metres-of-apogee per metre of
+                            # diameter for one variable and per kilogram for
+                            # the next, so the mu* bar chart was ranking
+                            # quantities with different units against each
+                            # other. Dividing by the range makes every
+                            # elementary effect "apogee change per full-range
+                            # move", which is comparable.
+                            dx = (v2 - v1) / span
                             if abs(dx) > 1e-12:
                                 effects.append((r2 - r1) / dx)
                         except Exception:
@@ -332,10 +336,7 @@ class OptimizationWorkspace(QWidget):
 
         # Title
         title = QLabel("DESIGN OPTIMIZATION")
-        title.setStyleSheet(
-            "color:#58a6ff; font-size:16px; font-weight:700; "
-            "letter-spacing:2px; padding:2px 0 6px 0;"
-        )
+        title.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(title)
 
@@ -356,7 +357,6 @@ class OptimizationWorkspace(QWidget):
 
     def _build_algorithm_group(self) -> QGroupBox:
         g = QGroupBox("Algorithm")
-        g.setStyleSheet(_GRP)
         f = QFormLayout()
         f.setSpacing(6)
 
@@ -396,7 +396,6 @@ class OptimizationWorkspace(QWidget):
 
     def _build_mode_group(self) -> QGroupBox:
         g = QGroupBox("Optimization Mode")
-        g.setStyleSheet(_GRP)
         vl = QVBoxLayout()
         vl.setSpacing(4)
 
@@ -408,7 +407,7 @@ class OptimizationWorkspace(QWidget):
         ]
         for i, (label, val) in enumerate(modes):
             rb = QRadioButton(label)
-            rb.setStyleSheet("color:#c9d1d9; font-size:11px;")
+            rb.setStyleSheet(f"color:{theme.TEXT}; font-size:11px;")
             rb.setProperty("mode_value", val)
             if i == 0:
                 rb.setChecked(True)
@@ -422,7 +421,6 @@ class OptimizationWorkspace(QWidget):
 
     def _build_mc_group(self) -> QGroupBox:
         g = QGroupBox("Monte Carlo Settings")
-        g.setStyleSheet(_GRP)
         f = QFormLayout()
         f.setSpacing(6)
 
@@ -472,7 +470,6 @@ class OptimizationWorkspace(QWidget):
 
     def _build_surrogate_group(self) -> QGroupBox:
         g = QGroupBox("Surrogate Model")
-        g.setStyleSheet(_GRP)
         vl = QVBoxLayout()
         vl.setSpacing(6)
 
@@ -517,18 +514,15 @@ class OptimizationWorkspace(QWidget):
 
     def _build_variables_group(self) -> QGroupBox:
         g = QGroupBox("Design Variables")
-        g.setStyleSheet(_GRP)
         vl = QVBoxLayout()
         vl.setSpacing(4)
 
         # Quick actions row
         hl = QHBoxLayout()
         btn_all = QPushButton("Select All")
-        btn_all.setStyleSheet(_BTN_S)
         btn_all.setFixedHeight(24)
         btn_all.clicked.connect(lambda: self._toggle_all_vars(True))
         btn_none = QPushButton("Deselect All")
-        btn_none.setStyleSheet(_BTN_S)
         btn_none.setFixedHeight(24)
         btn_none.clicked.connect(lambda: self._toggle_all_vars(False))
         hl.addWidget(btn_all)
@@ -544,7 +538,7 @@ class OptimizationWorkspace(QWidget):
                 ("fin_span", "Fin Span", 0.02, 0.25, "m"),
                 ("fin_root_chord", "Fin Root Chord", 0.03, 0.40, "m"),
                 ("fin_tip_chord", "Fin Tip Chord", 0.01, 0.20, "m"),
-                ("fin_sweep_angle", "Fin Sweep", 0, 60, "°"),
+                ("fin_sweep_angle", "Fin Sweep", 0, 60, "°"),   # deg -> rad on read
                 ("fin_thickness", "Fin Thickness", 0.001, 0.01, "m"),
                 ("fin_count", "Num Fins", 3, 6, ""),
             ],
@@ -570,7 +564,7 @@ class OptimizationWorkspace(QWidget):
         for cat_name, variables in categories.items():
             cat_lbl = QLabel(f"  ▸ {cat_name}")
             cat_lbl.setStyleSheet(
-                "color:#58a6ff; font-size:11px; font-weight:700; padding:4px 0 2px 0;"
+                f"color:{theme.ACCENT}; font-size:11px; font-weight:700; padding:4px 0 2px 0;"
             )
             vl.addWidget(cat_lbl)
 
@@ -584,34 +578,38 @@ class OptimizationWorkspace(QWidget):
                 row.addWidget(chk)
 
                 lbl = QLabel(display)
-                lbl.setStyleSheet("color:#c9d1d9; font-size:10px;")
+                lbl.setStyleSheet(f"color:{theme.TEXT}; font-size:10px;")
                 lbl.setFixedWidth(90)
                 row.addWidget(lbl)
 
                 spin_min = QDoubleSpinBox()
+                # Precision has to follow the small end too: one decimal
+                # turned a 0.01 kg propellant minimum into 0.0 and a 0.05 m^2
+                # drogue minimum into 0.1.
+                decimals = 3 if (vmax < 1 or vmin < 0.5) else 1
                 spin_min.setRange(vmin * 0.1, vmax * 5)
                 spin_min.setValue(vmin)
-                spin_min.setDecimals(3 if vmax < 1 else 1)
+                spin_min.setDecimals(decimals)
                 spin_min.setFixedWidth(70)
                 spin_min.setToolTip(f"Min {unit}")
                 row.addWidget(spin_min)
 
                 dash = QLabel("–")
-                dash.setStyleSheet("color:#484f58;")
+                dash.setStyleSheet(f"color:{theme.LINE_STRONG};")
                 dash.setFixedWidth(8)
                 row.addWidget(dash)
 
                 spin_max = QDoubleSpinBox()
                 spin_max.setRange(vmin * 0.1, vmax * 5)
                 spin_max.setValue(vmax)
-                spin_max.setDecimals(3 if vmax < 1 else 1)
+                spin_max.setDecimals(decimals)
                 spin_max.setFixedWidth(70)
                 spin_max.setToolTip(f"Max {unit}")
                 row.addWidget(spin_max)
 
                 if unit:
                     u = QLabel(unit)
-                    u.setStyleSheet("color:#484f58; font-size:9px;")
+                    u.setStyleSheet(f"color:{theme.LINE_STRONG}; font-size:9px;")
                     u.setFixedWidth(22)
                     row.addWidget(u)
 
@@ -626,7 +624,6 @@ class OptimizationWorkspace(QWidget):
 
     def _build_objectives_group(self) -> QGroupBox:
         g = QGroupBox("Objectives")
-        g.setStyleSheet(_GRP)
         vl = QVBoxLayout()
         vl.setSpacing(4)
 
@@ -655,7 +652,7 @@ class OptimizationWorkspace(QWidget):
         for cat_label, objs in objectives_defs:
             cl = QLabel(cat_label)
             cl.setStyleSheet(
-                "color:#7ee787; font-size:11px; font-weight:700; padding:4px 0 2px 0;"
+                f"color:{theme.OK}; font-size:11px; font-weight:700; padding:4px 0 2px 0;"
             )
             vl.addWidget(cl)
 
@@ -695,7 +692,6 @@ class OptimizationWorkspace(QWidget):
 
     def _build_constraints_group(self) -> QGroupBox:
         g = QGroupBox("Constraints")
-        g.setStyleSheet(_GRP)
         vl = QVBoxLayout()
         vl.setSpacing(4)
 
@@ -732,7 +728,7 @@ class OptimizationWorkspace(QWidget):
 
             if unit:
                 u = QLabel(unit)
-                u.setStyleSheet("color:#484f58; font-size:9px;")
+                u.setStyleSheet(f"color:{theme.LINE_STRONG}; font-size:9px;")
                 u.setFixedWidth(28)
                 row.addWidget(u)
 
@@ -747,18 +743,17 @@ class OptimizationWorkspace(QWidget):
 
     def _build_actions_group(self) -> QGroupBox:
         g = QGroupBox("Actions")
-        g.setStyleSheet(_GRP)
         vl = QVBoxLayout()
         vl.setSpacing(8)
 
         self.btn_run = QPushButton(app_icon("run", color="#fff"), "START OPTIMIZATION")
-        self.btn_run.setStyleSheet(_BTN_P)
+        self.btn_run.setProperty("primary", True)
         self.btn_run.setMinimumHeight(42)
         self.btn_run.clicked.connect(self._on_run)
         vl.addWidget(self.btn_run)
 
         self.btn_cancel = QPushButton(app_icon("stop", color="#fff"), "CANCEL")
-        self.btn_cancel.setStyleSheet(_BTN_D)
+        self.btn_cancel.setProperty("danger", True)
         self.btn_cancel.setMinimumHeight(42)
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.clicked.connect(self._on_cancel)
@@ -770,34 +765,31 @@ class OptimizationWorkspace(QWidget):
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFixedHeight(14)
         self.progress_bar.setStyleSheet(
-            "QProgressBar { background:#21262d; border-radius:7px; border:none; "
-            "color:#c9d1d9; font-size:9px; }"
+            f"QProgressBar {{ background:{theme.RAISED}; border-radius:7px; border:none; "
+            f"color:{theme.TEXT}; font-size:9px; }}"
             "QProgressBar::chunk { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-            "stop:0 #1f6feb, stop:1 #58a6ff); border-radius:7px; }"
+            f"stop:0 {theme.ACCENT_DEEP}, stop:1 {theme.ACCENT}); border-radius:7px; }}"
         )
         vl.addWidget(self.progress_bar)
 
         self.progress_label = QLabel("Ready — configure parameters and start")
-        self.progress_label.setStyleSheet("color:#8b949e; font-size:11px;")
+        self.progress_label.setStyleSheet(f"color:{theme.TEXT_DIM}; font-size:11px;")
         self.progress_label.setWordWrap(True)
         vl.addWidget(self.progress_label)
 
         # Export row
         eh = QHBoxLayout()
         self.btn_export_csv = QPushButton(app_icon("export"), "CSV")
-        self.btn_export_csv.setStyleSheet(_BTN_S)
         self.btn_export_csv.setEnabled(False)
         self.btn_export_csv.clicked.connect(lambda: self._on_export("csv"))
         eh.addWidget(self.btn_export_csv)
 
         self.btn_export_json = QPushButton(app_icon("export"), "JSON")
-        self.btn_export_json.setStyleSheet(_BTN_S)
         self.btn_export_json.setEnabled(False)
         self.btn_export_json.clicked.connect(lambda: self._on_export("json"))
         eh.addWidget(self.btn_export_json)
 
         self.btn_export_pdf = QPushButton(app_icon("report"), "PDF")
-        self.btn_export_pdf.setStyleSheet(_BTN_S)
         self.btn_export_pdf.setEnabled(False)
         self.btn_export_pdf.clicked.connect(lambda: self._on_export("pdf"))
         eh.addWidget(self.btn_export_pdf)
@@ -818,17 +810,17 @@ class OptimizationWorkspace(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.setStyleSheet(
-            "QTabWidget::pane { border:1px solid #21262d; }"
-            "QTabBar::tab { background:#161b22; color:#8b949e; padding:6px 12px; "
-            "  border:1px solid #21262d; border-bottom:none; border-radius:4px 4px 0 0; "
+            f"QTabWidget::pane {{ border:1px solid {theme.RAISED}; }}"
+            f"QTabBar::tab {{ background:{theme.PANEL}; color:{theme.TEXT_DIM}; padding:6px 12px; "
+            f"  border:1px solid {theme.RAISED}; border-bottom:none; border-radius:4px 4px 0 0; "
             "  font-size:11px; }"
-            "QTabBar::tab:selected { background:#0d1117; color:#58a6ff; font-weight:700; }"
+            f"QTabBar::tab:selected {{ background:{theme.BG}; color:{theme.ACCENT}; font-weight:700; }}"
             # Visible scroll buttons when the tabs overflow.
             "QTabBar::scroller { width:30px; }"
-            "QTabBar QToolButton { background:#21262d; border:1px solid #30363d; "
-            "  border-radius:4px; margin:2px 1px; width:22px; color:#c9d1d9; }"
-            "QTabBar QToolButton:hover { background:#1f6feb; border-color:#1f6feb; }"
-            "QTabBar QToolButton:disabled { background:#161b22; border-color:#21262d; }"
+            f"QTabBar QToolButton {{ background:{theme.RAISED}; border:1px solid {theme.LINE}; "
+            f"  border-radius:4px; margin:2px 1px; width:22px; color:{theme.TEXT}; }}"
+            f"QTabBar QToolButton:hover {{ background:{theme.ACCENT_DEEP}; border-color:{theme.ACCENT_DEEP}; }}"
+            f"QTabBar QToolButton:disabled {{ background:{theme.PANEL}; border-color:{theme.RAISED}; }}"
         )
 
         # Tab 1: Single Objective
@@ -851,7 +843,7 @@ class OptimizationWorkspace(QWidget):
         ctrl_row = QHBoxLayout()
         ctrl_row.setSpacing(8)
         lx = QLabel("X-Axis:")
-        lx.setStyleSheet("color:#8b949e; font-size:11px;")
+        lx.setStyleSheet(f"color:{theme.TEXT_DIM}; font-size:11px;")
         ctrl_row.addWidget(lx)
         self.combo_dse_x = QComboBox()
         self.combo_dse_x.setStyleSheet(_COMBO_SMALL)
@@ -859,7 +851,7 @@ class OptimizationWorkspace(QWidget):
         ctrl_row.addWidget(self.combo_dse_x)
 
         ly = QLabel("Y-Axis:")
-        ly.setStyleSheet("color:#8b949e; font-size:11px;")
+        ly.setStyleSheet(f"color:{theme.TEXT_DIM}; font-size:11px;")
         ctrl_row.addWidget(ly)
         self.combo_dse_y = QComboBox()
         self.combo_dse_y.setStyleSheet(_COMBO_SMALL)
@@ -867,7 +859,7 @@ class OptimizationWorkspace(QWidget):
         ctrl_row.addWidget(self.combo_dse_y)
 
         lc = QLabel("Color:")
-        lc.setStyleSheet("color:#8b949e; font-size:11px;")
+        lc.setStyleSheet(f"color:{theme.TEXT_DIM}; font-size:11px;")
         ctrl_row.addWidget(lc)
         self.combo_dse_color = QComboBox()
         self.combo_dse_color.addItems(["Fitness", "Feasibility", "Apogee", "Stability", "Mach"])
@@ -875,7 +867,6 @@ class OptimizationWorkspace(QWidget):
         ctrl_row.addWidget(self.combo_dse_color)
 
         btn_refresh = QPushButton("Refresh")
-        btn_refresh.setStyleSheet(_BTN_S)
         btn_refresh.setFixedHeight(26)
         btn_refresh.clicked.connect(self._refresh_dse)
         ctrl_row.addWidget(btn_refresh)
@@ -917,7 +908,7 @@ class OptimizationWorkspace(QWidget):
         doe_ctrl.addWidget(self.spin_doe_samples)
 
         self.btn_run_doe = QPushButton(app_icon("run"), "Run DOE")
-        self.btn_run_doe.setStyleSheet(_BTN_SUCCESS)
+        self.btn_run_doe.setProperty("success", True)
         self.btn_run_doe.setFixedHeight(26)
         self.btn_run_doe.clicked.connect(self._on_run_doe)
         doe_ctrl.addWidget(self.btn_run_doe)
@@ -949,7 +940,7 @@ class OptimizationWorkspace(QWidget):
         sens_ctrl.addWidget(self.spin_sens_samples)
 
         self.btn_run_sens = QPushButton(app_icon("run"), "Analyze")
-        self.btn_run_sens.setStyleSheet(_BTN_SUCCESS)
+        self.btn_run_sens.setProperty("success", True)
         self.btn_run_sens.setFixedHeight(26)
         self.btn_run_sens.clicked.connect(self._on_run_sensitivity)
         sens_ctrl.addWidget(self.btn_run_sens)
@@ -969,25 +960,23 @@ class OptimizationWorkspace(QWidget):
 
         trade_ctrl = QHBoxLayout()
         self.btn_add_current = QPushButton("+ Add Current Design")
-        self.btn_add_current.setStyleSheet(_BTN_S)
         self.btn_add_current.setFixedHeight(26)
         self.btn_add_current.clicked.connect(self._on_add_trade_config)
         trade_ctrl.addWidget(self.btn_add_current)
 
         self.btn_add_best = QPushButton("+ Add Best Optimized")
-        self.btn_add_best.setStyleSheet(_BTN_S)
         self.btn_add_best.setFixedHeight(26)
         self.btn_add_best.clicked.connect(self._on_add_best_trade)
         trade_ctrl.addWidget(self.btn_add_best)
 
         self.btn_run_trade = QPushButton(app_icon("run"), "Compare")
-        self.btn_run_trade.setStyleSheet(_BTN_SUCCESS)
+        self.btn_run_trade.setProperty("success", True)
         self.btn_run_trade.setFixedHeight(26)
         self.btn_run_trade.clicked.connect(self._on_run_trade)
         trade_ctrl.addWidget(self.btn_run_trade)
 
         self.btn_clear_trade = QPushButton("Clear")
-        self.btn_clear_trade.setStyleSheet(_BTN_D + "QPushButton{font-size:11px;padding:5px 10px;}")
+        self.btn_clear_trade.setProperty("danger", True)
         self.btn_clear_trade.setFixedHeight(26)
         self.btn_clear_trade.clicked.connect(self._on_clear_trade)
         trade_ctrl.addWidget(self.btn_clear_trade)
@@ -1001,10 +990,10 @@ class OptimizationWorkspace(QWidget):
         ])
         self.trade_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.trade_table.setStyleSheet(
-            "QTableWidget { background:#0d1117; gridline-color:#21262d; font-size:11px; }"
-            "QHeaderView::section { background:#161b22; color:#58a6ff; border:1px solid #21262d; "
+            f"QTableWidget {{ background:{theme.BG}; gridline-color:{theme.RAISED}; font-size:11px; }}"
+            f"QHeaderView::section {{ background:{theme.PANEL}; color:{theme.ACCENT}; border:1px solid {theme.RAISED}; "
             "  padding:4px; font-weight:600; font-size:10px; }"
-            "QTableWidget::item { padding:4px; color:#c9d1d9; }"
+            f"QTableWidget::item {{ padding:4px; color:{theme.TEXT}; }}"
         )
         v7.addWidget(self.trade_table)
 
@@ -1022,10 +1011,10 @@ class OptimizationWorkspace(QWidget):
         ])
         self.history_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.history_table.setStyleSheet(
-            "QTableWidget { background:#0d1117; gridline-color:#21262d; font-size:11px; }"
-            "QHeaderView::section { background:#161b22; color:#58a6ff; border:1px solid #21262d; "
+            f"QTableWidget {{ background:{theme.BG}; gridline-color:{theme.RAISED}; font-size:11px; }}"
+            f"QHeaderView::section {{ background:{theme.PANEL}; color:{theme.ACCENT}; border:1px solid {theme.RAISED}; "
             "  padding:4px; font-weight:600; font-size:10px; }"
-            "QTableWidget::item { padding:4px; color:#c9d1d9; }"
+            f"QTableWidget::item {{ padding:4px; color:{theme.TEXT}; }}"
         )
         self.tabs.addTab(self.history_table, "History")
 
@@ -1048,14 +1037,11 @@ class OptimizationWorkspace(QWidget):
         lay.setSpacing(10)
 
         t = QLabel("Optimization Results")
-        t.setStyleSheet(
-            "color:#58a6ff; font-size:15px; font-weight:700; padding:2px 0 6px 0;"
-        )
+        t.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
         lay.addWidget(t)
 
         # ── Best Design ──
         gb = QGroupBox("Best Design — Parameters")
-        gb.setStyleSheet(_GRP)
         fb = QFormLayout()
         fb.setSpacing(5)
         self.lbl_best_diameter = _vl(); fb.addRow("Diameter:", self.lbl_best_diameter)
@@ -1073,7 +1059,7 @@ class OptimizationWorkspace(QWidget):
         # back to the rocket state so the rest of the app uses it.
         self.btn_apply_design = QPushButton(
             app_icon("import", color="#fff"), "Apply to Design")
-        self.btn_apply_design.setStyleSheet(_BTN_SUCCESS)
+        self.btn_apply_design.setProperty("success", True)
         self.btn_apply_design.setMinimumHeight(34)
         self.btn_apply_design.setEnabled(False)
         self.btn_apply_design.setToolTip(
@@ -1084,7 +1070,6 @@ class OptimizationWorkspace(QWidget):
 
         # ── Performance ──
         gp = QGroupBox("Performance")
-        gp.setStyleSheet(_GRP)
         fp = QFormLayout()
         fp.setSpacing(5)
         self.lbl_perf_apogee = _vl(); fp.addRow("Apogee:", self.lbl_perf_apogee)
@@ -1098,7 +1083,6 @@ class OptimizationWorkspace(QWidget):
 
         # ── Reliability ──
         gr = QGroupBox("Reliability & Uncertainty")
-        gr.setStyleSheet(_GRP)
         fr = QFormLayout()
         fr.setSpacing(5)
         self.lbl_rel_success = _vl(); fr.addRow("Success Rate:", self.lbl_rel_success)
@@ -1112,22 +1096,21 @@ class OptimizationWorkspace(QWidget):
 
         # ── Pareto Solutions ──
         gps = QGroupBox("Pareto Solutions")
-        gps.setStyleSheet(_GRP)
         fps = QVBoxLayout()
         fps.setSpacing(4)
 
         sol_style = (
-            "QPushButton{{color:{c};background:#161b22;border:1px solid #30363d;"
+            f"QPushButton{{{{color:{{c}};background:{theme.PANEL};border:1px solid {theme.LINE};"
             "border-radius:4px;padding:6px;font-size:11px;text-align:left;}}"
-            "QPushButton:hover{{background:#1c2333;border-color:#58a6ff;}}"
+            f"QPushButton:hover{{{{background:#1c2333;border-color:{theme.ACCENT};}}}}"
         )
-        self.btn_sol_apogee = QPushButton(app_icon("apogee", color="#7ee787"), "Best Apogee: —")
-        self.btn_sol_apogee.setStyleSheet(sol_style.format(c="#7ee787"))
+        self.btn_sol_apogee = QPushButton(app_icon("apogee", color=theme.OK), "Best Apogee: —")
+        self.btn_sol_apogee.setStyleSheet(sol_style.format(c=theme.OK))
         self.btn_sol_apogee.clicked.connect(lambda: self._load_pareto_solution("apogee"))
         fps.addWidget(self.btn_sol_apogee)
 
-        self.btn_sol_reliability = QPushButton(app_icon("reliability", color="#58a6ff"), "Best Reliability: —")
-        self.btn_sol_reliability.setStyleSheet(sol_style.format(c="#58a6ff"))
+        self.btn_sol_reliability = QPushButton(app_icon("reliability", color=theme.ACCENT), "Best Reliability: —")
+        self.btn_sol_reliability.setStyleSheet(sol_style.format(c=theme.ACCENT))
         self.btn_sol_reliability.clicked.connect(lambda: self._load_pareto_solution("reliability"))
         fps.addWidget(self.btn_sol_reliability)
 
@@ -1136,8 +1119,8 @@ class OptimizationWorkspace(QWidget):
         self.btn_sol_mass.clicked.connect(lambda: self._load_pareto_solution("mass"))
         fps.addWidget(self.btn_sol_mass)
 
-        self.btn_sol_balanced = QPushButton(app_icon("balanced", color="#f0883e"), "Best Balanced: —")
-        self.btn_sol_balanced.setStyleSheet(sol_style.format(c="#f0883e"))
+        self.btn_sol_balanced = QPushButton(app_icon("balanced", color=theme.ACCENT), "Best Balanced: —")
+        self.btn_sol_balanced.setStyleSheet(sol_style.format(c=theme.ACCENT))
         self.btn_sol_balanced.clicked.connect(lambda: self._load_pareto_solution("balanced"))
         fps.addWidget(self.btn_sol_balanced)
 
@@ -1146,18 +1129,16 @@ class OptimizationWorkspace(QWidget):
 
         # ── Constraint Status ──
         gc = QGroupBox("Constraint Status")
-        gc.setStyleSheet(_GRP)
         self._constraint_layout = QVBoxLayout()
         self._constraint_layout.setSpacing(3)
         self._con_placeholder = QLabel("No results yet")
-        self._con_placeholder.setStyleSheet("color:#484f58; font-size:11px;")
+        self._con_placeholder.setStyleSheet(f"color:{theme.LINE_STRONG}; font-size:11px;")
         self._constraint_layout.addWidget(self._con_placeholder)
         gc.setLayout(self._constraint_layout)
         lay.addWidget(gc)
 
         # ── Improvement Over Baseline ──
         gi = QGroupBox("Improvement Over Baseline")
-        gi.setStyleSheet(_GRP)
         fi = QFormLayout()
         fi.setSpacing(5)
         self.lbl_imp_apogee = _vl(); fi.addRow("Apogee Δ:", self.lbl_imp_apogee)
@@ -1169,7 +1150,6 @@ class OptimizationWorkspace(QWidget):
 
         # ── Optimization Stats ──
         gs = QGroupBox("Optimization Statistics")
-        gs.setStyleSheet(_GRP)
         fs = QFormLayout()
         fs.setSpacing(5)
         self.lbl_stat_evals = _vl(); fs.addRow("Evaluations:", self.lbl_stat_evals)
@@ -1190,6 +1170,32 @@ class OptimizationWorkspace(QWidget):
     #  ACTIONS — Run / Cancel / Export
     # ═════════════════════════════════════════════════════════════════════════
 
+    # Design-variable spin boxes shown in a friendlier unit than the one the
+    # model stores. fin_sweep_angle is the only one: the rocket state and
+    # physics.aerodynamics use RADIANS (`math.cos(fin_sweep)`), while this panel
+    # offers a 0-60 box labelled degrees. Feeding those readings straight
+    # through meant a "60 deg" sweep reached the aero model as 60 radians.
+    _VAR_UI_TO_MODEL = {
+        "fin_sweep_angle": math.pi / 180.0,
+    }
+
+    @classmethod
+    def _to_model_units(cls, var_key: str, value: float) -> float:
+        """Convert one spin-box reading into the unit the model stores."""
+        return float(value) * cls._VAR_UI_TO_MODEL.get(var_key, 1.0)
+
+    def _var_bounds(self, var_key: str, spin_min, spin_max) -> tuple:
+        """(min, max) for *var_key* in model units, low end first."""
+        lo = self._to_model_units(var_key, spin_min.value())
+        hi = self._to_model_units(var_key, spin_max.value())
+        return (lo, hi) if lo <= hi else (hi, lo)
+
+    def _enabled_var_bounds(self) -> list:
+        """[(key, min, max), ...] in model units for every checked variable."""
+        return [(k, *self._var_bounds(k, smin, smax))
+                for k, (chk, smin, smax, _cat) in self._var_widgets.items()
+                if chk.isChecked()]
+
     def _collect_config(self):
         """Build OptimizationConfig from UI widgets."""
         try:
@@ -1209,12 +1215,16 @@ class OptimizationWorkspace(QWidget):
         # Design variables
         design_vars = []
         state = self.engine.state
+        inverted = []
         for var_key, (chk, spin_min, spin_max, cat) in self._var_widgets.items():
             if not chk.isChecked():
                 continue
-            current = getattr(state, var_key, (spin_min.value() + spin_max.value()) / 2)
+            if spin_min.value() > spin_max.value():
+                inverted.append(var_key)
+            vmin, vmax = self._var_bounds(var_key, spin_min, spin_max)
+            current = getattr(state, var_key, (vmin + vmax) / 2)
             if current == 0:
-                current = (spin_min.value() + spin_max.value()) / 2
+                current = (vmin + vmax) / 2
             vtype = "continuous"
             if var_key == "fin_count":
                 vtype = "integer"
@@ -1222,8 +1232,8 @@ class OptimizationWorkspace(QWidget):
                 name=var_key,
                 display_name=chk.parent().findChild(QLabel).text() if chk.parent() else var_key,
                 category=cat,
-                min_val=spin_min.value(),
-                max_val=spin_max.value(),
+                min_val=vmin,
+                max_val=vmax,
                 current_val=float(current),
                 enabled=True,
                 var_type=vtype,
@@ -1232,6 +1242,14 @@ class OptimizationWorkspace(QWidget):
         if not design_vars:
             QMessageBox.warning(self, "Configuration Error",
                 "No design variables selected.\n\nPlease check at least one variable to optimize.")
+            return None
+
+        # An inverted range silently pins the variable: every sample is clamped
+        # by max(min_val, min(max_val, x)), which collapses to min_val.
+        if inverted:
+            QMessageBox.warning(self, "Configuration Error",
+                "Minimum is above maximum for: " + ", ".join(inverted) +
+                "\n\nSwap the bounds for these design variables.")
             return None
 
         # Objectives
@@ -1274,6 +1292,15 @@ class OptimizationWorkspace(QWidget):
         # it as a Mission Target so the optimizer actually hits the target.
         if mode_val == "standard" and self.spin_target_apogee.value() > 0:
             mode_val = "mission"
+
+        # Mission mode scores proximity to a target; with no target every
+        # mission term collapses to zero and only the 0.1-weighted secondary
+        # objectives are left steering the search.
+        if mode_val == "mission" and self.spin_target_apogee.value() <= 0:
+            QMessageBox.warning(self, "Configuration Error",
+                "Mission Target mode needs a target apogee.\n\n"
+                "Set Target Apogee above 0, or pick Standard mode.")
+            return None
 
         # Surrogate
         surr_map = {
@@ -1374,6 +1401,7 @@ class OptimizationWorkspace(QWidget):
         self._conv_bests = []
         self._conv_means = []
         self._conv_worsts = []
+        self._conv_feas = []
         self._ax_conv.clear()
         _style_ax(self._ax_conv, "Fitness Convergence", "Generation", "Fitness")
         self._canvas_conv.draw_idle()
@@ -1475,8 +1503,12 @@ class OptimizationWorkspace(QWidget):
         self._update_results_panel(result)
         self._populate_dse_combos(result)
 
+        # A run that produced no evaluable design (every candidate raised, or
+        # the algorithm bailed after init) still reports; don't crash the
+        # handler dereferencing a missing best design.
+        best_fit = result.best_design.fitness if result.best_design else float("nan")
         logger.info(f"Optimization complete: {n} evals, {t:.1f}s, "
-                     f"best fitness={result.best_design.fitness:.3f}")
+                     f"best fitness={best_fit:.3f}")
 
     def _on_apply_design(self):
         """Write the currently-displayed design's variables into the rocket
@@ -1578,12 +1610,18 @@ class OptimizationWorkspace(QWidget):
         ax.clear()
         _style_ax(ax, "Fitness Convergence", "Generation", "Fitness")
 
-        gens = list(range(len(bests)))
-        ax.plot(gens, bests, color="#7ee787", linewidth=2, label="Best", zorder=4)
-        ax.plot(gens, means, color="#58a6ff", linewidth=1.2, alpha=0.8,
+        # Every series must share one x-axis; a stale series from an earlier
+        # run used to reach matplotlib as a length mismatch and raise.
+        n_pts = min(len(bests), len(means), len(worsts), len(feas))
+        bests, means = list(bests[:n_pts]), list(means[:n_pts])
+        worsts, feas = list(worsts[:n_pts]), list(feas[:n_pts])
+
+        gens = list(range(n_pts))
+        ax.plot(gens, bests, color=theme.OK, linewidth=2, label="Best", zorder=4)
+        ax.plot(gens, means, color=theme.ACCENT, linewidth=1.2, alpha=0.8,
                 linestyle="--", label="Mean", zorder=3)
-        ax.fill_between(gens, worsts, bests, alpha=0.12, color="#58a6ff", zorder=1)
-        ax.plot(gens, worsts, color="#f85149", linewidth=0.8, alpha=0.5,
+        ax.fill_between(gens, worsts, bests, alpha=0.12, color=theme.ACCENT, zorder=1)
+        ax.plot(gens, worsts, color=theme.ERR, linewidth=0.8, alpha=0.5,
                 label="Worst", zorder=2)
 
         # Robust y-limits from the Best/Mean curves (the meaningful signal).
@@ -1604,16 +1642,16 @@ class OptimizationWorkspace(QWidget):
         # Feasible-% secondary curve.
         if any(f for f in feas):
             ax2 = ax.twinx()
-            ax2.plot(gens, feas, color="#d29922", linewidth=1.1, alpha=0.7,
+            ax2.plot(gens, feas, color=theme.WARN, linewidth=1.1, alpha=0.7,
                      linestyle=":", label="Feasible %")
             ax2.set_ylim(0, 105)
-            ax2.set_ylabel("Feasible %", color="#d29922", fontsize=9)
-            ax2.tick_params(axis="y", colors="#d29922", labelsize=8)
-            ax2.spines["right"].set_color("#30363d")
+            ax2.set_ylabel("Feasible %", color=theme.WARN, fontsize=9)
+            ax2.tick_params(axis="y", colors=theme.WARN, labelsize=8)
+            ax2.spines["right"].set_color(theme.LINE)
             ax2.spines["top"].set_visible(False)
 
-        ax.legend(facecolor="#161b22", edgecolor="#30363d",
-                  labelcolor="#c9d1d9", fontsize=8, loc="lower right")
+        ax.legend(facecolor=theme.PANEL, edgecolor=theme.LINE,
+                  labelcolor=theme.TEXT, fontsize=8, loc="lower right")
         fig.tight_layout()
         if draw_idle:
             self._canvas_conv.draw_idle()
@@ -1662,32 +1700,32 @@ class OptimizationWorkspace(QWidget):
         y_all = [d.objectives.get(k2, 0) for d in result.all_designs]
         feasible = [d.feasible for d in result.all_designs]
 
-        colors = ["#58a6ff" if f else "#484f58" for f in feasible]
+        colors = [theme.ACCENT if f else theme.LINE_STRONG for f in feasible]
         ax.scatter(x_all, y_all, c=colors, s=12, alpha=0.4, zorder=2)
 
         # Pareto front
         if result.pareto_front:
             x_p = [d.objectives.get(k1, 0) for d in result.pareto_front]
             y_p = [d.objectives.get(k2, 0) for d in result.pareto_front]
-            ax.scatter(x_p, y_p, c="#7ee787", s=40, zorder=4,
-                       edgecolors="#ffffff", linewidths=0.8, label="Pareto Front")
+            ax.scatter(x_p, y_p, c=theme.OK, s=40, zorder=4,
+                       edgecolors=theme.TEXT_BRIGHT, linewidths=0.8, label="Pareto Front")
             # Sort and connect
             pairs = sorted(zip(x_p, y_p))
             if pairs:
                 ax.plot([p[0] for p in pairs], [p[1] for p in pairs],
-                        color="#7ee787", linewidth=1.5, alpha=0.6, zorder=3)
+                        color=theme.OK, linewidth=1.5, alpha=0.6, zorder=3)
 
         # Best design
         if result.best_design:
             bx = result.best_design.objectives.get(k1, 0)
             by = result.best_design.objectives.get(k2, 0)
-            ax.scatter([bx], [by], c="#f0883e", s=100, marker="*",
+            ax.scatter([bx], [by], c=theme.ACCENT, s=100, marker="*",
                        zorder=5, label="Best Design")
 
-        ax.set_xlabel(k1.replace("_", " ").title(), color="#8b949e", fontsize=10)
-        ax.set_ylabel(k2.replace("_", " ").title(), color="#8b949e", fontsize=10)
-        ax.legend(facecolor="#161b22", edgecolor="#30363d",
-                  labelcolor="#c9d1d9", fontsize=8, loc="upper right")
+        ax.set_xlabel(k1.replace("_", " ").title(), color=theme.TEXT_DIM, fontsize=10)
+        ax.set_ylabel(k2.replace("_", " ").title(), color=theme.TEXT_DIM, fontsize=10)
+        ax.legend(facecolor=theme.PANEL, edgecolor=theme.LINE,
+                  labelcolor=theme.TEXT, fontsize=8, loc="upper right")
         ax.figure.tight_layout()
         self._canvas_multi.draw()
 
@@ -1699,7 +1737,7 @@ class OptimizationWorkspace(QWidget):
         if not result.pareto_front or len(result.pareto_front) < 2:
             ax.text(0.5, 0.5, "Select ≥2 objectives, then run\nto generate a Pareto front",
                     transform=ax.transAxes, ha="center", va="center",
-                    color="#484f58", fontsize=13)
+                    color=theme.LINE_STRONG, fontsize=13)
             self._canvas_pareto.draw()
             return
 
@@ -1719,12 +1757,12 @@ class OptimizationWorkspace(QWidget):
         n = len(result.pareto_front)
         colors = np.linspace(0.2, 0.9, n)
         scatter = ax.scatter(x_vals, y_vals, c=colors, cmap="cool",
-                             s=60, zorder=3, edgecolors="#30363d", linewidths=0.5)
+                             s=60, zorder=3, edgecolors=theme.LINE, linewidths=0.5)
 
         # Connect the front
         pairs = sorted(zip(x_vals, y_vals))
         ax.plot([p[0] for p in pairs], [p[1] for p in pairs],
-                color="#58a6ff", linewidth=1.5, alpha=0.4, zorder=2)
+                color=theme.ACCENT, linewidth=1.5, alpha=0.4, zorder=2)
 
         # Annotate best solutions (direction-aware: best of a minimize
         # objective is its minimum)
@@ -1733,8 +1771,8 @@ class OptimizationWorkspace(QWidget):
             ax.annotate("Best " + k1.replace("_", " "),
                         (x_vals[idx_best_x], y_vals[idx_best_x]),
                         textcoords="offset points", xytext=(10, 10),
-                        fontsize=8, color="#7ee787",
-                        arrowprops=dict(arrowstyle="->", color="#7ee787", lw=0.8))
+                        fontsize=8, color=theme.OK,
+                        arrowprops=dict(arrowstyle="->", color=theme.OK, lw=0.8))
 
             idx_best_y = int(np.argmax(y_vals) if dir2 == "maximize" else np.argmin(y_vals))
             if idx_best_y != idx_best_x:
@@ -1747,13 +1785,13 @@ class OptimizationWorkspace(QWidget):
         # Utopia point (per-axis ideal, respecting objective direction)
         ux = (max(x_vals) if dir1 == "maximize" else min(x_vals)) if x_vals else 0
         uy = (max(y_vals) if dir2 == "maximize" else min(y_vals)) if y_vals else 0
-        ax.scatter([ux], [uy], c="#f0883e", s=120, marker="D", zorder=5,
-                   label="Utopia Point", edgecolors="#ffffff", linewidths=1)
+        ax.scatter([ux], [uy], c=theme.ACCENT, s=120, marker="D", zorder=5,
+                   label="Utopia Point", edgecolors=theme.TEXT_BRIGHT, linewidths=1)
 
-        ax.set_xlabel(k1.replace("_", " ").title(), color="#8b949e", fontsize=10)
-        ax.set_ylabel(k2.replace("_", " ").title(), color="#8b949e", fontsize=10)
-        ax.legend(facecolor="#161b22", edgecolor="#30363d",
-                  labelcolor="#c9d1d9", fontsize=8, loc="upper right")
+        ax.set_xlabel(k1.replace("_", " ").title(), color=theme.TEXT_DIM, fontsize=10)
+        ax.set_ylabel(k2.replace("_", " ").title(), color=theme.TEXT_DIM, fontsize=10)
+        ax.legend(facecolor=theme.PANEL, edgecolor=theme.LINE,
+                  labelcolor=theme.TEXT, fontsize=8, loc="upper right")
         ax.figure.tight_layout()
         self._canvas_pareto.draw()
 
@@ -1786,7 +1824,7 @@ class OptimizationWorkspace(QWidget):
 
         px, py = pick["x"][idx], pick["y"][idx]
         m = ax.scatter([px], [py], s=180, facecolors="none",
-                       edgecolors="#f0883e", linewidths=2.0, zorder=6)
+                       edgecolors=theme.ACCENT, linewidths=2.0, zorder=6)
         v = design.variables
         mc = design.mc_stats or {}
         txt = (f"{pick['k1'].replace('_', ' ')}: {px:.2f}\n"
@@ -1795,9 +1833,9 @@ class OptimizationWorkspace(QWidget):
                f"mass {v.get('dry_mass', 0):.2f} kg · "
                f"apogee {mc.get('mean_apogee', 0):.0f} m")
         ann = ax.annotate(txt, (px, py), textcoords="offset points", xytext=(12, 12),
-                          fontsize=8, color="#e6edf3",
-                          bbox=dict(boxstyle="round,pad=0.4", fc="#161b22",
-                                    ec="#f0883e", lw=1.0),
+                          fontsize=8, color=theme.TEXT_BRIGHT,
+                          bbox=dict(boxstyle="round,pad=0.4", fc=theme.PANEL,
+                                    ec=theme.ACCENT, lw=1.0),
                           zorder=7)
         self._pareto_pick_artists = [m, ann]
         self._canvas_pareto.draw_idle()
@@ -1875,20 +1913,30 @@ class OptimizationWorkspace(QWidget):
             cmap = "hot"
 
         sc = ax.scatter(x_vals, y_vals, c=c_vals, cmap=cmap,
-                        s=20, alpha=0.6, edgecolors="#30363d", linewidths=0.3)
+                        s=20, alpha=0.6, edgecolors=theme.LINE, linewidths=0.3)
 
         # Best design highlight
         if self._result.best_design:
             bx = _get_val(self._result.best_design, x_key)
             by = _get_val(self._result.best_design, y_key)
-            ax.scatter([bx], [by], c="#f0883e", s=100, marker="*",
-                       zorder=5, edgecolors="#ffffff", linewidths=1)
+            ax.scatter([bx], [by], c=theme.ACCENT, s=100, marker="*",
+                       zorder=5, edgecolors=theme.TEXT_BRIGHT, linewidths=1)
 
-        # Colorbar
+        # Colorbar - remove the previous one first. ax.clear() does not touch
+        # the colorbar's own axes, so every refresh used to add another one and
+        # shrink the plot.
+        old_cb = getattr(self, "_dse_cbar", None)
+        if old_cb is not None:
+            try:
+                old_cb.remove()
+            except Exception:
+                pass
+            self._dse_cbar = None
         try:
             cb = ax.figure.colorbar(sc, ax=ax, fraction=0.03, pad=0.02)
-            cb.ax.tick_params(colors="#484f58", labelsize=8)
-            cb.set_label(color_key, color="#8b949e", fontsize=9)
+            cb.ax.tick_params(colors=theme.LINE_STRONG, labelsize=8)
+            cb.set_label(color_key, color=theme.TEXT_DIM, fontsize=9)
+            self._dse_cbar = cb
         except Exception:
             pass
 
@@ -1937,7 +1985,7 @@ class OptimizationWorkspace(QWidget):
             if hasattr(c, '_is_selection'):
                 c.remove()
         sc = ax.scatter([self._dse_x_vals[idx]], [self._dse_y_vals[idx]],
-                        c="none", s=200, edgecolors="#ffffff", linewidths=2, zorder=10)
+                        c="none", s=200, edgecolors=theme.TEXT_BRIGHT, linewidths=2, zorder=10)
         sc._is_selection = True
         self._canvas_dse.draw_idle()
 
@@ -1969,10 +2017,7 @@ class OptimizationWorkspace(QWidget):
             return
         from core.batch_simulation import BatchSimConfig
 
-        enabled_vars = []
-        for key, (chk, smin, smax, cat) in self._var_widgets.items():
-            if chk.isChecked():
-                enabled_vars.append((key, smin.value(), smax.value()))
+        enabled_vars = self._enabled_var_bounds()
         if len(enabled_vars) < 1:
             QMessageBox.warning(self, "DOE Error", "Enable at least 1 design variable.")
             return
@@ -2030,10 +2075,10 @@ class OptimizationWorkspace(QWidget):
             order = np.argsort(np.abs(effects))        # ascending → largest on top
             names_o = [var_names[i] for i in order]
             eff_o = effects[order]
-            colors = ["#7ee787" if e > 0 else "#f85149" for e in eff_o]
+            colors = [theme.OK if e > 0 else theme.ERR for e in eff_o]
             ax_left.barh(names_o, eff_o, color=colors, alpha=0.8,
-                         edgecolor="#30363d")
-            ax_left.axvline(0, color="#484f58", linewidth=0.5)
+                         edgecolor=theme.LINE)
+            ax_left.axvline(0, color=theme.LINE_STRONG, linewidth=0.5)
 
             # Response surface contour (first two variables)
             _style_ax(ax_right, "Response Surface", "", "")
@@ -2065,27 +2110,35 @@ class OptimizationWorkspace(QWidget):
                     cs = ax_right.contourf(X_g, Y_g, Z_g, levels=20,
                                             cmap="viridis", alpha=0.8)
                     ax_right.contour(X_g, Y_g, Z_g, levels=10,
-                                     colors="#c9d1d9", linewidths=0.3, alpha=0.5)
+                                     colors=theme.TEXT, linewidths=0.3, alpha=0.5)
+                    old_cb = getattr(self, "_doe_cbar", None)
+                    if old_cb is not None:
+                        try:
+                            old_cb.remove()
+                        except Exception:
+                            pass
+                        self._doe_cbar = None
                     try:
                         cb = ax_right.figure.colorbar(cs, ax=ax_right,
                                                        fraction=0.03, pad=0.02)
-                        cb.ax.tick_params(colors="#484f58", labelsize=8)
-                        cb.set_label("Apogee (m)", color="#8b949e", fontsize=9)
+                        cb.ax.tick_params(colors=theme.LINE_STRONG, labelsize=8)
+                        cb.set_label("Apogee (m)", color=theme.TEXT_DIM, fontsize=9)
+                        self._doe_cbar = cb
                     except Exception:
                         pass
 
                     ax_right.scatter(x_data, y_data, c=responses, cmap="viridis",
-                                     s=15, edgecolors="#ffffff", linewidths=0.3,
+                                     s=15, edgecolors=theme.TEXT_BRIGHT, linewidths=0.3,
                                      zorder=3, alpha=0.7)
                 except Exception:
                     ax_right.text(0.5, 0.5, "Could not fit surface",
                                   transform=ax_right.transAxes, ha="center",
-                                  color="#484f58")
+                                  color=theme.LINE_STRONG)
 
                 ax_right.set_xlabel(v1[0].replace("_", " ").title(),
-                                     color="#8b949e", fontsize=10)
+                                     color=theme.TEXT_DIM, fontsize=10)
                 ax_right.set_ylabel(v2[0].replace("_", " ").title(),
-                                     color="#8b949e", fontsize=10)
+                                     color=theme.TEXT_DIM, fontsize=10)
 
             for a in self._ax_doe:
                 a.figure.tight_layout()
@@ -2107,10 +2160,7 @@ class OptimizationWorkspace(QWidget):
             return
         from core.batch_simulation import BatchSimConfig
 
-        enabled_vars = []
-        for key, (chk, smin, smax, cat) in self._var_widgets.items():
-            if chk.isChecked():
-                enabled_vars.append((key, smin.value(), smax.value()))
+        enabled_vars = self._enabled_var_bounds()
         if len(enabled_vars) < 2:
             QMessageBox.warning(self, "Sensitivity Error",
                 "Enable at least 2 design variables.")
@@ -2157,10 +2207,10 @@ class OptimizationWorkspace(QWidget):
                 st = np.asarray(out["st"], dtype=float)
                 order = np.argsort(s1)              # ascending → barh puts max on top
                 names_o = [var_names[i] for i in order]
-                ax_left.barh(names_o, s1[order], color="#58a6ff",
-                             alpha=0.8, edgecolor="#30363d")
+                ax_left.barh(names_o, s1[order], color=theme.ACCENT,
+                             alpha=0.8, edgecolor=theme.LINE)
                 ax_right.barh(names_o, st[order], color="#bc8cff",
-                              alpha=0.8, edgecolor="#30363d")
+                              alpha=0.8, edgecolor=theme.LINE)
                 ax_left.set_xlim(0, 1)
                 ax_right.set_xlim(0, 1)
 
@@ -2171,16 +2221,16 @@ class OptimizationWorkspace(QWidget):
                 sorted_idx = np.argsort(np.abs(prcc_vals))
                 sorted_names = [var_names[i] for i in sorted_idx]
                 sorted_vals = [prcc_vals[i] for i in sorted_idx]
-                colors = ["#7ee787" if v > 0 else "#f85149" for v in sorted_vals]
+                colors = [theme.OK if v > 0 else theme.ERR for v in sorted_vals]
                 ax_left.barh(sorted_names, sorted_vals, color=colors, alpha=0.8,
-                             edgecolor="#30363d")
-                ax_left.axvline(0, color="#484f58", linewidth=0.5)
+                             edgecolor=theme.LINE)
+                ax_left.axvline(0, color=theme.LINE_STRONG, linewidth=0.5)
                 ax_left.set_xlim(-1, 1)
                 if sorted_idx.size > 0:
                     best_j = sorted_idx[-1]
                     ax_right.scatter(X_data[:, best_j], y_data,
-                                     c="#58a6ff", s=8, alpha=0.5)
-                    ax_right.set_xlabel(var_names[best_j], color="#8b949e", fontsize=10)
+                                     c=theme.ACCENT, s=8, alpha=0.5)
+                    ax_right.set_xlabel(var_names[best_j], color=theme.TEXT_DIM, fontsize=10)
 
             else:  # Morris Screening
                 _style_ax(ax_left, "Morris μ* (Importance)", "μ*", "")
@@ -2190,10 +2240,10 @@ class OptimizationWorkspace(QWidget):
                 sig = np.asarray(out["sigma"], dtype=float)
                 order = np.argsort(mu)
                 names_o = [var_names[i] for i in order]
-                ax_left.barh(names_o, mu[order], color="#58a6ff", alpha=0.8,
-                             edgecolor="#30363d")
-                ax_right.barh(names_o, sig[order], color="#f0883e", alpha=0.8,
-                              edgecolor="#30363d")
+                ax_left.barh(names_o, mu[order], color=theme.ACCENT, alpha=0.8,
+                             edgecolor=theme.LINE)
+                ax_right.barh(names_o, sig[order], color=theme.ACCENT, alpha=0.8,
+                              edgecolor=theme.LINE)
 
             for a in self._ax_sens:
                 a.figure.tight_layout()
@@ -2269,7 +2319,6 @@ class OptimizationWorkspace(QWidget):
             return
 
         ax = self._ax_trade
-        ax.clear()
 
         # Radar plot
         categories = ["Apogee", "Stability", "Success %", "1/Landing", "1/Mach", "1/Mass"]
@@ -2277,35 +2326,39 @@ class OptimizationWorkspace(QWidget):
         angles = np.linspace(0, 2 * np.pi, n_cats, endpoint=False).tolist()
         angles += angles[:1]
 
+        # One axis per metric: the source key, and the transform that turns it
+        # into "bigger is better". Value and normalisation MUST come from the
+        # same transform — they didn't for 1/Landing (1000/x plotted against a
+        # 1/x min-max), so that spoke was normalised ~1000x out of range and
+        # pegged at the rim for every configuration.
+        axes_spec = [
+            ("apogee",    lambda x: x),
+            ("stability", lambda x: x),
+            ("success",   lambda x: x),
+            ("landing",   lambda x: 1000.0 / max(x, 1.0)),
+            ("max_mach",  lambda x: 1.0 / max(x, 0.1)),
+            ("mass",      lambda x: 10.0 / max(x, 0.1)),
+        ]
+        # Per-axis min/max over every configuration, in transformed units.
+        axis_ranges = []
+        for key, fn in axes_spec:
+            vals = [fn(c[key]) for c in self.trade_configs]
+            axis_ranges.append((min(vals), max(vals)))
+
         ax.figure.clear()
         ax_r = ax.figure.add_subplot(111, polar=True)
-        ax_r.set_facecolor("#161b22")
-        ax.figure.patch.set_facecolor("#0d1117")
+        # add_subplot on a cleared figure orphans the old axes; keep the
+        # attribute pointing at the live one so Clear can still reset the tab.
+        self._ax_trade = ax_r
+        ax_r.set_facecolor(theme.PANEL)
+        ax.figure.patch.set_facecolor(theme.BG)
 
-        colors = ["#58a6ff", "#7ee787", "#f0883e", "#bc8cff", "#f85149", "#d29922"]
+        colors = [theme.ACCENT, theme.OK, theme.ACCENT, "#bc8cff", theme.ERR, theme.WARN]
 
         for i, cfg in enumerate(self.trade_configs):
-            values = [
-                cfg["apogee"],
-                cfg["stability"],
-                cfg["success"],
-                1000.0 / max(cfg["landing"], 1),
-                1.0 / max(cfg["max_mach"], 0.1),
-                10.0 / max(cfg["mass"], 0.1),
-            ]
-            # Normalize to 0-1 per axis across all configs
             values_n = []
-            for j, v in enumerate(values):
-                all_vals = [c[[
-                    "apogee", "stability", "success", "landing", "max_mach", "mass"
-                ][j]] for c in self.trade_configs]
-                if j >= 3:
-                    all_vals = [1.0/max(av, 0.001) if j == 3 else (
-                        1.0/max(av, 0.001) if j == 4 else 10.0/max(av, 0.001))
-                        for av in [c[[
-                            "apogee", "stability", "success", "landing", "max_mach", "mass"
-                        ][j]] for c in self.trade_configs]]
-                vmin, vmax = min(all_vals) if all_vals else 0, max(all_vals) if all_vals else 1
+            for (key, fn), (vmin, vmax) in zip(axes_spec, axis_ranges):
+                v = fn(cfg[key])
                 if vmax - vmin > 1e-9:
                     values_n.append((v - vmin) / (vmax - vmin))
                 else:
@@ -2317,22 +2370,28 @@ class OptimizationWorkspace(QWidget):
             ax_r.fill(angles, values_n, color=c, alpha=0.1)
 
         ax_r.set_xticks(angles[:-1])
-        ax_r.set_xticklabels(categories, color="#8b949e", fontsize=9)
-        ax_r.tick_params(axis="y", colors="#484f58", labelsize=7)
+        ax_r.set_xticklabels(categories, color=theme.TEXT_DIM, fontsize=9)
+        ax_r.tick_params(axis="y", colors=theme.LINE_STRONG, labelsize=7)
         ax_r.set_ylim(0, 1)
-        ax_r.grid(color="#30363d", alpha=0.3)
-        ax_r.set_title("Trade Study Comparison", color="#58a6ff",
+        ax_r.grid(color=theme.LINE, alpha=0.3)
+        ax_r.set_title("Trade Study Comparison", color=theme.TEXT,
                         fontsize=13, fontweight="bold", pad=20)
         ax_r.legend(loc="upper right", bbox_to_anchor=(1.3, 1.1),
-                     facecolor="#161b22", edgecolor="#30363d",
-                     labelcolor="#c9d1d9", fontsize=8)
+                     facecolor=theme.PANEL, edgecolor=theme.LINE,
+                     labelcolor=theme.TEXT, fontsize=8)
 
         self._canvas_trade.draw()
 
     def _on_clear_trade(self):
         self.trade_configs = []
         self.trade_table.setRowCount(0)
-        self._ax_trade.clear()
+        # A run leaves a polar axes here; rebuild a plain cartesian one rather
+        # than clearing in place, so the radar chart actually disappears.
+        fig = self._ax_trade.figure
+        fig.clear()
+        self._ax_trade = fig.add_subplot(111)
+        self._ax_trade.set_facecolor(theme.PANEL)
+        fig.patch.set_facecolor(theme.BG)
         _style_ax(self._ax_trade, "Trade Study", "", "")
         self._canvas_trade.draw()
 
@@ -2429,7 +2488,7 @@ class OptimizationWorkspace(QWidget):
 
         if not design.constraints_eval:
             lbl = QLabel("No constraints evaluated")
-            lbl.setStyleSheet("color:#484f58; font-size:11px;")
+            lbl.setStyleSheet(f"color:{theme.LINE_STRONG}; font-size:11px;")
             self._constraint_layout.addWidget(lbl)
             return
 
@@ -2438,7 +2497,7 @@ class OptimizationWorkspace(QWidget):
             value = info.get("value", 0)
             limit = info.get("limit", 0)
             icon = "✓" if satisfied else "✗"
-            color = "#7ee787" if satisfied else "#f85149"
+            color = theme.OK if satisfied else theme.ERR
 
             lbl = QLabel(f"{icon} {name}: {value:.2f} (limit: {limit:.2f})")
             lbl.setStyleSheet(f"color:{color}; font-size:10px; padding:1px 4px;")
@@ -2457,6 +2516,7 @@ class OptimizationWorkspace(QWidget):
         if apogees:
             best_idx = int(np.argmax(apogees))
             self.btn_sol_apogee.setText(f"Best Apogee: {apogees[best_idx]:.0f} m")
+            self.btn_sol_apogee.setEnabled(True)
             self._pareto_best_apogee = designs[best_idx]
 
         # Best Reliability
@@ -2466,6 +2526,7 @@ class OptimizationWorkspace(QWidget):
             self.btn_sol_reliability.setText(
                 f"Best Reliability: {rel_vals[best_idx] * 100:.0f}%"
             )
+            self.btn_sol_reliability.setEnabled(True)
             self._pareto_best_reliability = designs[best_idx]
 
         # Best Mass (lowest)
@@ -2473,6 +2534,7 @@ class OptimizationWorkspace(QWidget):
         if masses:
             best_idx = int(np.argmin(masses))
             self.btn_sol_mass.setText(f"Best Mass: {masses[best_idx]:.2f} kg")
+            self.btn_sol_mass.setEnabled(True)
             self._pareto_best_mass = designs[best_idx]
 
         # Balanced (closest to utopia) — over the user-enabled objectives only,
@@ -2499,6 +2561,7 @@ class OptimizationWorkspace(QWidget):
                 self.btn_sol_balanced.setText(
                     f"Balanced: Apogee {apogees[best_idx]:.0f} m"
                 )
+                self.btn_sol_balanced.setEnabled(True)
                 self._pareto_best_balanced = designs[best_idx]
 
     def _update_optimization_stats(self, result):
@@ -2600,29 +2663,29 @@ class OptimizationWorkspace(QWidget):
             pct_l = _pct(d_land, baseline.landing_distance)
             pct_m = _pct(d_mass, base.dry_mass)
 
-            c_pos = "#7ee787"
-            c_neg = "#f85149"
+            c_pos = theme.OK
+            c_neg = theme.ERR
 
             # "better" direction differs per metric: apogee/stability up is good,
             # landing distance and mass down is good.
             self.lbl_imp_apogee.setText(f"{d_apogee:+.1f} m ({pct_a:+.1f}%)")
             self.lbl_imp_apogee.setStyleSheet(
-                _VAL.replace("#e6edf3", c_pos if d_apogee > 0 else c_neg)
+                theme.value_qss(c_pos if d_apogee > 0 else c_neg)
             )
 
             self.lbl_imp_stability.setText(f"{d_stab:+.2f} cal ({pct_s:+.1f}%)")
             self.lbl_imp_stability.setStyleSheet(
-                _VAL.replace("#e6edf3", c_pos if d_stab > 0 else c_neg)
+                theme.value_qss(c_pos if d_stab > 0 else c_neg)
             )
 
             self.lbl_imp_landing.setText(f"{d_land:+.0f} m ({pct_l:+.1f}%)")
             self.lbl_imp_landing.setStyleSheet(
-                _VAL.replace("#e6edf3", c_pos if d_land < 0 else c_neg)
+                theme.value_qss(c_pos if d_land < 0 else c_neg)
             )
 
             self.lbl_imp_mass.setText(f"{d_mass:+.3f} kg ({pct_m:+.1f}%)")
             self.lbl_imp_mass.setStyleSheet(
-                _VAL.replace("#e6edf3", c_pos if d_mass < 0 else c_neg)
+                theme.value_qss(c_pos if d_mass < 0 else c_neg)
             )
         except Exception as e:
             logger.warning(f"Could not compute improvement: {e}")
@@ -2681,6 +2744,14 @@ class OptimizationWorkspace(QWidget):
                     pass
         # The DOE / sensitivity tabs hold a row of axes on one shared figure;
         # clear_visuals handles the single-axis canvases, this clears those rows.
+        for cb_attr in ("_dse_cbar", "_doe_cbar"):
+            cb = getattr(self, cb_attr, None)
+            if cb is not None:
+                try:
+                    cb.remove()
+                except Exception:
+                    pass
+                setattr(self, cb_attr, None)
         for ax_pair in ("_ax_doe", "_ax_sens"):
             axs = getattr(self, ax_pair, None)
             if axs is not None:
@@ -2779,6 +2850,10 @@ class OptimizationWorkspace(QWidget):
 
     def _export_json(self, path: str):
         """Export best design and Pareto front to JSON."""
+        if not self._result.best_design:
+            QMessageBox.warning(self, "Export Error",
+                                "This run produced no best design to export.")
+            return
         try:
             data = {
                 "algorithm": self._result.algorithm_used,

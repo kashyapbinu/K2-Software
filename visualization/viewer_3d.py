@@ -76,6 +76,15 @@ def nose_profile(shape, length, radius, n=50):
         rs = (radius / np.sqrt(np.pi)) * np.sqrt(
             np.maximum(theta - 0.5 * np.sin(2.0 * theta), 0.0)
         )
+    elif key.startswith("agard"):
+        # AGARD-B calibration-model ogive, AGARD Memorandum AG-4/M3 (1955):
+        #   r = (x/3)[1 - (1/9)(x/D)^2 + (1/54)(x/D)^3],  x from the tip, L = 3D.
+        # Written in the tip-referenced fraction s = x/L it becomes
+        #   r/R = 2s - 2s^3 + s^4,
+        # which closes onto the cylinder tangentially (dr/ds = 0 at s = 1) and is
+        # length-agnostic, so it also describes a scaled version of the shape.
+        s = np.clip(1.0 - t, 0.0, 1.0)
+        rs = radius * (2.0 * s - 2.0 * s ** 3 + s ** 4)
     else:
         return _ogive_profile(length, radius, n)
 
@@ -145,9 +154,19 @@ def _make_frustum(z_base, length, r_base, r_top, n=20, n_theta=RES):
 
 # ── Viewer widget ────────────────────────────────────────────
 
+def _viewport_bg():
+    """(bottom, top) viewport gradient for the active UI palette.
+
+    Imported lazily so this module stays usable without the Qt UI package.
+    """
+    try:
+        from ui import theme
+        return theme.BG, theme.PANEL
+    except Exception:
+        return "#0d1117", "#161b22"
+
+
 class Viewer3D(QWidget):
-    BG_TOP = "#0d1117"
-    BG_BOT = "#161b22"
 
     COLORS = {
         "nosecone": "#3a8fd6",
@@ -182,7 +201,6 @@ class Viewer3D(QWidget):
         top_layout.setContentsMargins(10, 5, 10, 5)
         self.btn_wireframe = QPushButton("Toggle 2D Line / Wireframe Mode")
         self.btn_wireframe.setCheckable(True)
-        self.btn_wireframe.setStyleSheet("background-color: #238636; color: white; padding: 5px 15px; border-radius: 4px; font-weight: bold;")
         self.btn_wireframe.clicked.connect(self._toggle_wireframe)
         top_layout.addWidget(self.btn_wireframe)
         top_layout.addStretch()
@@ -197,7 +215,8 @@ class Viewer3D(QWidget):
         fl.addWidget(self.plotter.interactor)
         layout.addWidget(frame)
 
-        self.plotter.set_background(self.BG_TOP, top=self.BG_BOT)
+        bg, bg_top = _viewport_bg()
+        self.plotter.set_background(bg, top=bg_top)
         self.plotter.add_axes(interactive=False, line_width=2)
         # Default: side view — nose to the right, like OpenRocket
         self._set_side_view()
@@ -209,18 +228,28 @@ class Viewer3D(QWidget):
         self.plotter.camera.focal_point = (0, 0, 0)
         self.plotter.camera.up = (0, 0, 1)
 
+    def _restyle_wireframe_button(self, active: bool):
+        """Primary while wireframe is on, plain otherwise (global sheet paints it)."""
+        btn = self.btn_wireframe
+        btn.setStyleSheet("")
+        btn.setProperty("primary", True if active else False)
+        btn.style().unpolish(btn)
+        btn.style().polish(btn)
+
     def _toggle_wireframe(self, checked):
         self._wireframe_mode = checked
         if checked:
-            self.plotter.set_background("white")
+            # Flat drafting sheet: paper-white in light, ink-dark in dark.
+            self.plotter.set_background(_viewport_bg()[1])
             self.plotter.enable_parallel_projection()
             self.btn_wireframe.setText("Switch to 3D Solid Mode")
-            self.btn_wireframe.setStyleSheet("background-color: #d73a49; color: white; padding: 5px 15px; border-radius: 4px; font-weight: bold;")
+            self._restyle_wireframe_button(active=True)
         else:
-            self.plotter.set_background(self.BG_TOP, top=self.BG_BOT)
+            bg, bg_top = _viewport_bg()
+            self.plotter.set_background(bg, top=bg_top)
             self.plotter.disable_parallel_projection()
             self.btn_wireframe.setText("Toggle 2D Line / Wireframe Mode")
-            self.btn_wireframe.setStyleSheet("background-color: #238636; color: white; padding: 5px 15px; border-radius: 4px; font-weight: bold;")
+            self._restyle_wireframe_button(active=False)
         
         self._rebuild()
 

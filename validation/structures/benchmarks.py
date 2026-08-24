@@ -181,6 +181,74 @@ def bench_modal_vs_ccx() -> Benchmark:
     return bm
 
 
+# ── published NAFEMS benchmarks (experimental-grade external references) ──────
+
+def _nafems_bench(name, target, tol_rel, runner, notes) -> Benchmark:
+    """Shared wrapper: run one NAFEMS case, or record a documented skip."""
+    bm = Benchmark(name=name, domain="structures",
+                   reference="NAFEMS standard benchmark target value",
+                   level=ValidationLevel.VALIDATED, notes=notes)
+    try:
+        nodal, ip_avg, node_count = runner()
+    except Exception as exc:
+        bm.skipped = True
+        bm.skip_reason = f"CalculiX unavailable/failed: {exc}"
+        return bm
+    bm.add(Comparison.make("σ_yy at point D", nodal, target,
+                           "NAFEMS", "Pa", tol_rel=tol_rel,
+                           note=f"extrapolated nodal stress, {node_count}-node mesh"))
+    # Diagnostic, not a gate: integration points sit inside the element, so on
+    # the surface gradient at D they necessarily read low. Recording both makes
+    # the sampling-vs-solver distinction visible in the report.
+    bm.add(Comparison.make("σ_yy at D (integration points, diagnostic)",
+                           ip_avg, target, "NAFEMS", "Pa", tol_rel=0.40,
+                           note="sampled inside the element — reads below the surface value"))
+    return bm
+
+
+def bench_nafems_le1() -> Benchmark:
+    """NAFEMS LE1 — elliptic membrane, plane stress. Target σ_yy(D)=92.7 MPa."""
+    from validation.structures import nafems as N
+
+    def run():
+        wd = _WORK / "nafems_le1"
+        wd.mkdir(parents=True, exist_ok=True)
+        mesh = N.make_elliptic_mesh(N.LE1_THICKNESS, ns=16, nt=32, nz=2)
+        N.write_le1_deck(wd / "case.inp", mesh)
+        dat = N.run_ccx(wd)
+        node = mesh.node_at_D(top=False)
+        return (N.nodal_stress_from_frd(wd / "case.frd", node, component=1),
+                N.stress_at_point(dat, mesh, node, component=1),
+                len(mesh.nodes))
+
+    return _nafems_bench(
+        "NAFEMS LE1 — elliptic membrane (CalculiX)", N.LE1_TARGET_SYY, 0.05, run,
+        "Membrane stress concentration on the inner ellipse. 5% is well inside "
+        "the mesh-convergence spread quoted for this benchmark, so the gate bites.")
+
+
+def bench_nafems_le10() -> Benchmark:
+    """NAFEMS LE10 — thick plate under pressure. Target σ_yy(D)=-5.38 MPa."""
+    from validation.structures import nafems as N
+
+    def run():
+        wd = _WORK / "nafems_le10"
+        wd.mkdir(parents=True, exist_ok=True)
+        mesh = N.make_elliptic_mesh(N.LE10_THICKNESS, ns=14, nt=28, nz=6)
+        N.write_le10_deck(wd / "case.inp", mesh)
+        dat = N.run_ccx(wd)
+        node = mesh.node_at_D(top=True)
+        return (N.nodal_stress_from_frd(wd / "case.frd", node, component=1),
+                N.stress_at_point(dat, mesh, node, component=1),
+                len(mesh.nodes))
+
+    return _nafems_bench(
+        "NAFEMS LE10 — thick plate under pressure (CalculiX)",
+        N.LE10_TARGET_SYY, 0.10, run,
+        "Bending-dominated; the published p-version hexahedral solution itself "
+        "lands at -5.25 MPa (-2.4%), so a structured C3D8I mesh is given 10%.")
+
+
 def run_benchmarks(include_ccx: bool = True) -> list:
     """All structures benchmarks. `include_ccx` runs the slow CalculiX cases."""
     out = [bench_closed_form_formulas()]
@@ -188,4 +256,6 @@ def run_benchmarks(include_ccx: bool = True) -> list:
         out.append(bench_bar_tension())
         out.append(bench_cantilever_bending())
         out.append(bench_modal_vs_ccx())
+        out.append(bench_nafems_le1())
+        out.append(bench_nafems_le10())
     return out

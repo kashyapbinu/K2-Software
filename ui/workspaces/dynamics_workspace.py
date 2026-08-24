@@ -27,46 +27,25 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from ui.icons import icon
 
+from ui import theme
+
 logger = logging.getLogger("K2.DynWS")
 
-_GRP = """
-QGroupBox { color:#8b949e; font-size:11px; font-weight:600;
-  border:1px solid #21262d; border-radius:6px; margin-top:10px; padding-top:6px; }
-QGroupBox::title { subcontrol-origin:margin; left:10px; padding:0 4px; }
-"""
-_BTN_P = """
-QPushButton { background:#1f6feb; color:#fff; font-weight:700; font-size:12px;
-  border:none; border-radius:6px; padding:9px 14px; }
-QPushButton:hover { background:#388bfd; }
-QPushButton:disabled { background:#21262d; color:#484f58; }
-"""
-_BTN_S = """
-QPushButton { background:#21262d; color:#c9d1d9; font-weight:500;
-  border:1px solid #30363d; border-radius:6px; padding:7px 14px; }
-QPushButton:hover { background:#30363d; border-color:#8b949e; }
-QPushButton:disabled { color:#484f58; }
-"""
-_VAL = ("color:#e6edf3; font-family:'Cascadia Code',monospace; font-size:13px;"
-        "font-weight:600; padding:2px 6px; background:#161b22; border-radius:4px;")
-
 # Verdict colours
-_C_SAFE = "#7ee787"
-_C_CAUT = "#d29922"
-_C_BAD  = "#f85149"
-_C_INFO = "#58a6ff"
+# Palette is read at call time, never snapshotted at import.
 
 
 def _vl(t="—"):
-    l = QLabel(t); l.setStyleSheet(_VAL); return l
+    l = QLabel(t); l.setProperty("value", True); return l
 
 
 def _verdict(margin_pct):
     """(text, colour) for a percentage safety margin."""
     if margin_pct >= 20.0:
-        return "SAFE", _C_SAFE
+        return "SAFE", theme.OK
     if margin_pct >= 10.0:
-        return "CAUTION", _C_CAUT
-    return "UNSAFE", _C_BAD
+        return "CAUTION", theme.WARN
+    return "UNSAFE", theme.ERR
 
 
 class DynThread(QThread):
@@ -111,54 +90,46 @@ class DynamicsWorkspace(QWidget):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(12,14,12,14); lay.setSpacing(12)
 
         t = QLabel("Dynamic Analysis")
-        t.setStyleSheet("color:#58a6ff;font-size:15px;font-weight:700;padding:2px 0 6px 0;")
+        t.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
         lay.addWidget(t)
 
-        g1 = QGroupBox("Flight Envelope"); g1.setStyleSheet(_GRP)
-        f1 = QFormLayout(); f1.setSpacing(8)
+        g1 = QGroupBox("Flight Envelope");        f1 = QFormLayout(); f1.setSpacing(8)
         self.sp_vmax = QDoubleSpinBox(); self.sp_vmax.setRange(10,2000); self.sp_vmax.setValue(300)
         self.sp_vmax.setSuffix(" m/s"); f1.addRow("Max Flight Speed:", self.sp_vmax)
         self.sp_mmax = QDoubleSpinBox(); self.sp_mmax.setRange(0.1,5); self.sp_mmax.setValue(1.0)
         self.sp_mmax.setDecimals(2); f1.addRow("Max Mach:", self.sp_mmax)
-        self.btn_fromsim = QPushButton(icon("import"), "Use Last Simulation"); self.btn_fromsim.setStyleSheet(_BTN_S)
-        self.btn_fromsim.clicked.connect(self._fill_from_sim); f1.addRow(self.btn_fromsim)
+        self.btn_fromsim = QPushButton(icon("import"), "Use Last Simulation");        self.btn_fromsim.clicked.connect(self._fill_from_sim); f1.addRow(self.btn_fromsim)
         self.lbl_simsrc = QLabel("Source: manual input")
-        self.lbl_simsrc.setStyleSheet("color:#8b949e;font-size:10px;font-style:italic;")
+        self.lbl_simsrc.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:10px;font-style:italic;")
         f1.addRow(self.lbl_simsrc)
         g1.setLayout(f1); lay.addWidget(g1)
 
-        g2 = QGroupBox("Vibration Analysis"); g2.setStyleSheet(_GRP)
-        f2 = QFormLayout(); f2.setSpacing(8)
+        g2 = QGroupBox("Vibration Analysis");        f2 = QFormLayout(); f2.setSpacing(8)
         self.sp_damp = QDoubleSpinBox(); self.sp_damp.setRange(0.001,0.2); self.sp_damp.setValue(0.02)
         self.sp_damp.setDecimals(3); f2.addRow("Damping Ratio ζ:", self.sp_damp)
         self.sp_psd = QDoubleSpinBox(); self.sp_psd.setRange(0.001,1.0); self.sp_psd.setValue(0.04)
         self.sp_psd.setDecimals(3); self.sp_psd.setSuffix(" g²/Hz"); f2.addRow("Input PSD:", self.sp_psd)
         g2.setLayout(f2); lay.addWidget(g2)
 
-        self.btn_all = QPushButton(icon("run", color="#fff"), "Run Full Assessment"); self.btn_all.setStyleSheet(_BTN_P)
+        self.btn_all = QPushButton(icon("run", color="#fff"), "Run Full Assessment"); self.btn_all.setProperty("primary", True)
         self.btn_all.clicked.connect(self._run_all); lay.addWidget(self.btn_all)
-        self.btn_flutter = QPushButton(icon("flutter"), "Flutter"); self.btn_flutter.setStyleSheet(_BTN_S)
-        self.btn_flutter.clicked.connect(self._run_flutter); lay.addWidget(self.btn_flutter)
-        self.btn_vib = QPushButton(icon("vibration"), "Vibration"); self.btn_vib.setStyleSheet(_BTN_S)
-        self.btn_vib.clicked.connect(self._run_vibration); lay.addWidget(self.btn_vib)
-        self.btn_aero = QPushButton(icon("aeroelastic"), "Aeroelastic"); self.btn_aero.setStyleSheet(_BTN_S)
-        self.btn_aero.clicked.connect(self._run_aeroelastic); lay.addWidget(self.btn_aero)
-        self.btn_modal = QPushButton(icon("modal"), "Mode Shapes"); self.btn_modal.setStyleSheet(_BTN_S)
-        self.btn_modal.clicked.connect(lambda: self._run_modal()); lay.addWidget(self.btn_modal)
+        self.btn_flutter = QPushButton(icon("flutter"), "Flutter");        self.btn_flutter.clicked.connect(self._run_flutter); lay.addWidget(self.btn_flutter)
+        self.btn_vib = QPushButton(icon("vibration"), "Vibration");        self.btn_vib.clicked.connect(self._run_vibration); lay.addWidget(self.btn_vib)
+        self.btn_aero = QPushButton(icon("aeroelastic"), "Aeroelastic");        self.btn_aero.clicked.connect(self._run_aeroelastic); lay.addWidget(self.btn_aero)
+        self.btn_modal = QPushButton(icon("modal"), "Mode Shapes");        self.btn_modal.clicked.connect(lambda: self._run_modal()); lay.addWidget(self.btn_modal)
 
         self._progress = QProgressBar(); self._progress.setRange(0,0); self._progress.setVisible(False)
         self._progress.setFixedHeight(6)
-        self._progress.setStyleSheet("QProgressBar{background:#21262d;border-radius:3px;border:none;}"
-                                      "QProgressBar::chunk{background:#1f6feb;border-radius:3px;}")
+        self._progress.setStyleSheet(f"QProgressBar{{background:{theme.RAISED};border-radius:3px;border:none;}}"
+                                      f"QProgressBar::chunk{{background:{theme.ACCENT_DEEP};border-radius:3px;}}")
         lay.addWidget(self._progress)
 
         # Export
-        ge = QGroupBox("Report Export"); ge.setStyleSheet(_GRP)
-        fe = QVBoxLayout(); fe.setSpacing(6)
+        ge = QGroupBox("Report Export");        fe = QVBoxLayout(); fe.setSpacing(6)
         rowx = QHBoxLayout()
-        self.btn_json = QPushButton("JSON"); self.btn_json.setStyleSheet(_BTN_S); self.btn_json.clicked.connect(lambda: self._export("json"))
-        self.btn_csv  = QPushButton("CSV");  self.btn_csv.setStyleSheet(_BTN_S);  self.btn_csv.clicked.connect(lambda: self._export("csv"))
-        self.btn_pdf  = QPushButton("PDF");  self.btn_pdf.setStyleSheet(_BTN_S);  self.btn_pdf.clicked.connect(lambda: self._export("pdf"))
+        self.btn_json = QPushButton("JSON"); self.btn_json.clicked.connect(lambda: self._export("json"))
+        self.btn_csv  = QPushButton("CSV");  self.btn_csv.clicked.connect(lambda: self._export("csv"))
+        self.btn_pdf  = QPushButton("PDF");  self.btn_pdf.clicked.connect(lambda: self._export("pdf"))
         rowx.addWidget(self.btn_json); rowx.addWidget(self.btn_csv); rowx.addWidget(self.btn_pdf)
         fe.addLayout(rowx); ge.setLayout(fe); lay.addWidget(ge)
 
@@ -167,9 +138,9 @@ class DynamicsWorkspace(QWidget):
 
     def _build_center(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
-        bar = QWidget(); bar.setStyleSheet("background:#161b22; border-bottom:1px solid #21262d;")
+        bar = QWidget(); bar.setStyleSheet(f"background:{theme.PANEL}; border-bottom:1px solid {theme.RAISED};")
         bar.setFixedHeight(44); bl = QHBoxLayout(bar); bl.setContentsMargins(12,0,8,0)
-        lbl = QLabel("Dynamic Analysis Plots"); lbl.setStyleSheet("color:#58a6ff;font-weight:700;font-size:13px;")
+        lbl = QLabel("Dynamic Analysis Plots"); lbl.setStyleSheet(f"color:{theme.ACCENT};font-weight:700;font-size:13px;")
         bl.addWidget(lbl); bl.addStretch(); lay.addWidget(bar)
 
         self._tabs = QTabWidget(); self._tabs.setDocumentMode(True)
@@ -189,14 +160,14 @@ class DynamicsWorkspace(QWidget):
         self._frf_plot.setMinimumHeight(220)
         vl.addWidget(self._frf_plot, 2)
         self._frf_summary = QLabel("Run vibration analysis to identify resonances.")
-        self._frf_summary.setStyleSheet("color:#8b949e;font-size:11px;padding:2px 4px;")
+        self._frf_summary.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:11px;padding:2px 4px;")
         vl.addWidget(self._frf_summary)
         self._res_table = QTableWidget(0, 5)
         self._res_table.setHorizontalHeaderLabels(["Mode", "Freq (Hz)", "Mag (dB)", "Risk", "Driver (SR)"])
         self._res_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._res_table.setStyleSheet(
-            "QTableWidget{background:#0d1117;color:#c9d1d9;gridline-color:#21262d;font-size:11px;}"
-            "QHeaderView::section{background:#161b22;color:#8b949e;border:none;padding:4px;font-weight:600;}")
+            f"QTableWidget{{background:{theme.BG};color:{theme.TEXT};gridline-color:{theme.RAISED};font-size:11px;}}"
+            f"QHeaderView::section{{background:{theme.PANEL};color:{theme.TEXT_DIM};border:none;padding:4px;font-weight:600;}}")
         self._res_table.setMaximumHeight(160)
         vl.addWidget(self._res_table, 1)
         self._tabs.addTab(vw, "Frequency Response")
@@ -213,7 +184,7 @@ class DynamicsWorkspace(QWidget):
         msel = QHBoxLayout()
         msel.addWidget(QLabel("Mode:"))
         self.mode_combo = QComboBox()
-        self.mode_combo.setStyleSheet("QComboBox{background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:4px;padding:3px 8px;}")
+        self.mode_combo.setStyleSheet(f"QComboBox{{background:{theme.PANEL};color:{theme.TEXT_BRIGHT};border:1px solid {theme.LINE};border-radius:4px;padding:3px 8px;}}")
         self.mode_combo.currentIndexChanged.connect(self._on_mode_select)
         msel.addWidget(self.mode_combo, 1)
         ml.addLayout(msel)
@@ -227,8 +198,8 @@ class DynamicsWorkspace(QWidget):
         ml.addWidget(self._modal_plot, 1)
         self._mode_info = QLabel("Frequency: —   Damping: —   Type: —")
         self._mode_info.setStyleSheet(
-            "color:#c9d1d9;font-family:'Cascadia Code',monospace;font-size:11px;"
-            "background:#161b22;border:1px solid #21262d;border-radius:4px;padding:6px;")
+            f"color:{theme.TEXT};font-family:'Cascadia Code',monospace;font-size:11px;"
+            f"background:{theme.PANEL};border:1px solid {theme.RAISED};border-radius:4px;padding:6px;")
         ml.addWidget(self._mode_info)
         self._tabs.addTab(mw, "〰 Mode Shapes")
 
@@ -242,8 +213,8 @@ class DynamicsWorkspace(QWidget):
         self._tabs.currentChanged.connect(self._on_tab_changed)
         lay.addWidget(self._tabs, 1)
         self._status = QLabel("Import a rocket design, then run dynamic analysis.")
-        self._status.setStyleSheet("color:#8b949e;padding:5px 12px;font-size:11px;"
-                                    "background:#161b22;border-top:1px solid #21262d;")
+        self._status.setStyleSheet(f"color:{theme.TEXT_DIM};padding:5px 12px;font-size:11px;"
+                                    f"background:{theme.PANEL};border-top:1px solid {theme.RAISED};")
         self._status.setFixedHeight(28); lay.addWidget(self._status)
         return w
 
@@ -252,14 +223,14 @@ class DynamicsWorkspace(QWidget):
         sc.setFrameShape(QFrame.Shape.NoFrame)
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(12,14,12,14); lay.setSpacing(10)
         t = QLabel("Flight Safety Assessment")
-        t.setStyleSheet("color:#58a6ff;font-size:15px;font-weight:700;padding:2px 0 6px 0;")
+        t.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
         lay.addWidget(t)
 
         # Overall verdict banner
         self.lbl_overall = QLabel("RUN ASSESSMENT")
         self.lbl_overall.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_overall.setStyleSheet("font-weight:800;font-size:16px;padding:10px;"
-                                       "border-radius:6px;background:#161b22;color:#484f58;")
+                                       f"border-radius:6px;background:{theme.PANEL};color:{theme.LINE_STRONG};")
         lay.addWidget(self.lbl_overall)
 
         _note = QLabel(
@@ -269,12 +240,11 @@ class DynamicsWorkspace(QWidget):
             "engineering certification, safety-critical decisions, or as a substitute "
             "for professional structural analysis and validation.")
         _note.setWordWrap(True)
-        _note.setStyleSheet("color:#6e7681;font-size:9px;padding:2px 2px 4px 2px;")
+        _note.setStyleSheet(f"color:{theme.TEXT_FAINT};font-size:9px;padding:2px 2px 4px 2px;")
         lay.addWidget(_note)
 
         # Flutter
-        gf = QGroupBox("Flutter"); gf.setStyleSheet(_GRP)
-        ff = QFormLayout(); ff.setSpacing(6)
+        gf = QGroupBox("Flutter");        ff = QFormLayout(); ff.setSpacing(6)
         self.lbl_vmax_f = _vl();   ff.addRow("Max Velocity:", self.lbl_vmax_f)
         self.lbl_fspd = _vl();     ff.addRow("Flutter Velocity:", self.lbl_fspd)
         self.lbl_fmach = _vl();    ff.addRow("Flutter Mach:", self.lbl_fmach)
@@ -284,8 +254,7 @@ class DynamicsWorkspace(QWidget):
         gf.setLayout(ff); lay.addWidget(gf)
 
         # Divergence / aeroelastic
-        ga = QGroupBox("Divergence / Aeroelastic"); ga.setStyleSheet(_GRP)
-        fa = QFormLayout(); fa.setSpacing(6)
+        ga = QGroupBox("Divergence / Aeroelastic");        fa = QFormLayout(); fa.setSpacing(6)
         self.lbl_divspd = _vl();    fa.addRow("Divergence Velocity:", self.lbl_divspd)
         self.lbl_divmach = _vl();   fa.addRow("Divergence Mach:", self.lbl_divmach)
         self.lbl_divmargin = _vl(); fa.addRow("Margin:", self.lbl_divmargin)
@@ -297,8 +266,7 @@ class DynamicsWorkspace(QWidget):
         ga.setLayout(fa); lay.addWidget(ga)
 
         # Vibration
-        gv = QGroupBox("Vibration Response"); gv.setStyleSheet(_GRP)
-        fv = QFormLayout(); fv.setSpacing(6)
+        gv = QGroupBox("Vibration Response");        fv = QFormLayout(); fv.setSpacing(6)
         self.lbl_grms = _vl(); fv.addRow("RMS Accel:", self.lbl_grms)
         self.lbl_gpk = _vl();  fv.addRow("Peak (3σ):", self.lbl_gpk)
         self.lbl_drms = _vl(); fv.addRow("RMS Disp:", self.lbl_drms)
@@ -306,8 +274,7 @@ class DynamicsWorkspace(QWidget):
         gv.setLayout(fv); lay.addWidget(gv)
 
         # Flight loads (max-Q)
-        gq = QGroupBox("Flight Loads (Max-Q)"); gq.setStyleSheet(_GRP)
-        fq = QFormLayout(); fq.setSpacing(6)
+        gq = QGroupBox("Flight Loads (Max-Q)");        fq = QFormLayout(); fq.setSpacing(6)
         self.lbl_maxq = _vl();    fq.addRow("Max Dynamic Pressure:", self.lbl_maxq)
         self.lbl_qmach = _vl();   fq.addRow("Mach at Max-Q:", self.lbl_qmach)
         self.lbl_qalt = _vl();    fq.addRow("Altitude at Max-Q:", self.lbl_qalt)
@@ -316,11 +283,10 @@ class DynamicsWorkspace(QWidget):
         gq.setLayout(fq); lay.addWidget(gq)
 
         # Consistency warnings
-        gw = QGroupBox("Consistency Checks"); gw.setStyleSheet(_GRP)
-        fw_ = QVBoxLayout(); fw_.setSpacing(3)
+        gw = QGroupBox("Consistency Checks");        fw_ = QVBoxLayout(); fw_.setSpacing(3)
         self.lbl_warnings = QLabel("Run assessment to check consistency.")
         self.lbl_warnings.setWordWrap(True)
-        self.lbl_warnings.setStyleSheet("color:#8b949e;font-size:11px;")
+        self.lbl_warnings.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:11px;")
         fw_.addWidget(self.lbl_warnings)
         gw.setLayout(fw_); lay.addWidget(gw)
 
@@ -365,7 +331,7 @@ class DynamicsWorkspace(QWidget):
         tr = self._trajectory()
         if not tr:
             self.lbl_simsrc.setText("Source: manual input (no simulation yet)")
-            self.lbl_simsrc.setStyleSheet("color:#8b949e;font-size:10px;font-style:italic;")
+            self.lbl_simsrc.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:10px;font-style:italic;")
             if not silent:
                 self._status.setText("No simulation flight data available. Run a simulation first.")
             return False
@@ -374,7 +340,7 @@ class DynamicsWorkspace(QWidget):
         self.lbl_simsrc.setText(
             f"✓ Using Last Simulation\nV={tr['vmax']:.0f} m/s  M={tr['mmax']:.2f}  "
             f"Q={tr['qmax']/1000:.1f} kPa  apogee={tr['apogee']:.0f} m")
-        self.lbl_simsrc.setStyleSheet("color:#7ee787;font-size:10px;font-weight:600;")
+        self.lbl_simsrc.setStyleSheet(f"color:{theme.OK};font-size:10px;font-weight:600;")
         if not silent:
             self._status.setText(f"Loaded from sim: V_max={tr['vmax']:.0f} m/s, "
                                  f"M_max={tr['mmax']:.2f}, apogee={tr['apogee']:.0f} m")
@@ -548,7 +514,7 @@ class DynamicsWorkspace(QWidget):
         else:
             self.lbl_fmargin.setText("∞")
             self.lbl_fverdict.setText("SAFE")
-            self.lbl_fverdict.setStyleSheet(f"color:{_C_SAFE};font-weight:700;font-size:14px;padding:4px;")
+            self.lbl_fverdict.setStyleSheet(f"color:{theme.OK};font-weight:700;font-size:14px;padding:4px;")
 
         ax = getattr(self._flutter_plot, "ax", None)
         if ax is None:
@@ -563,11 +529,11 @@ class DynamicsWorkspace(QWidget):
             alts_a = np.array(alts); vf_a = np.array(vf)
             order = np.argsort(alts_a); alts_a = alts_a[order]; vf_a = vf_a[order]
             # Safe/caution/unsafe shading (relative to flutter boundary)
-            ax.fill_between(alts_a, 0, vf_a / 1.2, color=_C_SAFE, alpha=0.10)
-            ax.fill_between(alts_a, vf_a / 1.2, vf_a / 1.1, color=_C_CAUT, alpha=0.12)
-            ax.fill_between(alts_a, vf_a / 1.1, vf_a, color=_C_BAD, alpha=0.12)
-            ax.plot(alts_a, vf_a, color="#f0883e", linewidth=2.0, label="Flutter boundary")
-            ax.axhline(min(vf), color=_C_BAD, linestyle=":", linewidth=1.2,
+            ax.fill_between(alts_a, 0, vf_a / 1.2, color=theme.OK, alpha=0.10)
+            ax.fill_between(alts_a, vf_a / 1.2, vf_a / 1.1, color=theme.WARN, alpha=0.12)
+            ax.fill_between(alts_a, vf_a / 1.1, vf_a, color=theme.ERR, alpha=0.12)
+            ax.plot(alts_a, vf_a, color=theme.ACCENT, linewidth=2.0, label="Flutter boundary")
+            ax.axhline(min(vf), color=theme.ERR, linestyle=":", linewidth=1.2,
                        label=f"Flutter onset {min(vf):.0f} m/s")
 
         # Actual flight max-velocity profile vs altitude
@@ -575,10 +541,10 @@ class DynamicsWorkspace(QWidget):
         if tr:
             import numpy as np
             ta = np.array(tr["alt"]) / 1000.0; tv = np.array(tr["vel"])
-            ax.plot(ta, tv, color=_C_INFO, linewidth=1.8, label="Flight velocity")
-        ax.axhline(vmax, color="#c9d1d9", linestyle="--", linewidth=1.0,
+            ax.plot(ta, tv, color=theme.ACCENT, linewidth=1.8, label="Flight velocity")
+        ax.axhline(vmax, color=theme.TEXT, linestyle="--", linewidth=1.0,
                    label=f"Max flight {vmax:.0f} m/s")
-        ax.legend(facecolor="#161b22", edgecolor="#30363d", labelcolor="#c9d1d9", fontsize=8, loc="best")
+        ax.legend(facecolor=theme.PANEL, edgecolor=theme.LINE, labelcolor=theme.TEXT, fontsize=8, loc="best")
         self._flutter_plot.figure.tight_layout(); self._flutter_plot.canvas.draw()
         self._status.setText(f"Flutter: V_f={r.flutter_speed_mps:.0f} m/s, "
                              f"margin={self.lbl_fmargin.text()}")
@@ -593,11 +559,11 @@ class DynamicsWorkspace(QWidget):
             self._frf_plot.clear()
             self._frf_plot._style_axis("Frequency Response + Resonances", "Frequency (Hz)", "Magnitude (dB)")
             xs = [p[0] for p in r.frf_data]; ys = [p[1] for p in r.frf_data]
-            ax.plot(xs, ys, color=_C_INFO, linewidth=1.4)
+            ax.plot(xs, ys, color=theme.ACCENT, linewidth=1.4)
             for i, (f, mag, name) in enumerate(r.modal_markers):
-                ax.plot(f, mag, "o", color=_C_BAD, markersize=5)
+                ax.plot(f, mag, "o", color=theme.ERR, markersize=5)
                 ax.annotate(f"M{i+1}\n{f:.0f}Hz", (f, mag), textcoords="offset points",
-                            xytext=(0, 8), ha="center", fontsize=8, color="#c9d1d9")
+                            xytext=(0, 8), ha="center", fontsize=8, color=theme.TEXT)
             self._frf_plot.figure.tight_layout(); self._frf_plot.canvas.draw()
 
         # Resonance table — risk by proximity to excitation sources
@@ -618,7 +584,7 @@ class DynamicsWorkspace(QWidget):
             for c, val in enumerate(cells):
                 it = QTableWidgetItem(val)
                 if c == 3:
-                    it.setForeground(QColor({"Low": _C_SAFE, "Medium": _C_CAUT, "High": _C_BAD}[risk]))
+                    it.setForeground(QColor({"Low": theme.OK, "Medium": theme.WARN, "High": theme.ERR}[risk]))
                 self._res_table.setItem(i, c, it)
 
         if peaks:
@@ -693,7 +659,7 @@ class DynamicsWorkspace(QWidget):
         else:
             self.lbl_divmargin.setText("∞")
             self.lbl_divverdict.setText("SAFE")
-            self.lbl_divverdict.setStyleSheet(f"color:{_C_SAFE};font-weight:700;font-size:14px;padding:4px;")
+            self.lbl_divverdict.setStyleSheet(f"color:{theme.OK};font-weight:700;font-size:14px;padding:4px;")
         rev = getattr(r, "reversal_mach", 0.0)
         self.lbl_revmach.setText(f"{rev:.2f}" if rev > 0 else "none")
         self.lbl_effmax.setText(f"{getattr(r, 'effectiveness_at_max_mach', 1.0):+.2f}")
@@ -705,20 +671,20 @@ class DynamicsWorkspace(QWidget):
             self._aero_plot._style_axis("Aeroelastic Effectiveness (smooth reversal)", "Mach", "Effectiveness η")
             xs = [p[0] for p in r.effectiveness_data]; ys = [p[1] for p in r.effectiveness_data]
             # Authority regions (by effectiveness value)
-            ax.axhspan(0.3, 1.2, color=_C_SAFE, alpha=0.10)    # positive authority
-            ax.axhspan(-0.3, 0.3, color=_C_CAUT, alpha=0.12)   # neutral zone
-            ax.axhspan(-1.2, -0.3, color=_C_BAD, alpha=0.12)   # control reversal
-            ax.text(xs[0], 0.7, "AUTHORITY", color=_C_SAFE, fontsize=7, va="center")
-            ax.text(xs[0], 0.0, "NEUTRAL", color=_C_CAUT, fontsize=7, va="center")
-            ax.text(xs[0], -0.7, "REVERSAL", color=_C_BAD, fontsize=7, va="center")
-            ax.plot(xs, ys, color="#e6edf3", linewidth=2.0)
-            ax.axhline(0, color="#484f58", linewidth=0.8)
+            ax.axhspan(0.3, 1.2, color=theme.OK, alpha=0.10)    # positive authority
+            ax.axhspan(-0.3, 0.3, color=theme.WARN, alpha=0.12)   # neutral zone
+            ax.axhspan(-1.2, -0.3, color=theme.ERR, alpha=0.12)   # control reversal
+            ax.text(xs[0], 0.7, "AUTHORITY", color=theme.OK, fontsize=7, va="center")
+            ax.text(xs[0], 0.0, "NEUTRAL", color=theme.WARN, fontsize=7, va="center")
+            ax.text(xs[0], -0.7, "REVERSAL", color=theme.ERR, fontsize=7, va="center")
+            ax.plot(xs, ys, color=theme.TEXT_BRIGHT, linewidth=2.0)
+            ax.axhline(0, color=theme.LINE_STRONG, linewidth=0.8)
             if rev > 0:
-                ax.axvline(rev, color=_C_BAD, linestyle="--", linewidth=1.4,
+                ax.axvline(rev, color=theme.ERR, linestyle="--", linewidth=1.4,
                            label=f"Reversal M={rev:.2f}")
-            ax.axvline(self.sp_mmax.value(), color=_C_INFO, linestyle="-", linewidth=1.4,
+            ax.axvline(self.sp_mmax.value(), color=theme.ACCENT, linestyle="-", linewidth=1.4,
                        label=f"Flight M={self.sp_mmax.value():.2f}")
-            ax.legend(facecolor="#161b22", edgecolor="#30363d", labelcolor="#c9d1d9", fontsize=8)
+            ax.legend(facecolor=theme.PANEL, edgecolor=theme.LINE, labelcolor=theme.TEXT, fontsize=8)
             self._aero_plot.figure.tight_layout(); self._aero_plot.canvas.draw()
         self._status.setText(f"Aeroelastic: V_div={r.divergence_speed_mps:.0f} m/s, "
                              f"margin={self.lbl_divmargin.text()}")
@@ -843,7 +809,7 @@ class DynamicsWorkspace(QWidget):
         vdiv = (self._aero_result.divergence_speed_mps
                 if self._aero_result and self._aero_result.divergence_speed_mps < 1e6 else None)
 
-        verdict, vcol = "SAFE", _C_SAFE
+        verdict, vcol = "SAFE", theme.OK
         crosses = []
 
         # Boundaries
@@ -851,9 +817,9 @@ class DynamicsWorkspace(QWidget):
         if vf_sw:
             alts = np.array([p[0] / 1000.0 for p in vf_sw]); vf = np.array([p[1] for p in vf_sw])
             xmax = max(xmax, vf.max() * 1.1)
-            ax.fill_betweenx(alts, vf, xmax, color=_C_BAD, alpha=0.10)        # unsafe (flutter)
-            ax.fill_betweenx(alts, 0, vf, color=_C_SAFE, alpha=0.06)          # safe
-            ax.plot(vf, alts, color="#f0883e", linewidth=2.0, label="Flutter boundary")
+            ax.fill_betweenx(alts, vf, xmax, color=theme.ERR, alpha=0.10)        # unsafe (flutter)
+            ax.fill_betweenx(alts, 0, vf, color=theme.OK, alpha=0.06)          # safe
+            ax.plot(vf, alts, color=theme.ACCENT, linewidth=2.0, label="Flutter boundary")
         if vdiv is not None:
             ax.axvline(vdiv, color="#bc8cff", linestyle="--", linewidth=1.4,
                        label=f"Divergence {vdiv:.0f} m/s")
@@ -861,7 +827,7 @@ class DynamicsWorkspace(QWidget):
         # Actual trajectory + crossing checks
         if tr:
             ta = np.array(tr["alt"]) / 1000.0; tv = np.array(tr["vel"])
-            ax.plot(tv, ta, color=_C_INFO, linewidth=2.0, label="Actual trajectory")
+            ax.plot(tv, ta, color=theme.ACCENT, linewidth=2.0, label="Actual trajectory")
             if vf_sw:
                 vf_at = np.interp(tr["alt"], [p[0] for p in vf_sw], [p[1] for p in vf_sw])
                 if np.any(np.array(tr["vel"]) >= vf_at):
@@ -869,17 +835,17 @@ class DynamicsWorkspace(QWidget):
             if vdiv is not None and tr["vmax"] >= vdiv:
                 crosses.append("divergence")
             if crosses:
-                verdict, vcol = "UNSAFE", _C_BAD
+                verdict, vcol = "UNSAFE", theme.ERR
         else:
             ax.text(0.5, 0.5, "No simulation trajectory.\nRun a simulation, then re-open Dynamics.",
-                    transform=ax.transAxes, ha="center", va="center", color="#8b949e", fontsize=10)
+                    transform=ax.transAxes, ha="center", va="center", color=theme.TEXT_DIM, fontsize=10)
 
         if tr or vf_sw or vdiv is not None:
             ax.set_title(
                 f"Flight Envelope — {verdict}"
                 + (f" (crosses {', '.join(crosses)})" if crosses else ""),
                 color=vcol, fontsize=12, fontweight="bold", pad=10)
-            ax.legend(facecolor="#161b22", edgecolor="#30363d", labelcolor="#c9d1d9", fontsize=8, loc="best")
+            ax.legend(facecolor=theme.PANEL, edgecolor=theme.LINE, labelcolor=theme.TEXT, fontsize=8, loc="best")
             self._env_plot.figure.tight_layout(); self._env_plot.canvas.draw()
         self._envelope_verdict = verdict
 
@@ -917,7 +883,7 @@ class DynamicsWorkspace(QWidget):
             for l in (self.lbl_maxq, self.lbl_qmach, self.lbl_qalt):
                 l.setText("—")
             self.lbl_qverdict.setText("no sim data")
-            self.lbl_qverdict.setStyleSheet("color:#8b949e;font-weight:700;font-size:13px;padding:4px;")
+            self.lbl_qverdict.setStyleSheet(f"color:{theme.TEXT_DIM};font-weight:700;font-size:13px;padding:4px;")
             self._maxq_info = None
 
         # ---- Sub-scores ----
@@ -940,16 +906,16 @@ class DynamicsWorkspace(QWidget):
                  + 0.15 * res_score + 0.10 * rev_score)
         # Qualitative 3-level verdict (no numeric score shown to the user).
         if score >= 75:
-            rating, col = "✅ Good", _C_SAFE
+            rating, col = "✅ Good", theme.OK
         elif score >= 50:
-            rating, col = "⚠️ Marginal", _C_CAUT
+            rating, col = "⚠️ Marginal", theme.WARN
         else:
-            rating, col = "❌ Poor", _C_BAD
+            rating, col = "❌ Poor", theme.ERR
         self._safety_score = score; self._safety_rating = rating
         self.lbl_overall.setText(rating)
         self.lbl_overall.setStyleSheet(
             f"font-weight:800;font-size:16px;padding:10px;border-radius:6px;"
-            f"background:#161b22;color:{col};border:1px solid {col}66;")
+            f"background:#16161a;color:{col};border:1px solid {col}66;")
 
         self._update_warnings(vmax, mmax)
 
@@ -975,13 +941,13 @@ class DynamicsWorkspace(QWidget):
                     pass
         try:
             self.lbl_warnings.setText("Run assessment to check consistency.")
-            self.lbl_warnings.setStyleSheet("color:#8b949e;font-size:11px;")
+            self.lbl_warnings.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:11px;")
         except Exception:
             pass
         try:
             self.lbl_overall.setText("RUN ASSESSMENT")
             self.lbl_overall.setStyleSheet("font-weight:800;font-size:16px;padding:10px;"
-                                           "border-radius:6px;background:#161b22;color:#484f58;")
+                                           f"border-radius:6px;background:{theme.PANEL};color:{theme.LINE_STRONG};")
         except Exception:
             pass
 
@@ -1005,13 +971,13 @@ class DynamicsWorkspace(QWidget):
 
         if not warns:
             self.lbl_warnings.setText("✓ All consistency checks passed.")
-            self.lbl_warnings.setStyleSheet("color:#7ee787;font-size:11px;font-weight:600;")
+            self.lbl_warnings.setStyleSheet(f"color:{theme.OK};font-size:11px;font-weight:600;")
             return
         has_bad = any(s == "UNSAFE" for s, _ in warns)
         lines = [("✗ " if s == "UNSAFE" else "! ") + msg for s, msg in warns]
         self.lbl_warnings.setText("\n".join(lines))
         self.lbl_warnings.setStyleSheet(
-            f"color:{_C_BAD if has_bad else _C_CAUT};font-size:11px;font-weight:600;")
+            f"color:{theme.ERR if has_bad else theme.WARN};font-size:11px;font-weight:600;")
 
     # ===============================================================
     # Report export

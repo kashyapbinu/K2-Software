@@ -128,6 +128,12 @@ class CFDConfig:
     # assembly's parts interpenetrate.
     cad_wrap: bool = False
     cad_wrap_resolution: str = "medium"   # coarse | medium | fine
+    # Elements gmsh spends per 2*pi of surface curvature, i.e. how hard leading
+    # edges, trailing edges and nose tips are refined relative to flat panels.
+    # None keeps the per-route default (20 exact B-Rep, 12 re-topologised STL).
+    # A curved leading edge of radius r gets elements of about 2*pi*r/N, so a
+    # thin wing needs a high N to resolve its LE without refining everywhere.
+    cad_curvature_elements: Optional[int] = None
     # Force-coefficient references. An arbitrary body has no "body diameter" to
     # infer them from, so they default to the measured frontal area and
     # flow-wise bbox extent; set these to publish coefficients about a

@@ -10,9 +10,9 @@ jobs:
   build:
     runs-on: macos-14   # Apple Silicon (arm64)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -47,7 +47,7 @@ jobs:
           AC_PROFILE: ${{ secrets.AC_PROFILE }}
         run: bash packaging/mac/sign_notarize.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: K2-macos-${{ runner.arch }}
           path: dist/K2.dmg

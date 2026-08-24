@@ -22,48 +22,14 @@ import pyvista as pv
 from pyvistaqt import QtInteractor
 from cfd.post_processing import field_percentiles
 
+from ui import theme
+
 logger = logging.getLogger("K2.CFD.Workspace")
 
 # ── Shared style helpers ──────────────────────────────────────────────────────
-_GRP_SS = """
-QGroupBox {
-    color: #8b949e; font-size: 11px; font-weight: 600;
-    border: 1px solid #21262d; border-radius: 6px;
-    margin-top: 10px; padding-top: 6px;
-}
-QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
-"""
-_BTN_PRIMARY = """
-QPushButton {
-    background: #1f6feb; color: #fff; font-weight: 700; font-size: 12px;
-    border: none; border-radius: 6px; padding: 9px 14px;
-}
-QPushButton:hover { background: #388bfd; }
-QPushButton:disabled { background: #21262d; color: #484f58; }
-"""
-_BTN_SUCCESS = """
-QPushButton {
-    background: #238636; color: #fff; font-weight: 600;
-    border: none; border-radius: 6px; padding: 8px 14px;
-}
-QPushButton:hover { background: #2ea043; }
-QPushButton:disabled { background: #21262d; color: #484f58; }
-"""
-_BTN_SECONDARY = """
-QPushButton {
-    background: #21262d; color: #c9d1d9; font-weight: 500;
-    border: 1px solid #30363d; border-radius: 6px; padding: 7px 14px;
-}
-QPushButton:hover { background: #30363d; border-color: #8b949e; }
-QPushButton:disabled { color: #484f58; }
-"""
-_VAL_SS = ("color:#e6edf3; font-family:'Cascadia Code',monospace; font-size:13px;"
-           "font-weight:600; padding:2px 6px; background:#161b22; border-radius:4px;")
-
-
 def _make_val_label(text="—"):
     lbl = QLabel(text)
-    lbl.setStyleSheet(_VAL_SS)
+    lbl.setProperty("value", True)
     return lbl
 
 
@@ -666,12 +632,11 @@ class CFDWorkspace(QWidget):
 
         # Title
         title = QLabel("CFD Analysis")
-        title.setStyleSheet("color:#58a6ff;font-size:15px;font-weight:700;padding:2px 0 6px 0;")
+        title.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
         lay.addWidget(title)
 
         # ── Geometry source ──
         geo_grp = QGroupBox("Geometry Source")
-        geo_grp.setStyleSheet(_GRP_SS)
         gl = QVBoxLayout(geo_grp)
         gl.setSpacing(6)
         self._rb_assembly = QRadioButton("Use current rocket design")
@@ -680,18 +645,17 @@ class CFDWorkspace(QWidget):
         bg = QButtonGroup(self)
         bg.addButton(self._rb_assembly)
         bg.addButton(self._rb_cad)
-        self._rb_assembly.setStyleSheet("color:#c9d1d9; font-size:12px;")
-        self._rb_cad.setStyleSheet("color:#c9d1d9; font-size:12px;")
+        self._rb_assembly.setStyleSheet(f"color:{theme.TEXT}; font-size:12px;")
+        self._rb_cad.setStyleSheet(f"color:{theme.TEXT}; font-size:12px;")
         gl.addWidget(self._rb_assembly)
         gl.addWidget(self._rb_cad)
 
         self._cad_lbl = QLabel("No file selected")
-        self._cad_lbl.setStyleSheet("color:#484f58; font-size:11px; padding-left:4px;")
+        self._cad_lbl.setStyleSheet(f"color:{theme.LINE_STRONG}; font-size:11px; padding-left:4px;")
         self._cad_lbl.setWordWrap(True)
         gl.addWidget(self._cad_lbl)
 
         self._btn_browse = QPushButton(icon("browse"), "Browse CAD File…")
-        self._btn_browse.setStyleSheet(_BTN_SECONDARY)
         self._btn_browse.setEnabled(False)
         self._btn_browse.clicked.connect(self._browse_cad)
         self._rb_cad.toggled.connect(self._btn_browse.setEnabled)
@@ -704,7 +668,6 @@ class CFDWorkspace(QWidget):
         # coefficients should be normalised by. Both are measured
         # automatically and both can be overridden here.
         self._cad_grp = QGroupBox("Imported CAD")
-        self._cad_grp.setStyleSheet(_GRP_SS)
         cgl = QVBoxLayout(self._cad_grp)
         cgl.setSpacing(6)
 
@@ -800,7 +763,7 @@ class CFDWorkspace(QWidget):
         self._cad_info_lbl = QLabel("Import a file to see its measurements.")
         self._cad_info_lbl.setWordWrap(True)
         self._cad_info_lbl.setStyleSheet(
-            "color:#8b949e; font-size:10px; padding:4px 2px 0 2px;"
+            f"color:{theme.TEXT_DIM}; font-size:10px; padding:4px 2px 0 2px;"
         )
         cgl.addWidget(self._cad_info_lbl)
 
@@ -810,7 +773,6 @@ class CFDWorkspace(QWidget):
 
         # ── Flow conditions ──
         flow_grp = QGroupBox("Flow Conditions")
-        flow_grp.setStyleSheet(_GRP_SS)
         fl = QFormLayout(flow_grp)
         fl.setSpacing(8)
         fl.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -840,7 +802,6 @@ class CFDWorkspace(QWidget):
 
         # ── Atmosphere & flow readout ──
         atm_grp = QGroupBox("Atmosphere & Flow")
-        atm_grp.setStyleSheet(_GRP_SS)
         al = QFormLayout(atm_grp)
         al.setSpacing(6)
         al.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -858,7 +819,6 @@ class CFDWorkspace(QWidget):
 
         # ── Analysis mode: single point vs sweep (polar) ──
         mode_grp = QGroupBox("Analysis Mode")
-        mode_grp.setStyleSheet(_GRP_SS)
         mol = QVBoxLayout(mode_grp)
         mol.setSpacing(6)
         self._rb_single = QRadioButton("Single point")
@@ -868,7 +828,7 @@ class CFDWorkspace(QWidget):
         mode_bg.addButton(self._rb_single)
         mode_bg.addButton(self._rb_sweep)
         for rb in (self._rb_single, self._rb_sweep):
-            rb.setStyleSheet("color:#c9d1d9; font-size:12px;")
+            rb.setStyleSheet(f"color:{theme.TEXT}; font-size:12px;")
             mol.addWidget(rb)
 
         # Sweep parameter sub-panel (hidden until Sweep selected)
@@ -903,7 +863,7 @@ class CFDWorkspace(QWidget):
         # biases CP forward and roughly doubles Cd₀.
         self._chk_euler_fric = QCheckBox("Euler + flat-plate friction (recommended)")
         self._chk_euler_fric.setChecked(True)
-        self._chk_euler_fric.setStyleSheet("color:#c9d1d9; font-size:12px;")
+        self._chk_euler_fric.setStyleSheet(f"color:{theme.TEXT}; font-size:12px;")
         self._chk_euler_fric.setToolTip(
             "Solve each sweep point inviscid (Euler) and add an analytic\n"
             "skin-friction build-up (Schlichting flat plate + form factors)\n"
@@ -914,7 +874,7 @@ class CFDWorkspace(QWidget):
         swl.addRow("", self._chk_euler_fric)
 
         self._lbl_sweep_info = QLabel("9 points")
-        self._lbl_sweep_info.setStyleSheet("color:#8b949e; font-size:11px; padding:2px 0;")
+        self._lbl_sweep_info.setStyleSheet(f"color:{theme.TEXT_DIM}; font-size:11px; padding:2px 0;")
         self._lbl_sweep_info.setWordWrap(True)
         swl.addRow("", self._lbl_sweep_info)
 
@@ -928,7 +888,6 @@ class CFDWorkspace(QWidget):
 
         # ── Streamline options ──
         self._stream_grp = QGroupBox("Streamline Options")
-        self._stream_grp.setStyleSheet(_GRP_SS)
         stl = QFormLayout(self._stream_grp)
         stl.setSpacing(6)
         self._sp_seed_density = QSpinBox()
@@ -945,7 +904,6 @@ class CFDWorkspace(QWidget):
 
         # ── Display Options (engineering-grade controls) ──
         self._disp_grp = QGroupBox("Display Options")
-        self._disp_grp.setStyleSheet(_GRP_SS)
         dl = QFormLayout(self._disp_grp)
         dl.setSpacing(6)
         dl.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -971,7 +929,7 @@ class CFDWorkspace(QWidget):
 
         # Log scale toggle
         self._chk_log_scale = QCheckBox("Logarithmic")
-        self._chk_log_scale.setStyleSheet("color:#c9d1d9;")
+        self._chk_log_scale.setStyleSheet(f"color:{theme.TEXT};")
         self._chk_log_scale.stateChanged.connect(lambda _: self._schedule_refresh())
         dl.addRow("Scale:", self._chk_log_scale)
 
@@ -979,11 +937,11 @@ class CFDWorkspace(QWidget):
         self._sl_opacity = QSlider(Qt.Orientation.Horizontal)
         self._sl_opacity.setRange(10, 100); self._sl_opacity.setValue(100)
         self._sl_opacity.setStyleSheet(
-            "QSlider::groove:horizontal{background:#21262d;height:6px;border-radius:3px;}"
-            "QSlider::handle:horizontal{background:#58a6ff;width:14px;margin:-4px 0;border-radius:7px;}"
+            f"QSlider::groove:horizontal{{background:{theme.RAISED};height:6px;border-radius:3px;}}"
+            f"QSlider::handle:horizontal{{background:{theme.ACCENT};width:14px;margin:-4px 0;border-radius:7px;}}"
         )
         self._lbl_opacity = QLabel("1.00")
-        self._lbl_opacity.setStyleSheet("color:#8b949e;font-size:11px;min-width:30px;")
+        self._lbl_opacity.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:11px;min-width:30px;")
         self._sl_opacity.valueChanged.connect(lambda v: (self._lbl_opacity.setText(f"{v/100:.2f}"), self._schedule_refresh()))
         op_lay = QHBoxLayout()
         op_lay.addWidget(self._sl_opacity); op_lay.addWidget(self._lbl_opacity)
@@ -993,11 +951,11 @@ class CFDWorkspace(QWidget):
         self._sl_slice = QSlider(Qt.Orientation.Horizontal)
         self._sl_slice.setRange(-100, 100); self._sl_slice.setValue(0)
         self._sl_slice.setStyleSheet(
-            "QSlider::groove:horizontal{background:#21262d;height:6px;border-radius:3px;}"
-            "QSlider::handle:horizontal{background:#7ee787;width:14px;margin:-4px 0;border-radius:7px;}"
+            f"QSlider::groove:horizontal{{background:{theme.RAISED};height:6px;border-radius:3px;}}"
+            f"QSlider::handle:horizontal{{background:{theme.OK};width:14px;margin:-4px 0;border-radius:7px;}}"
         )
         self._lbl_slice = QLabel("0.00")
-        self._lbl_slice.setStyleSheet("color:#8b949e;font-size:11px;min-width:30px;")
+        self._lbl_slice.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:11px;min-width:30px;")
         self._sl_slice.valueChanged.connect(lambda v: (self._lbl_slice.setText(f"{v/100:.2f}"), self._schedule_refresh()))
         sl_lay = QHBoxLayout()
         sl_lay.addWidget(self._sl_slice); sl_lay.addWidget(self._lbl_slice)
@@ -1007,11 +965,11 @@ class CFDWorkspace(QWidget):
         self._sl_iso = QSlider(Qt.Orientation.Horizontal)
         self._sl_iso.setRange(1, 100); self._sl_iso.setValue(85)
         self._sl_iso.setStyleSheet(
-            "QSlider::groove:horizontal{background:#21262d;height:6px;border-radius:3px;}"
+            f"QSlider::groove:horizontal{{background:{theme.RAISED};height:6px;border-radius:3px;}}"
             "QSlider::handle:horizontal{background:#d2a8ff;width:14px;margin:-4px 0;border-radius:7px;}"
         )
         self._lbl_iso = QLabel("85%")
-        self._lbl_iso.setStyleSheet("color:#8b949e;font-size:11px;min-width:30px;")
+        self._lbl_iso.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:11px;min-width:30px;")
         self._sl_iso.valueChanged.connect(lambda v: (self._lbl_iso.setText(f"{v}%"), self._schedule_refresh()))
         iso_lay = QHBoxLayout()
         iso_lay.addWidget(self._sl_iso); iso_lay.addWidget(self._lbl_iso)
@@ -1026,7 +984,6 @@ class CFDWorkspace(QWidget):
 
         # Screenshot button
         self._btn_screenshot = QPushButton(icon("screenshot"), "Screenshot (4K)")
-        self._btn_screenshot.setStyleSheet(_BTN_SECONDARY)
         self._btn_screenshot.clicked.connect(self._screenshot_hq)
         dl.addRow("", self._btn_screenshot)
 
@@ -1035,7 +992,6 @@ class CFDWorkspace(QWidget):
 
         # ── Mesh settings ──
         mesh_grp = QGroupBox("Mesh Settings")
-        mesh_grp.setStyleSheet(_GRP_SS)
         ml = QFormLayout(mesh_grp)
         ml.setSpacing(8)
         ml.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -1109,12 +1065,12 @@ class CFDWorkspace(QWidget):
         self._sl_power.setRange(0, 100)
         self._sl_power.setValue(40)
         self._sl_power.setStyleSheet(
-            "QSlider::groove:horizontal{background:#21262d;height:6px;border-radius:3px;}"
-            "QSlider::handle:horizontal{background:#f0883e;width:14px;margin:-4px 0;border-radius:7px;}"
+            f"QSlider::groove:horizontal{{background:{theme.RAISED};height:6px;border-radius:3px;}}"
+            f"QSlider::handle:horizontal{{background:{theme.ACCENT};width:14px;margin:-4px 0;border-radius:7px;}}"
         )
         self._sl_power.valueChanged.connect(self._on_power_slider_changed)
         self._lbl_power = QLabel("40%")
-        self._lbl_power.setStyleSheet("color:#8b949e;font-size:11px;min-width:30px;")
+        self._lbl_power.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:11px;min-width:30px;")
         pw_lay = QHBoxLayout()
         pw_lay.addWidget(self._sl_power)
         pw_lay.addWidget(self._lbl_power)
@@ -1123,14 +1079,14 @@ class CFDWorkspace(QWidget):
         # Estimate label
         self._lbl_estimate = QLabel("≈ 200K elements")
         self._lbl_estimate.setStyleSheet(
-            "color:#58a6ff; font-size:11px; font-weight:600; padding:2px 0;"
+            f"color:{theme.ACCENT}; font-size:11px; font-weight:600; padding:2px 0;"
         )
         cml.addRow("", self._lbl_estimate)
 
         # Warning label (shown for high element counts)
         self._lbl_mesh_warn = QLabel("")
         self._lbl_mesh_warn.setStyleSheet(
-            "color:#d29922; font-size:11px; font-weight:600; padding:2px 0;"
+            f"color:{theme.WARN}; font-size:11px; font-weight:600; padding:2px 0;"
         )
         self._lbl_mesh_warn.setWordWrap(True)
         self._lbl_mesh_warn.setVisible(False)
@@ -1142,7 +1098,7 @@ class CFDWorkspace(QWidget):
         # Warning for preset ultra-fine
         self._lbl_preset_warn = QLabel("")
         self._lbl_preset_warn.setStyleSheet(
-            "color:#d29922; font-size:11px; font-weight:600; padding:2px 0;"
+            f"color:{theme.WARN}; font-size:11px; font-weight:600; padding:2px 0;"
         )
         self._lbl_preset_warn.setWordWrap(True)
         self._lbl_preset_warn.setVisible(False)
@@ -1155,15 +1111,13 @@ class CFDWorkspace(QWidget):
 
         # ── Action buttons ──
         self._btn_export = QPushButton(icon("export"), "Export Geometry to STL")
-        self._btn_export.setStyleSheet(_BTN_SECONDARY)
         self._btn_export.clicked.connect(self._export_geometry)
 
         self._btn_run = QPushButton(icon("run", color="#fff"), "Run CFD Analysis")
-        self._btn_run.setStyleSheet(_BTN_PRIMARY)
+        self._btn_run.setProperty("primary", True)
         self._btn_run.clicked.connect(self._run_cfd)
 
         self._btn_stop = QPushButton(icon("stop"), "Stop Solver")
-        self._btn_stop.setStyleSheet(_BTN_SECONDARY)
         self._btn_stop.setEnabled(False)
         self._btn_stop.clicked.connect(self._stop_cfd)
 
@@ -1177,22 +1131,19 @@ class CFDWorkspace(QWidget):
         self._progress.setTextVisible(True)
         self._progress.setFormat(" %p% (%v / %m iterations)")
         self._progress.setStyleSheet(
-            "QProgressBar{background:#21262d; border-radius:4px; border:1px solid #30363d; color:#c9d1d9; font-weight:bold; text-align:center;}"
-            "QProgressBar::chunk{background:#1f6feb; border-radius:3px;}"
+            f"QProgressBar{{background:{theme.RAISED}; border-radius:4px; border:1px solid {theme.LINE}; color:{theme.TEXT}; font-weight:bold; text-align:center;}}"
+            f"QProgressBar::chunk{{background:{theme.ACCENT_DEEP}; border-radius:3px;}}"
         )
         lay.addWidget(self._progress)
 
         # ── Export results (PDF + CSV) ──
         exp_group = QGroupBox("Export Results")
-        exp_group.setStyleSheet(_GRP_SS)
         eg = QHBoxLayout(); eg.setSpacing(6)
         self._btn_export_pdf = QPushButton(icon("report"), "PDF")
-        self._btn_export_pdf.setStyleSheet(_BTN_SECONDARY)
         self._btn_export_pdf.setEnabled(False)
         self._btn_export_pdf.clicked.connect(self._export_pdf)
         eg.addWidget(self._btn_export_pdf)
         self._btn_export_csv = QPushButton(icon("export"), "CSV")
-        self._btn_export_csv.setStyleSheet(_BTN_SECONDARY)
         self._btn_export_csv.setEnabled(False)
         self._btn_export_csv.clicked.connect(self._export_results_csv)
         eg.addWidget(self._btn_export_csv)
@@ -1208,15 +1159,15 @@ class CFDWorkspace(QWidget):
     def _build_center(self):
         self._center_tabs = QTabWidget()
         self._center_tabs.setStyleSheet(
-            "QTabWidget::pane{border:none;background:#0d1117;}"
-            "QTabBar::tab{background:#161b22;color:#8b949e;padding:6px 16px;"
-            "font-size:12px;font-weight:600;border:1px solid #21262d;border-bottom:none;}"
-            "QTabBar::tab:selected{background:#0d1117;color:#58a6ff;}"
+            f"QTabWidget::pane{{border:none;background:{theme.BG};}}"
+            f"QTabBar::tab{{background:{theme.PANEL};color:{theme.TEXT_DIM};padding:6px 16px;"
+            f"font-size:12px;font-weight:600;border:1px solid {theme.RAISED};border-bottom:none;}}"
+            f"QTabBar::tab:selected{{background:{theme.BG};color:{theme.ACCENT};}}"
             "QTabBar::scroller{width:30px;}"
-            "QTabBar QToolButton{background:#21262d;border:1px solid #30363d;"
-            "border-radius:4px;margin:2px 1px;width:22px;color:#c9d1d9;}"
-            "QTabBar QToolButton:hover{background:#1f6feb;border-color:#1f6feb;}"
-            "QTabBar QToolButton:disabled{background:#161b22;border-color:#21262d;}"
+            f"QTabBar QToolButton{{background:{theme.RAISED};border:1px solid {theme.LINE};"
+            f"border-radius:4px;margin:2px 1px;width:22px;color:{theme.TEXT};}}"
+            f"QTabBar QToolButton:hover{{background:{theme.ACCENT_DEEP};border-color:{theme.ACCENT_DEEP};}}"
+            f"QTabBar QToolButton:disabled{{background:{theme.PANEL};border-color:{theme.RAISED};}}"
         )
         self._center_tabs.addTab(self._build_field_view(), "3D Field")
         self._center_tabs.addTab(self._build_polar_view(), "Polars")
@@ -1247,13 +1198,13 @@ class CFDWorkspace(QWidget):
 
         # Top bar
         bar = QWidget()
-        bar.setStyleSheet("background:#161b22; border-bottom:1px solid #21262d;")
+        bar.setStyleSheet(f"background:{theme.PANEL}; border-bottom:1px solid {theme.RAISED};")
         bar.setFixedHeight(44)
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(12, 0, 8, 0)
 
         lbl = QLabel("CFD Visualization")
-        lbl.setStyleSheet("color:#58a6ff; font-weight:700; font-size:13px;")
+        lbl.setStyleSheet(f"color:{theme.ACCENT}; font-weight:700; font-size:13px;")
         bl.addWidget(lbl)
         bl.addStretch()
 
@@ -1284,19 +1235,19 @@ class CFDWorkspace(QWidget):
         bl.addWidget(self._vis_combo)
 
         self._chk_interactive_slice = QCheckBox("Interactive Slice")
-        self._chk_interactive_slice.setStyleSheet("color:#c9d1d9; font-weight:600;")
+        self._chk_interactive_slice.setStyleSheet(f"color:{theme.TEXT}; font-weight:600;")
         self._chk_interactive_slice.setEnabled(False)
         self._chk_interactive_slice.stateChanged.connect(self._toggle_interactive_slice)
         bl.addWidget(self._chk_interactive_slice)
 
         self._chk_contour_lines = QCheckBox("Contour Lines")
-        self._chk_contour_lines.setStyleSheet("color:#c9d1d9; font-weight:600;")
+        self._chk_contour_lines.setStyleSheet(f"color:{theme.TEXT}; font-weight:600;")
         self._chk_contour_lines.setChecked(False)
         self._chk_contour_lines.stateChanged.connect(self._refresh_vis)
         bl.addWidget(self._chk_contour_lines)
 
         self._chk_mesh_edges = QCheckBox("Mesh Edges")
-        self._chk_mesh_edges.setStyleSheet("color:#c9d1d9; font-weight:600;")
+        self._chk_mesh_edges.setStyleSheet(f"color:{theme.TEXT}; font-weight:600;")
         self._chk_mesh_edges.setChecked(False)
         self._chk_mesh_edges.stateChanged.connect(self._refresh_vis)
         bl.addWidget(self._chk_mesh_edges)
@@ -1314,14 +1265,12 @@ class CFDWorkspace(QWidget):
 
         # Probe mode toggle
         self._btn_probe = QPushButton("Probe")
-        self._btn_probe.setStyleSheet(_BTN_SECONDARY)
         self._btn_probe.setCheckable(True)
         self._btn_probe.setFixedHeight(28)
         self._btn_probe.toggled.connect(self._toggle_probe_mode)
         bl.addWidget(self._btn_probe)
 
         btn_cam = QPushButton(icon("reset_view"), "Reset Camera")
-        btn_cam.setStyleSheet(_BTN_SECONDARY)
         btn_cam.setFixedHeight(28)
         btn_cam.clicked.connect(lambda: self._plotter.reset_camera())
         bl.addWidget(btn_cam)
@@ -1329,11 +1278,11 @@ class CFDWorkspace(QWidget):
 
         # PyVista viewer
         frame = QFrame()
-        frame.setStyleSheet("background:#0d1117;")
+        frame.setStyleSheet(f"background:{theme.BG};")
         fl = QVBoxLayout(frame)
         fl.setContentsMargins(0, 0, 0, 0)
         self._plotter = QtInteractor(frame, auto_update=False)
-        self._plotter.set_background("#0d1117")
+        self._plotter.set_background(theme.BG)
         try:
             self._plotter.enable_ssao(radius=0.25, bias=0.002, kernel_size=512, blur=True)
             self._plotter.enable_anti_aliasing('msaa')
@@ -1353,8 +1302,8 @@ class CFDWorkspace(QWidget):
         # Status bar
         self._status_lbl = QLabel("Load a rocket or import a CAD file to begin.")
         self._status_lbl.setStyleSheet(
-            "color:#8b949e; padding:5px 12px; font-size:11px;"
-            "background:#161b22; border-top:1px solid #21262d;"
+            f"color:{theme.TEXT_DIM}; padding:5px 12px; font-size:11px;"
+            f"background:{theme.PANEL}; border-top:1px solid {theme.RAISED};"
         )
         self._status_lbl.setFixedHeight(28)
         lay.addWidget(self._status_lbl)
@@ -1369,12 +1318,12 @@ class CFDWorkspace(QWidget):
 
         # Top bar
         bar = QWidget()
-        bar.setStyleSheet("background:#161b22; border-bottom:1px solid #21262d;")
+        bar.setStyleSheet(f"background:{theme.PANEL}; border-bottom:1px solid {theme.RAISED};")
         bar.setFixedHeight(44)
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(12, 0, 8, 0)
         lbl = QLabel("Aerodynamic Polars")
-        lbl.setStyleSheet("color:#58a6ff; font-weight:700; font-size:13px;")
+        lbl.setStyleSheet(f"color:{theme.ACCENT}; font-weight:700; font-size:13px;")
         bl.addWidget(lbl)
         bl.addStretch()
         bl.addWidget(QLabel("Curve:"))
@@ -1382,7 +1331,6 @@ class CFDWorkspace(QWidget):
         self._cb_polar.currentIndexChanged.connect(self._refresh_polar)
         bl.addWidget(self._cb_polar)
         self._btn_polar_export = QPushButton("Export CSV")
-        self._btn_polar_export.setStyleSheet(_BTN_SECONDARY)
         self._btn_polar_export.setFixedHeight(28)
         self._btn_polar_export.setEnabled(False)
         self._btn_polar_export.clicked.connect(self._export_polar_csv)
@@ -1403,8 +1351,8 @@ class CFDWorkspace(QWidget):
         )
         self._lbl_polar_metrics.setWordWrap(True)
         self._lbl_polar_metrics.setStyleSheet(
-            "color:#8b949e; padding:8px 12px; font-size:12px;"
-            "background:#161b22; border-top:1px solid #21262d;"
+            f"color:{theme.TEXT_DIM}; padding:8px 12px; font-size:12px;"
+            f"background:{theme.PANEL}; border-top:1px solid {theme.RAISED};"
         )
         lay.addWidget(self._lbl_polar_metrics)
         return w
@@ -1424,12 +1372,11 @@ class CFDWorkspace(QWidget):
         lay.setSpacing(10)
 
         title = QLabel("Results")
-        title.setStyleSheet("color:#58a6ff; font-size:15px; font-weight:700; padding:2px 0 6px 0;")
+        title.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
         lay.addWidget(title)
 
         # ── Aerodynamic Coefficients ──
         coef_grp = QGroupBox("Aerodynamic Coefficients")
-        coef_grp.setStyleSheet(_GRP_SS)
         cf = QFormLayout(coef_grp)
         cf.setSpacing(6)
         cf.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -1463,7 +1410,6 @@ class CFDWorkspace(QWidget):
 
         # ── Forces & CP ──
         force_grp = QGroupBox("Forces & Center of Pressure")
-        force_grp.setStyleSheet(_GRP_SS)
         ff = QFormLayout(force_grp)
         ff.setSpacing(6)
         ff.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -1474,7 +1420,6 @@ class CFDWorkspace(QWidget):
 
         # ── Solver & Flow Info ──
         solver_grp = QGroupBox("Solver & Flow")
-        solver_grp.setStyleSheet(_GRP_SS)
         sf = QFormLayout(solver_grp)
         sf.setSpacing(6)
         sf.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -1486,7 +1431,6 @@ class CFDWorkspace(QWidget):
 
         # ── Mesh Statistics ──
         mesh_grp = QGroupBox("Mesh Quality")
-        mesh_grp.setStyleSheet(_GRP_SS)
         mf = QFormLayout(mesh_grp)
         mf.setSpacing(6)
         mf.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -1499,14 +1443,13 @@ class CFDWorkspace(QWidget):
 
         # Inject button
         self._btn_inject = QPushButton(icon("inject"), "Inject into Flight Simulation")
-        self._btn_inject.setStyleSheet(_BTN_SUCCESS)
+        self._btn_inject.setProperty("success", True)
         self._btn_inject.setEnabled(False)
         self._btn_inject.clicked.connect(self._inject_results)
         lay.addWidget(self._btn_inject)
 
         # Cp distribution plot
         cp_grp = QGroupBox("Cp Distribution")
-        cp_grp.setStyleSheet(_GRP_SS)
         cpl = QVBoxLayout(cp_grp)
         cpl.setContentsMargins(4, 8, 4, 4)
         try:
@@ -1520,7 +1463,6 @@ class CFDWorkspace(QWidget):
 
         # Convergence residuals plot
         res_grp = QGroupBox("Convergence Residuals")
-        res_grp.setStyleSheet(_GRP_SS)
         rl = QVBoxLayout(res_grp)
         rl.setContentsMargins(4, 8, 4, 4)
         try:
@@ -1536,7 +1478,6 @@ class CFDWorkspace(QWidget):
 
         # Solver log
         log_grp = QGroupBox("Solver Log")
-        log_grp.setStyleSheet(_GRP_SS)
         ll = QVBoxLayout(log_grp)
         ll.setContentsMargins(4, 8, 4, 4)
         self._log_box = QTextEdit()
@@ -1544,21 +1485,19 @@ class CFDWorkspace(QWidget):
         self._log_box.setMinimumHeight(120)
         self._log_box.setMaximumHeight(220)
         self._log_box.setStyleSheet(
-            "QTextEdit{background:#0d1117; color:#8b949e; font-family:monospace;"
-            "font-size:11px; border:1px solid #21262d; border-radius:4px; padding:4px;}"
+            f"QTextEdit{{background:{theme.BG}; color:{theme.TEXT_DIM}; font-family:monospace;"
+            f"font-size:11px; border:1px solid {theme.RAISED}; border-radius:4px; padding:4px;}}"
         )
         ll.addWidget(self._log_box)
         lay.addWidget(log_grp)
 
         # Export (PDF/CSV moved to the left panel; VTK + FEM mapping stay here)
         self._btn_export_vtk = QPushButton(icon("export"), "Export VTK Results")
-        self._btn_export_vtk.setStyleSheet(_BTN_SECONDARY)
         self._btn_export_vtk.setEnabled(False)
         self._btn_export_vtk.clicked.connect(self._export_vtk)
         lay.addWidget(self._btn_export_vtk)
         
         self._btn_export_struct = QPushButton(icon("map_fem"), "Map Pressure to FEM")
-        self._btn_export_struct.setStyleSheet(_BTN_SECONDARY)
         self._btn_export_struct.setEnabled(False)
         self._btn_export_struct.clicked.connect(self._export_to_structures)
         lay.addWidget(self._btn_export_struct)
@@ -1778,7 +1717,7 @@ class CFDWorkspace(QWidget):
             self._cad_lbl.setText(f"{path.name} (failed)")
             self._cad_info_lbl.setText(f"Import failed: {e}")
             self._cad_info_lbl.setStyleSheet(
-                "color:#f85149; font-size:10px; padding:4px 2px 0 2px;"
+                f"color:{theme.ERR}; font-size:10px; padding:4px 2px 0 2px;"
             )
             self._log(f"CAD import failed: {e}")
             return
@@ -1794,7 +1733,7 @@ class CFDWorkspace(QWidget):
 
         axis_note = " (auto)" if info.flow_axis_auto else ""
         wrap_note = (
-            f"<span style='color:#d29922'>Wrapped — outer mold line only "
+            f"<span style='color:#d9a441'>Wrapped — outer mold line only "
             f"(cell {info.wrap_cell*1000:.1f} mm, offset "
             f"{info.wrap_offset*1000:.1f} mm)</span><br>"
             if info.wrapped else ""
@@ -1806,7 +1745,7 @@ class CFDWorkspace(QWidget):
             + "<br>"
         )
         warn = "" if info.watertight else (
-            f"<br><span style='color:#d29922'>⚠ not watertight — "
+            f"<br><span style='color:#d9a441'>⚠ not watertight — "
             f"{info.open_edges} free edges; meshing may fail</span>"
         )
         self._cad_info_lbl.setText(
@@ -1820,7 +1759,7 @@ class CFDWorkspace(QWidget):
             f"{'exact B-Rep' if info.is_brep else 'discrete shell'}{warn}"
         )
         self._cad_info_lbl.setStyleSheet(
-            "color:#8b949e; font-size:10px; padding:4px 2px 0 2px;"
+            f"color:{theme.TEXT_DIM}; font-size:10px; padding:4px 2px 0 2px;"
         )
         self._sp_ref_area.setSpecialValueText(f"Auto ({info.frontal_area:.6f} m²)")
         self._sp_ref_len.setSpecialValueText(f"Auto ({info.length:.5f} m)")
@@ -1854,7 +1793,7 @@ class CFDWorkspace(QWidget):
             self._plotter.clear()
             mesh = pv.read(str(path))
             self._plotter.add_mesh(mesh, color="#b0b8c8", opacity=0.9,
-                                   show_edges=True, edge_color="#30363d", line_width=0.5)
+                                   show_edges=True, edge_color=theme.LINE, line_width=0.5)
             self._plotter.add_axes()
             self._plotter.reset_camera()
             self._status_lbl.setText(
@@ -2239,25 +2178,25 @@ class CFDWorkspace(QWidget):
             else:
                 cm_y, cm_label = d.cm(), "Cm (nose tip — CG unavailable)"
             series = {
-                "Cl vs AoA":   (x, d.cl(), "Cl",  "#58a6ff"),
-                "Cd vs AoA":   (x, d.cd(), "Cd",  "#f0883e"),
+                "Cl vs AoA":   (x, d.cl(), "Cl",  theme.ACCENT),
+                "Cd vs AoA":   (x, d.cd(), "Cd",  theme.ACCENT),
                 "Cm vs AoA":   (x, cm_y, cm_label,  "#a371f7"),
-                "CP vs AoA":   (x, d.cp_smooth(), "CP from nozzle (m)", "#7ee787"),
+                "CP vs AoA":   (x, d.cp_smooth(), "CP from nozzle (m)", theme.OK),
             }
             if choice == "Drag polar (Cd vs Cl)":
-                self._polar_plot.update_plot(d.cl(), d.cd(), "Drag Polar", "Cl", "Cd", "#f0883e")
+                self._polar_plot.update_plot(d.cl(), d.cd(), "Drag Polar", "Cl", "Cd", theme.ACCENT)
                 self._update_polar_metrics()
                 return
         else:
             xlabel = "Mach"
             series = {
-                "Cd vs Mach (drag rise)": (x, d.cd(), "Cd",  "#f0883e"),
-                "Cl vs Mach":   (x, d.cl(), "Cl",  "#58a6ff"),
+                "Cd vs Mach (drag rise)": (x, d.cd(), "Cd",  theme.ACCENT),
+                "Cl vs Mach":   (x, d.cl(), "Cl",  theme.ACCENT),
                 "Cm vs Mach":   (x, d.cm(), "Cm",  "#a371f7"),
-                "CP vs Mach":   (x, d.cp(), "CP from nozzle (m)", "#7ee787"),
-                "Wave drag vs Mach": (x, d.cd_wave(), "Cd_wave", "#ff7b72"),
+                "CP vs Mach":   (x, d.cp(), "CP from nozzle (m)", theme.OK),
+                "Wave drag vs Mach": (x, d.cd_wave(), "Cd_wave", theme.ERR),
             }
-        sx, sy, ylabel, color = series.get(choice, (x, d.cd(), "Cd", "#f0883e"))
+        sx, sy, ylabel, color = series.get(choice, (x, d.cd(), "Cd", theme.ACCENT))
         self._polar_plot.update_plot(sx, sy, choice, xlabel, ylabel, color)
         self._update_polar_metrics()
 
@@ -2435,7 +2374,7 @@ class CFDWorkspace(QWidget):
         if hasattr(self._res_plot, "update_plot") and len(self._res_iters) > 1:
             self._res_plot.update_plot(
                 self._res_iters, self._res_vals,
-                "Convergence", "Iteration", "RMS Density", "#f0883e"
+                "Convergence", "Iteration", "RMS Density", theme.ACCENT
             )
 
     def _on_finished(self, result):
@@ -2526,7 +2465,7 @@ class CFDWorkspace(QWidget):
         # Convergence
         self._lbl_conv.setText("Yes" if result.converged else "No (check log)")
         self._lbl_conv.setStyleSheet(
-            _VAL_SS + ("color:#7ee787;" if result.converged else "color:#f85149;")
+            theme.value_qss(theme.OK if result.converged else theme.ERR)
         )
         self._btn_inject.setEnabled(result.converged)
         self._btn_export_vtk.setEnabled(bool(result.volume_vtk or result.surface_vtk))
@@ -2587,7 +2526,7 @@ class CFDWorkspace(QWidget):
                 self._lbl_cells.setText(f"{vol_mesh.n_cells:,}")
                 self._lbl_nodes.setText(f"{vol_mesh.n_points:,}")
                 self._lbl_mq.setText("Good")
-                self._lbl_mq.setStyleSheet(_VAL_SS + "color:#7ee787;")
+                self._lbl_mq.setStyleSheet(theme.value_qss(theme.OK))
                 self._lbl_ar.setText("—")
             if surf_mesh is not None and "Y_Plus" in surf_mesh.array_names:
                 yp    = surf_mesh["Y_Plus"]
@@ -2624,7 +2563,7 @@ class CFDWorkspace(QWidget):
             if result is not None and result.residual_history and hasattr(self._res_plot, "update_plot"):
                 iters = [r[0] for r in result.residual_history]
                 vals  = [r[1] for r in result.residual_history]
-                self._res_plot.update_plot(iters, vals, "Convergence", "Iteration", "log(RMS ρ)", "#f0883e")
+                self._res_plot.update_plot(iters, vals, "Convergence", "Iteration", "log(RMS ρ)", theme.ACCENT)
         except Exception as e:
             self._log(f"Convergence plot error: {e}")
 
@@ -2649,7 +2588,7 @@ class CFDWorkspace(QWidget):
             if w is not None:
                 w.setText("—")
         if getattr(self, "_lbl_conv", None) is not None:
-            self._lbl_conv.setStyleSheet(_VAL_SS)
+            self._lbl_conv.setProperty("value", True)
         for btn in ("_btn_inject", "_btn_export_vtk", "_btn_export_struct",
                     "_btn_export_pdf", "_btn_export_csv"):
             w = getattr(self, btn, None)
@@ -2840,7 +2779,7 @@ class CFDWorkspace(QWidget):
                 tip_resolution=24,
             )
             self._plotter.add_mesh(
-                arrow, color="#58a6ff", smooth_shading=True,
+                arrow, color=theme.ACCENT, smooth_shading=True,
                 specular=0.5, specular_power=30,
                 ambient=0.3,
                 name="freestream_arrow"
@@ -2861,7 +2800,7 @@ class CFDWorkspace(QWidget):
                 text,
                 position="upper_left",
                 font_size=9,
-                color="#58a6ff",
+                color=theme.ACCENT,
                 shadow=True,
                 name="freestream_text",
                 font="courier",
@@ -3081,7 +3020,7 @@ class CFDWorkspace(QWidget):
                         "vertical": False,
                         "title_font_size": 11,
                         "label_font_size": 10,
-                        "color": "#c9d1d9",
+                        "color": theme.TEXT,
                         "position_x": 0.25,
                         "position_y": 0.02,
                         "width": 0.5,
@@ -3117,7 +3056,7 @@ class CFDWorkspace(QWidget):
                         interpolate_before_map=True,
                         opacity=self._get_user_opacity(),
                         show_scalar_bar=True,
-                        scalar_bar_args={"title": "Pressure (Pa)", "color": "#c9d1d9",
+                        scalar_bar_args={"title": "Pressure (Pa)", "color": theme.TEXT,
                                          "fmt": "%.0f", "position_x": 0.25, "width": 0.5}
                     )
                     if self._chk_contour_lines.isChecked():
@@ -3138,7 +3077,7 @@ class CFDWorkspace(QWidget):
                         interpolate_before_map=True,
                         opacity=self._get_user_opacity(),
                         show_scalar_bar=True,
-                        scalar_bar_args={"title": "Temperature (K)", "color": "#c9d1d9",
+                        scalar_bar_args={"title": "Temperature (K)", "color": theme.TEXT,
                                          "fmt": "%.1f", "position_x": 0.25, "width": 0.5}
                     )
                     if self._chk_contour_lines.isChecked():
@@ -3170,7 +3109,7 @@ class CFDWorkspace(QWidget):
                     opacity=self._get_user_opacity(),
                     show_scalar_bar=True,
                     scalar_bar_args={"title": f"Speed (m/s)   V\u221e={self._v_inf:.0f}",
-                                     "color": "#c9d1d9", "fmt": "%.1f",
+                                     "color": theme.TEXT, "fmt": "%.1f",
                                      "position_x": 0.25, "width": 0.5}
                 )
                 if self._chk_contour_lines.isChecked():
@@ -3272,7 +3211,7 @@ class CFDWorkspace(QWidget):
                     opacity=self._get_user_opacity(),
                     show_scalar_bar=True,
                     scalar_bar_args={"title": f"Mach  M\u221e={self._mach:.2f}",
-                                     "color": "#c9d1d9", "fmt": "%.2f",
+                                     "color": theme.TEXT, "fmt": "%.2f",
                                      "position_x": 0.25, "width": 0.5}
                 )
                 if self._chk_contour_lines.isChecked():
@@ -3292,7 +3231,7 @@ class CFDWorkspace(QWidget):
                         interpolate_before_map=True,
                         opacity=self._get_user_opacity(),
                         show_scalar_bar=True,
-                        scalar_bar_args={"title": "Density (kg/m\u00b3)", "color": "#c9d1d9",
+                        scalar_bar_args={"title": "Density (kg/m\u00b3)", "color": theme.TEXT,
                                          "fmt": "%.4f", "position_x": 0.25, "width": 0.5}
                     )
                     if self._chk_contour_lines.isChecked():
@@ -3331,7 +3270,7 @@ class CFDWorkspace(QWidget):
                         opacity=self._get_user_opacity(),
                         show_scalar_bar=True,
                         scalar_bar_args={"title": "Vorticity Magnitude (1/s)",
-                                         "color": "#c9d1d9", "fmt": "%.1f",
+                                         "color": theme.TEXT, "fmt": "%.1f",
                                          "position_x": 0.25, "width": 0.5}
                     )
                     if self._chk_contour_lines.isChecked():
@@ -3371,11 +3310,11 @@ class CFDWorkspace(QWidget):
                                     ambient=0.15,
                                     show_scalar_bar=True,
                                     scalar_bar_args={"title": "Speed (m/s)",
-                                                     "color": "#c9d1d9"}
+                                                     "color": theme.TEXT}
                                 )
                             else:
                                 self._plotter.add_mesh(
-                                    iso, color="#79c0ff", opacity=user_opacity * 0.8,
+                                    iso, color=theme.ACCENT_HOVER, opacity=user_opacity * 0.8,
                                     smooth_shading=True,
                                     specular=0.4, specular_power=30,
                                     ambient=0.15,
@@ -3409,7 +3348,7 @@ class CFDWorkspace(QWidget):
                         opacity=self._get_user_opacity(),
                         show_scalar_bar=True,
                         scalar_bar_args={"title": f"Cp  [{clim[0]:.2f} to {clim[1]:.2f}]",
-                                         "color": "#c9d1d9", "fmt": "%.3f",
+                                         "color": theme.TEXT, "fmt": "%.3f",
                                          "position_x": 0.25, "width": 0.5}
                     )
                     if self._chk_contour_lines.isChecked():
@@ -3463,7 +3402,7 @@ class CFDWorkspace(QWidget):
                                     opacity=self._get_user_opacity(),
                                     show_scalar_bar=True,
                                     scalar_bar_args={"title": "|∇P| (Pa/m)",
-                                                     "color": "#c9d1d9", "fmt": "%.0f"}
+                                                     "color": theme.TEXT, "fmt": "%.0f"}
                                 )
                         else:
                             # Use new physics-based sensor on slice
@@ -3474,7 +3413,7 @@ class CFDWorkspace(QWidget):
                                 if iso is not None and iso.n_cells > 0:
                                     user_cmap = self._get_user_cmap("hot")
                                     self._plotter.add_mesh(
-                                        iso, color="#ff7b72",
+                                        iso, color=theme.ERR,
                                         opacity=self._get_user_opacity() * 0.7,
                                         smooth_shading=True,
                                         specular=0.3, specular_power=20,
@@ -3490,7 +3429,7 @@ class CFDWorkspace(QWidget):
                                             opacity=0.4,
                                             show_scalar_bar=True,
                                             scalar_bar_args={"title": "Pressure (Pa)",
-                                                             "color": "#c9d1d9"}
+                                                             "color": theme.TEXT}
                                         )
                                 else:
                                     self._status_lbl.setText(f"{sensor_label}: no compression structures detected")
@@ -3508,7 +3447,7 @@ class CFDWorkspace(QWidget):
                                 iso = detect_shock_surfaces(vm_local, p_name)
                                 if iso is not None and iso.n_cells > 0:
                                     self._plotter.add_mesh(
-                                        iso, color="#ff7b72", opacity=0.5,
+                                        iso, color=theme.ERR, opacity=0.5,
                                         smooth_shading=True, specular=0.3,
                                         label="Compression surface"
                                     )
@@ -3551,7 +3490,7 @@ class CFDWorkspace(QWidget):
                         "vertical": False,
                         "title_font_size": 11,
                         "label_font_size": 10,
-                        "color": "#c9d1d9",
+                        "color": theme.TEXT,
                         "position_x": 0.25,
                         "position_y": 0.02,
                         "width": 0.5,
@@ -3584,7 +3523,7 @@ class CFDWorkspace(QWidget):
                         "vertical": False,
                         "title_font_size": 11,
                         "label_font_size": 10,
-                        "color": "#c9d1d9",
+                        "color": theme.TEXT,
                         "position_x": 0.25,
                         "position_y": 0.02,
                         "width": 0.5,
@@ -3626,7 +3565,7 @@ class CFDWorkspace(QWidget):
                         sep_lines = getattr(sep, 'get', lambda k, d=None: d)('separation_lines', None) if hasattr(sep, 'get') else None
                         if sep_lines is not None and hasattr(sep_lines, 'n_points') and sep_lines.n_points > 0:
                             self._plotter.add_mesh(
-                                sep_lines, color="#58a6ff", line_width=3.0,
+                                sep_lines, color=theme.ACCENT, line_width=3.0,
                                 opacity=0.9, label="Separation line"
                             )
                         elif hasattr(sep, '__array__') or isinstance(sep, np.ndarray):
@@ -3635,13 +3574,13 @@ class CFDWorkspace(QWidget):
                                 sep_mesh = sm.extract_points(sep_arr)
                                 if sep_mesh.n_points > 0:
                                     self._plotter.add_mesh(
-                                        sep_mesh, color="#58a6ff", point_size=3,
+                                        sep_mesh, color=theme.ACCENT, point_size=3,
                                         render_points_as_spheres=True, label="Separation"
                                     )
                         reattach_lines = getattr(sep, 'get', lambda k, d=None: d)('reattachment_lines', None) if hasattr(sep, 'get') else None
                         if reattach_lines is not None and hasattr(reattach_lines, 'n_points') and reattach_lines.n_points > 0:
                             self._plotter.add_mesh(
-                                reattach_lines, color="#7ee787", line_width=3.0,
+                                reattach_lines, color=theme.OK, line_width=3.0,
                                 opacity=0.9, label="Reattachment line"
                             )
                         self._plotter.add_legend()
@@ -3922,7 +3861,7 @@ class CFDWorkspace(QWidget):
                         "vertical": False,
                         "title_font_size": 11,
                         "label_font_size": 10,
-                        "color": "#c9d1d9",
+                        "color": theme.TEXT,
                         "position_x": 0.25,
                         "position_y": 0.02,
                         "width": 0.5,
@@ -4500,7 +4439,7 @@ class CFDWorkspace(QWidget):
         shading by passing ``lit=True``.
         """
         show_edges = self._get_show_edges()
-        edge_kw = dict(show_edges=show_edges, edge_color="#1a1e24", line_width=0.5) if show_edges else dict(show_edges=False)
+        edge_kw = dict(show_edges=show_edges, edge_color=theme.PANEL, line_width=0.5) if show_edges else dict(show_edges=False)
 
         # Safety: validate scalar array size matches mesh topology
         if scalars is not None and scalars in mesh.array_names:
@@ -4514,7 +4453,7 @@ class CFDWorkspace(QWidget):
 
         common = dict(
             scalars=scalars, cmap=cmap, clim=clim,
-            nan_color="#1a1e24",
+            nan_color=theme.PANEL,
             interpolate_before_map=True,
             opacity=opacity,
             show_scalar_bar=show_scalar_bar,

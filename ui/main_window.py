@@ -9,7 +9,7 @@ import sys, logging
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QMainWindow, QDockWidget, QFileDialog, QTabWidget,
-    QMessageBox, QApplication, QLabel, QStatusBar
+    QMessageBox, QApplication, QLabel, QStatusBar, QToolBar
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction
@@ -22,6 +22,8 @@ from avionics.flight_computer.flight_computer import FlightComputer
 from ui.toolbar import MainToolbar
 from ui.console_panel import ConsolePanel
 from ui.icons import icon
+from ui import theme
+from ui import settings
 from ui.workspaces.design_workspace import DesignWorkspace
 from ui.workspaces.propulsion_workspace import PropulsionWorkspace
 from ui.workspaces.structures_workspace import StructuresWorkspace
@@ -73,14 +75,77 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(200, self._initial_state_push)
 
         # ── Silent update check shortly after launch (frozen builds only) ──
-        if getattr(sys, "frozen", False):
+        if getattr(sys, "frozen", False) and settings.get("startup/check_updates"):
             QTimer.singleShot(3000, self._startup_update_check)
 
         logger.info("K2 AeroSim initialized — 11 workspaces ready")
 
     def _setup_toolbar(self):
+        # The toolbar owns the QActions; it is not docked. The actions are
+        # surfaced through the menu bar and the tab-strip corner widget so the
+        # window keeps a single chrome row above the workspaces.
         self.toolbar = MainToolbar(self)
-        self.addToolBar(self.toolbar)
+        self._setup_menubar()
+
+    def _setup_menubar(self):
+        tb = self.toolbar
+        bar = self.menuBar()
+
+        m_file = bar.addMenu("&File")
+        m_file.addAction(tb.action_new)
+        m_file.addAction(tb.action_open)
+        m_file.addSeparator()
+        m_file.addAction(tb.action_save)
+        m_file.addAction(tb.action_save_as)
+        m_file.addSeparator()
+        m_file.addAction(tb.action_import_ork)
+        m_file.addSeparator()
+        act_quit = QAction("Exit", self)
+        act_quit.setShortcut("Alt+F4")
+        act_quit.triggered.connect(self.close)
+        m_file.addAction(act_quit)
+
+        m_edit = bar.addMenu("&Edit")
+        m_edit.addAction(tb.action_reset)
+
+        m_view = bar.addMenu("&View")
+        m_view.addAction(tb.action_reset_view)
+        m_view.addSeparator()
+        self.act_toggle_console = QAction("Console", self)
+        self.act_toggle_console.setCheckable(True)
+        self.act_toggle_console.setChecked(True)
+        self.act_toggle_console.setShortcut("Ctrl+`")
+        m_view.addAction(self.act_toggle_console)
+
+        m_tools = bar.addMenu("&Tools")
+        m_tools.addAction(tb.action_run_sim)
+        m_tools.addAction(tb.action_stop_sim)
+        m_tools.addSeparator()
+        m_tools.addAction(tb.action_settings)
+
+        m_help = bar.addMenu("&Help")
+        m_help.addAction(tb.action_check_updates)
+        act_about = QAction("About K2 AeroSim", self)
+        act_about.triggered.connect(self._on_about)
+        m_help.addAction(act_about)
+
+    def _tab_corner_widget(self):
+        """Save / run / settings parked at the right end of the tab strip."""
+        tb = self.toolbar
+        bar = QToolBar(self)
+        bar.setIconSize(self.iconSize())
+        bar.setContentsMargins(0, 0, 0, 0)
+        bar.addAction(tb.action_save)
+        bar.addAction(tb.action_run_sim)
+        bar.addAction(tb.action_settings)
+        return bar
+
+    def _on_about(self):
+        from core.version import __version__ as ver
+        QMessageBox.about(
+            self, "About K2 AeroSim",
+            f"<b>K2 AeroSim</b> {ver}<br>Rocket simulation platform."
+        )
 
     def _setup_tabs(self):
         self.tab_widget = QTabWidget()
@@ -119,6 +184,9 @@ class MainWindow(QMainWindow):
         for icon_key, name, ws in zip(self.TAB_ICONS, self.TAB_NAMES, workspaces):
             self.tab_widget.addTab(ws, icon(icon_key), name)
 
+        self.tab_widget.setCornerWidget(
+            self._tab_corner_widget(), Qt.Corner.TopRightCorner
+        )
         self.setCentralWidget(self.tab_widget)
 
     def _setup_bottom_dock(self):
@@ -131,6 +199,9 @@ class MainWindow(QMainWindow):
         self.console_panel = ConsolePanel(self)
         dock.setWidget(self.console_panel)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+        self.console_dock = dock
+        self.act_toggle_console.toggled.connect(dock.setVisible)
+        dock.visibilityChanged.connect(self.act_toggle_console.setChecked)
         
         # Connect engine log messages to the console
         def _route_log(msg):
@@ -149,10 +220,10 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Ready")
         status.addWidget(self.status_label, 1)
         self.status_motor = QLabel("Motor: None")
-        self.status_motor.setStyleSheet("color: #8b949e; padding-right: 8px;")
+        self.status_motor.setStyleSheet(f"color: {theme.TEXT_DIM}; padding-right: 8px;")
         status.addPermanentWidget(self.status_motor)
         self.status_sim = QLabel("SIM: Idle")
-        self.status_sim.setStyleSheet("color: #8b949e; padding-right: 12px;")
+        self.status_sim.setStyleSheet(f"color: {theme.TEXT_DIM}; padding-right: 12px;")
         status.addPermanentWidget(self.status_sim)
 
     def _connect_actions(self):
@@ -167,11 +238,12 @@ class MainWindow(QMainWindow):
         tb.action_reset.triggered.connect(self._on_reset)
         tb.action_reset_view.triggered.connect(self._on_reset_view)
         tb.action_check_updates.triggered.connect(self._on_check_updates)
+        tb.action_settings.triggered.connect(self._on_settings)
 
         self.engine.state_changed.connect(self._on_state_changed)
 
     def _connect_sim_signals(self):
-        self.sim_engine.sim_started.connect(lambda: self._set_sim_status("RUNNING", "#7ee787"))
+        self.sim_engine.sim_started.connect(lambda: self._set_sim_status("RUNNING", theme.OK))
         # Auto-show a flight view on launch — but respect an already-chosen one
         # (the Run dialog may have just switched to the Cinematic tab).
         def _auto_flight_view():
@@ -180,8 +252,8 @@ class MainWindow(QMainWindow):
         self.sim_engine.sim_started.connect(
             lambda: QTimer.singleShot(300, _auto_flight_view)
         )
-        self.sim_engine.sim_paused.connect(lambda: self._set_sim_status("PAUSED", "#d29922"))
-        self.sim_engine.sim_resumed.connect(lambda: self._set_sim_status("RUNNING", "#7ee787"))
+        self.sim_engine.sim_paused.connect(lambda: self._set_sim_status("PAUSED", theme.WARN))
+        self.sim_engine.sim_resumed.connect(lambda: self._set_sim_status("RUNNING", theme.OK))
         self.sim_engine.sim_finished.connect(self._on_sim_finished)
 
         # Auto-switch to results when sim finishes
@@ -231,7 +303,7 @@ class MainWindow(QMainWindow):
         # (Implementation of FC state logic would go in FlightComputer.tick)
 
     def _on_sim_finished(self):
-        self._set_sim_status("COMPLETE", "#58a6ff")
+        self._set_sim_status("COMPLETE", theme.ACCENT)
         self.toolbar.action_stop_sim.setEnabled(False)
         self.toolbar.action_run_sim.setEnabled(True)
 
@@ -320,7 +392,7 @@ class MainWindow(QMainWindow):
 
     def _on_save_as(self):
         path, _ = QFileDialog.getSaveFileName(self, "Save Project As",
-            str(get_default_project_dir() / f"{self.engine.state.name}.k2"),
+            str(settings.project_dir() / f"{self.engine.state.name}.k2"),
             "K2 Projects (*.k2);;JSON Files (*.json)")
         if path:
             self._save_to(path)
@@ -387,7 +459,7 @@ class MainWindow(QMainWindow):
                 self.design_ws._sync_to_engine()
         except Exception as e:
             logger.warning(f"Post-reset geometry re-sync failed: {e}")
-        self._set_sim_status("Idle", "#8b949e")
+        self._set_sim_status("Idle", theme.TEXT_DIM)
         logger.info("State reset")
 
     def _on_reset_view(self):
@@ -407,6 +479,27 @@ class MainWindow(QMainWindow):
             self._update_worker = check_for_updates(self, silent=True)
         except Exception:
             logger.debug("startup update check skipped", exc_info=True)
+
+    def _on_settings(self):
+        """Open the preferences dialog."""
+        from ui.dialogs.settings_dialog import SettingsDialog
+        dlg = SettingsDialog(self)
+        dlg.theme_changed.connect(self._on_theme_changed)
+        dlg.exec()
+
+    def _on_theme_changed(self, mode: str):
+        """Repaint what the global stylesheet cannot reach on its own.
+
+        Matplotlib figures and VTK viewports bake their colours in when they
+        are built, so a theme switch has to walk the tree and repaint them.
+        """
+        self.status_motor.setStyleSheet(f"color: {theme.TEXT_DIM}; padding-right: 8px;")
+        self.status_sim.setStyleSheet(f"color: {theme.TEXT_DIM}; padding-right: 12px;")
+        counts = theme.restyle_all(self)
+        logger.info(
+            "Theme set to %s — restyled %d stylesheets, %d widgets, %d figures, "
+            "%d viewports", mode, counts["stylesheets"], counts["widgets"],
+            counts["figures"], counts["viewports"])
 
     def _update_title(self):
         name = self.engine.state.name

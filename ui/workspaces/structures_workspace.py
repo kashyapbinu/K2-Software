@@ -18,30 +18,12 @@ from structures.solvers.base import STRUCTURAL_MATERIALS, LoadCase
 from structures import workstation as wks
 from ui.icons import icon
 
+from ui import theme
+
 logger = logging.getLogger("K2.StructWS")
 
-_GRP = """
-QGroupBox { color:#8b949e; font-size:11px; font-weight:600;
-  border:1px solid #21262d; border-radius:6px; margin-top:10px; padding-top:6px; }
-QGroupBox::title { subcontrol-origin:margin; left:10px; padding:0 4px; }
-"""
-_BTN_P = """
-QPushButton { background:#1f6feb; color:#fff; font-weight:700; font-size:12px;
-  border:none; border-radius:6px; padding:9px 14px; }
-QPushButton:hover { background:#388bfd; }
-QPushButton:disabled { background:#21262d; color:#484f58; }
-"""
-_BTN_S = """
-QPushButton { background:#21262d; color:#c9d1d9; font-weight:500;
-  border:1px solid #30363d; border-radius:6px; padding:7px 14px; }
-QPushButton:hover { background:#30363d; border-color:#8b949e; }
-QPushButton:disabled { color:#484f58; }
-"""
-_VAL = ("color:#e6edf3; font-family:'Cascadia Code',monospace; font-size:13px;"
-        "font-weight:600; padding:2px 6px; background:#161b22; border-radius:4px;")
-
 def _vl(t="—"):
-    l = QLabel(t); l.setStyleSheet(_VAL); return l
+    l = QLabel(t); l.setProperty("value", True); return l
 
 
 class AnalysisThread(QThread):
@@ -101,12 +83,11 @@ class StructuresWorkspace(QWidget):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(12,14,12,14); lay.setSpacing(12)
 
         t = QLabel("Structural Analysis")
-        t.setStyleSheet("color:#58a6ff;font-size:15px;font-weight:700;padding:2px 0 6px 0;")
+        t.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
         lay.addWidget(t)
 
         # Material
-        g1 = QGroupBox("Material"); g1.setStyleSheet(_GRP)
-        f1 = QFormLayout(); f1.setSpacing(8)
+        g1 = QGroupBox("Material");        f1 = QFormLayout(); f1.setSpacing(8)
         self.mat_combo = QComboBox()
         for name in STRUCTURAL_MATERIALS: self.mat_combo.addItem(name)
         self.mat_combo.currentTextChanged.connect(self._on_mat)
@@ -119,8 +100,7 @@ class StructuresWorkspace(QWidget):
         g1.setLayout(f1); lay.addWidget(g1)
 
         # Geometry
-        g2 = QGroupBox("Geometry"); g2.setStyleSheet(_GRP)
-        f2 = QFormLayout(); f2.setSpacing(8)
+        g2 = QGroupBox("Geometry");        f2 = QFormLayout(); f2.setSpacing(8)
         self.thick_spin = QDoubleSpinBox()
         self.thick_spin.setRange(0.0005, 0.05); self.thick_spin.setValue(0.002)
         self.thick_spin.setDecimals(4); self.thick_spin.setSuffix(" m"); self.thick_spin.setSingleStep(0.0005)
@@ -129,8 +109,7 @@ class StructuresWorkspace(QWidget):
         g2.setLayout(f2); lay.addWidget(g2)
 
         # Load Case
-        g3 = QGroupBox("Load Case"); g3.setStyleSheet(_GRP)
-        f3 = QFormLayout(); f3.setSpacing(8)
+        g3 = QGroupBox("Load Case");        f3 = QFormLayout(); f3.setSpacing(8)
         self.lc_combo = QComboBox()
         self.lc_combo.addItems(["Max Thrust", "Max-Q", "Recovery Shock", "Thermal", "Custom"])
         self.lc_combo.currentTextChanged.connect(self._on_condition_changed)
@@ -149,7 +128,7 @@ class StructuresWorkspace(QWidget):
         from PyQt6.QtWidgets import QCheckBox
         self.chk_cfd_map = QCheckBox("Map Pressure from CFD")
         self.chk_cfd_map.setChecked(False)
-        self.chk_cfd_map.setStyleSheet("color:#c9d1d9; font-weight:600;")
+        self.chk_cfd_map.setStyleSheet(f"color:{theme.TEXT}; font-weight:600;")
         f3.addRow("", self.chk_cfd_map)
 
         self.lbl_q = _vl(); f3.addRow("Dyn. Pressure:", self.lbl_q)
@@ -165,8 +144,7 @@ class StructuresWorkspace(QWidget):
         g3.setLayout(f3); lay.addWidget(g3)
 
         # Mesh
-        g4 = QGroupBox("FEM Settings"); g4.setStyleSheet(_GRP)
-        f4 = QFormLayout(); f4.setSpacing(8)
+        g4 = QGroupBox("FEM Settings");        f4 = QFormLayout(); f4.setSpacing(8)
         self.ref_combo = QComboBox()
         self.ref_combo.addItems(["Coarse", "Medium", "Fine", "Very Fine", "Ultra Fine", "Custom…"])
         self.ref_combo.setCurrentIndex(1)
@@ -193,7 +171,7 @@ class StructuresWorkspace(QWidget):
 
         self._lbl_fem_warn = QLabel("")
         self._lbl_fem_warn.setStyleSheet(
-            "color:#d29922; font-size:11px; font-weight:600; padding:2px 0;"
+            f"color:{theme.WARN}; font-size:11px; font-weight:600; padding:2px 0;"
         )
         self._lbl_fem_warn.setWordWrap(True)
         self._lbl_fem_warn.setVisible(False)
@@ -205,7 +183,7 @@ class StructuresWorkspace(QWidget):
         # Warning for preset ultra-fine
         self._lbl_fem_preset_warn = QLabel("")
         self._lbl_fem_preset_warn.setStyleSheet(
-            "color:#d29922; font-size:11px; font-weight:600; padding:2px 0;"
+            f"color:{theme.WARN}; font-size:11px; font-weight:600; padding:2px 0;"
         )
         self._lbl_fem_preset_warn.setWordWrap(True)
         self._lbl_fem_preset_warn.setVisible(False)
@@ -214,10 +192,9 @@ class StructuresWorkspace(QWidget):
         g4.setLayout(f4); lay.addWidget(g4)
 
         # ── Flight Load Import ──
-        gfl = QGroupBox("Flight Loads"); gfl.setStyleSheet(_GRP)
-        ffl2 = QVBoxLayout(); ffl2.setSpacing(6)
+        gfl = QGroupBox("Flight Loads");        ffl2 = QVBoxLayout(); ffl2.setSpacing(6)
         self.lbl_flight_src = QLabel("○ No simulation data")
-        self.lbl_flight_src.setStyleSheet("color:#8b949e;font-size:11px;font-weight:600;")
+        self.lbl_flight_src.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:11px;font-weight:600;")
         ffl2.addWidget(self.lbl_flight_src)
         fl_form = QFormLayout(); fl_form.setSpacing(4)
         self.lbl_fl_v = _vl(); fl_form.addRow("Max Velocity:", self.lbl_fl_v)
@@ -226,38 +203,33 @@ class StructuresWorkspace(QWidget):
         self.lbl_fl_q = _vl(); fl_form.addRow("Max-Q:", self.lbl_fl_q)
         ffl2.addLayout(fl_form)
         self.btn_import_loads = QPushButton(icon("import"), "Import Last Simulation")
-        self.btn_import_loads.setStyleSheet(_BTN_S)
         self.btn_import_loads.clicked.connect(self._import_flight_loads)
         ffl2.addWidget(self.btn_import_loads)
         gfl.setLayout(ffl2); lay.addWidget(gfl)
 
         # ── Worst-case search ──
         self.btn_worst = QPushButton(icon("search"), "Find Worst Structural Condition")
-        self.btn_worst.setStyleSheet(_BTN_S)
         self.btn_worst.clicked.connect(self._on_worst_case)
         lay.addWidget(self.btn_worst)
         self.lbl_worst = QLabel("")
         self.lbl_worst.setWordWrap(True)
         self.lbl_worst.setStyleSheet(
-            "color:#c9d1d9;background:#161b22;border:1px solid #21262d;"
+            f"color:{theme.TEXT};background:{theme.PANEL};border:1px solid {theme.RAISED};"
             "border-radius:6px;padding:8px;font-size:11px;")
         self.lbl_worst.setVisible(False)
         lay.addWidget(self.lbl_worst)
 
         # Buttons
-        self.btn_static = QPushButton(icon("static", color="#fff"), "Run Static Analysis"); self.btn_static.setStyleSheet(_BTN_P)
+        self.btn_static = QPushButton(icon("static", color="#fff"), "Run Static Analysis"); self.btn_static.setProperty("primary", True)
         self.btn_static.clicked.connect(self._run_static); lay.addWidget(self.btn_static)
-        self.btn_modal = QPushButton(icon("modal"), "Run Modal Analysis"); self.btn_modal.setStyleSheet(_BTN_S)
-        self.btn_modal.clicked.connect(self._run_modal); lay.addWidget(self.btn_modal)
-        self.btn_thermal = QPushButton(icon("thermal"), "Run Thermal Analysis"); self.btn_thermal.setStyleSheet(_BTN_S)
-        self.btn_thermal.clicked.connect(self._run_thermal); lay.addWidget(self.btn_thermal)
-        self.btn_report = QPushButton(icon("report"), "Export PDF Report"); self.btn_report.setStyleSheet(_BTN_S)
-        self.btn_report.clicked.connect(self._export_report); lay.addWidget(self.btn_report)
+        self.btn_modal = QPushButton(icon("modal"), "Run Modal Analysis");        self.btn_modal.clicked.connect(self._run_modal); lay.addWidget(self.btn_modal)
+        self.btn_thermal = QPushButton(icon("thermal"), "Run Thermal Analysis");        self.btn_thermal.clicked.connect(self._run_thermal); lay.addWidget(self.btn_thermal)
+        self.btn_report = QPushButton(icon("report"), "Export PDF Report");        self.btn_report.clicked.connect(self._export_report); lay.addWidget(self.btn_report)
 
         self._progress = QProgressBar(); self._progress.setRange(0,0); self._progress.setVisible(False)
         self._progress.setFixedHeight(6)
-        self._progress.setStyleSheet("QProgressBar{background:#21262d;border-radius:3px;border:none;}"
-                                      "QProgressBar::chunk{background:#1f6feb;border-radius:3px;}")
+        self._progress.setStyleSheet(f"QProgressBar{{background:{theme.RAISED};border-radius:3px;border:none;}}"
+                                      f"QProgressBar::chunk{{background:{theme.ACCENT_DEEP};border-radius:3px;}}")
         lay.addWidget(self._progress)
         lay.addStretch()
         sc.setWidget(w); return sc
@@ -265,9 +237,9 @@ class StructuresWorkspace(QWidget):
     # ── CENTER: Visualization ────────────────────────────────────────────────
     def _build_center(self):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
-        bar = QWidget(); bar.setStyleSheet("background:#161b22; border-bottom:1px solid #21262d;")
+        bar = QWidget(); bar.setStyleSheet(f"background:{theme.PANEL}; border-bottom:1px solid {theme.RAISED};")
         bar.setFixedHeight(44); bl = QHBoxLayout(bar); bl.setContentsMargins(12,0,8,0)
-        lbl = QLabel("Structural Visualization"); lbl.setStyleSheet("color:#58a6ff;font-weight:700;font-size:13px;")
+        lbl = QLabel("Structural Visualization"); lbl.setStyleSheet(f"color:{theme.ACCENT};font-weight:700;font-size:13px;")
         bl.addWidget(lbl); bl.addStretch()
         lay.addWidget(bar)
 
@@ -312,8 +284,8 @@ class StructuresWorkspace(QWidget):
         # Mode detail info bar
         self._mode_info_bar = QLabel("Run modal analysis to see mode shapes")
         self._mode_info_bar.setStyleSheet(
-            "background:#161b22; color:#8b949e; padding:6px 10px; "
-            "border-radius:6px; font-size:11px; border:1px solid #21262d;"
+            f"background:{theme.PANEL}; color:{theme.TEXT_DIM}; padding:6px 10px; "
+            f"border-radius:6px; font-size:11px; border:1px solid {theme.RAISED};"
         )
         self._mode_info_bar.setWordWrap(True)
         ml.addWidget(self._mode_info_bar)
@@ -351,8 +323,8 @@ class StructuresWorkspace(QWidget):
         lay.addWidget(self._center_tabs, 1)
 
         self._status = QLabel("Configure material and load case, then run analysis.")
-        self._status.setStyleSheet("color:#8b949e;padding:5px 12px;font-size:11px;"
-                                    "background:#161b22;border-top:1px solid #21262d;")
+        self._status.setStyleSheet(f"color:{theme.TEXT_DIM};padding:5px 12px;font-size:11px;"
+                                    f"background:{theme.PANEL};border-top:1px solid {theme.RAISED};")
         self._status.setFixedHeight(28); lay.addWidget(self._status)
         return w
 
@@ -361,9 +333,9 @@ class StructuresWorkspace(QWidget):
         ph = QWidget(); v = QVBoxLayout(ph)
         v.setAlignment(Qt.AlignmentFlag.AlignCenter)
         t = QLabel(title); t.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        t.setStyleSheet("color:#6e7681;font-size:16px;font-weight:700;")
+        t.setStyleSheet(f"color:{theme.TEXT_FAINT};font-size:16px;font-weight:700;")
         s = QLabel(instr); s.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        s.setStyleSheet("color:#484f58;font-size:12px;padding-top:8px;")
+        s.setStyleSheet(f"color:{theme.LINE_STRONG};font-size:12px;padding-top:8px;")
         s.setWordWrap(True)
         v.addWidget(t); v.addWidget(s)
         return ph
@@ -381,7 +353,7 @@ class StructuresWorkspace(QWidget):
     def _metric(self, form, label, big=False):
         l = _vl()
         if big:
-            l.setStyleSheet(_VAL + "font-size:18px;")
+            l.setStyleSheet(theme.value_qss(size=18))
         form.addRow(label, l)
         return l
 
@@ -412,7 +384,7 @@ class StructuresWorkspace(QWidget):
         ctl.addWidget(self._exag_combo)
         ctl.addStretch()
         self._defl_summary = QLabel("—")
-        self._defl_summary.setStyleSheet("color:#c9d1d9;font-weight:600;")
+        self._defl_summary.setStyleSheet(f"color:{theme.TEXT};font-weight:600;")
         ctl.addWidget(self._defl_summary)
         v.addLayout(ctl)
 
@@ -433,8 +405,7 @@ class StructuresWorkspace(QWidget):
             "natural frequency and flutter margin.")
         st, content = self._stacked(ph)
         v = QVBoxLayout(content); v.setContentsMargins(8,8,8,8); v.setSpacing(8)
-        g = QGroupBox("Fin Structural Results"); g.setStyleSheet(_GRP)
-        f = QFormLayout(); f.setSpacing(7)
+        g = QGroupBox("Fin Structural Results");        f = QFormLayout(); f.setSpacing(7)
         self.lbl_fin_bend = self._metric(f, "Root Bending:")
         self.lbl_fin_shear = self._metric(f, "Root Shear:")
         self.lbl_fin_defl = self._metric(f, "Tip Deflection:")
@@ -457,8 +428,7 @@ class StructuresWorkspace(QWidget):
             "Run Static Analysis to populate deployment shock loads.")
         st, content = self._stacked(ph)
         v = QVBoxLayout(content); v.setContentsMargins(8,8,8,8); v.setSpacing(8)
-        g = QGroupBox("Recovery Deployment Loads"); g.setStyleSheet(_GRP)
-        f = QFormLayout(); f.setSpacing(7)
+        g = QGroupBox("Recovery Deployment Loads");        f = QFormLayout(); f.setSpacing(7)
         self.lbl_rec_drogue = self._metric(f, "Drogue Deployment Shock:")
         self.lbl_rec_main = self._metric(f, "Main Deployment Shock:")
         self.lbl_rec_harness = self._metric(f, "Harness Tension:")
@@ -483,8 +453,7 @@ class StructuresWorkspace(QWidget):
             "local crippling buckling margins (Applied vs Critical).")
         st, content = self._stacked(ph)
         v = QVBoxLayout(content); v.setContentsMargins(8,8,8,8); v.setSpacing(8)
-        g = QGroupBox("Buckling Modes"); g.setStyleSheet(_GRP)
-        f = QFormLayout(); f.setSpacing(7)
+        g = QGroupBox("Buckling Modes");        f = QFormLayout(); f.setSpacing(7)
         self.lbl_buck_euler = self._metric(f, "Euler Column:")
         self.lbl_buck_shell = self._metric(f, "Shell Buckling:")
         self.lbl_buck_panel = self._metric(f, "Panel Buckling:")
@@ -524,7 +493,7 @@ class StructuresWorkspace(QWidget):
         self._fail_detail = QLabel("Click a component for detail.")
         self._fail_detail.setWordWrap(True)
         self._fail_detail.setStyleSheet(
-            "color:#c9d1d9;background:#161b22;border:1px solid #21262d;"
+            f"color:{theme.TEXT};background:{theme.PANEL};border:1px solid {theme.RAISED};"
             "border-radius:6px;padding:10px;font-size:12px;")
         v.addWidget(self._fail_detail)
         v.addStretch()
@@ -539,8 +508,7 @@ class StructuresWorkspace(QWidget):
             "the minimum mass required to meet the target safety factor.")
         st, content = self._stacked(ph)
         v = QVBoxLayout(content); v.setContentsMargins(8,8,8,8); v.setSpacing(8)
-        g = QGroupBox("Mass Efficiency"); g.setStyleSheet(_GRP)
-        f = QFormLayout(); f.setSpacing(8)
+        g = QGroupBox("Mass Efficiency");        f = QFormLayout(); f.setSpacing(8)
         self.lbl_mass_cur = self._metric(f, "Current Structural Mass:")
         self.lbl_mass_req = self._metric(f, "Minimum Required Mass:")
         self.lbl_mass_over = self._metric(f, "Overbuilt:")
@@ -558,16 +526,15 @@ class StructuresWorkspace(QWidget):
         sc = QScrollArea(); sc.setWidgetResizable(True); sc.setMaximumWidth(360)
         sc.setFrameShape(QFrame.Shape.NoFrame)
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(12,14,12,14); lay.setSpacing(12)
-        t = QLabel("Results"); t.setStyleSheet("color:#58a6ff;font-size:15px;font-weight:700;padding:2px 0 6px 0;")
+        t = QLabel("Results"); t.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
         lay.addWidget(t)
 
         # ── Structural Safety Assessment ──
-        gsc = QGroupBox("Structural Safety Assessment"); gsc.setStyleSheet(_GRP)
-        vsc = QVBoxLayout(); vsc.setSpacing(4)
+        gsc = QGroupBox("Structural Safety Assessment");        vsc = QVBoxLayout(); vsc.setSpacing(4)
         self.lbl_score = QLabel("RUN ANALYSIS")
         self.lbl_score.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_score.setStyleSheet("font-weight:800;font-size:16px;padding:10px;"
-                                     "border-radius:6px;background:#161b22;color:#484f58;")
+                                     f"border-radius:6px;background:{theme.PANEL};color:{theme.LINE_STRONG};")
         vsc.addWidget(self.lbl_score)
         _struct_note = QLabel(
             "Note: This assessment is an estimated qualitative evaluation based on "
@@ -576,35 +543,32 @@ class StructuresWorkspace(QWidget):
             "engineering certification, safety-critical decisions, or as a substitute "
             "for professional structural analysis and validation.")
         _struct_note.setWordWrap(True)
-        _struct_note.setStyleSheet("color:#6e7681;font-size:9px;padding:4px 2px 2px 2px;")
+        _struct_note.setStyleSheet(f"color:{theme.TEXT_FAINT};font-size:9px;padding:4px 2px 2px 2px;")
         vsc.addWidget(_struct_note)
         gsc.setLayout(vsc); lay.addWidget(gsc)
 
         # ── Physics Consistency Checks ──
-        gpc = QGroupBox("Physics Checks"); gpc.setStyleSheet(_GRP)
-        vpc = QVBoxLayout(); vpc.setSpacing(4)
+        gpc = QGroupBox("Physics Checks");        vpc = QVBoxLayout(); vpc.setSpacing(4)
         self.lbl_warnings = QLabel("Run analysis to validate results.")
         self.lbl_warnings.setWordWrap(True)
-        self.lbl_warnings.setStyleSheet("color:#8b949e;font-size:11px;padding:2px;")
+        self.lbl_warnings.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:11px;padding:2px;")
         self.lbl_warnings.setTextFormat(Qt.TextFormat.RichText)
         vpc.addWidget(self.lbl_warnings)
         gpc.setLayout(vpc); lay.addWidget(gpc)
 
         # ── Airframe Modes (analytical beam) ──
-        gam = QGroupBox("Airframe Modes (Analytical)"); gam.setStyleSheet(_GRP)
-        fam = QFormLayout(); fam.setSpacing(6)
+        gam = QGroupBox("Airframe Modes (Analytical)");        fam = QFormLayout(); fam.setSpacing(6)
         self.lbl_modal_f1 = _vl(); fam.addRow("Mode 1 (bending):", self.lbl_modal_f1)
         self.lbl_modal_f2 = _vl(); fam.addRow("Mode 2:", self.lbl_modal_f2)
         self.lbl_modal_f3 = _vl(); fam.addRow("Mode 3:", self.lbl_modal_f3)
         self.lbl_modal_warn = QLabel("")
         self.lbl_modal_warn.setWordWrap(True)
-        self.lbl_modal_warn.setStyleSheet("color:#8b949e;font-size:10px;padding:2px;")
+        self.lbl_modal_warn.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:10px;padding:2px;")
         fam.addRow(self.lbl_modal_warn)
         gam.setLayout(fam); lay.addWidget(gam)
 
         # Stress
-        gs = QGroupBox("Stress Analysis"); gs.setStyleSheet(_GRP)
-        fs = QFormLayout(); fs.setSpacing(8)
+        gs = QGroupBox("Stress Analysis");        fs = QFormLayout(); fs.setSpacing(8)
         self.lbl_axial = _vl(); fs.addRow("Axial:", self.lbl_axial)
         self.lbl_hoop = _vl(); fs.addRow("Hoop:", self.lbl_hoop)
         self.lbl_bend = _vl(); fs.addRow("Bending:", self.lbl_bend)
@@ -614,15 +578,13 @@ class StructuresWorkspace(QWidget):
         gs.setLayout(fs); lay.addWidget(gs)
 
         # Buckling
-        gb = QGroupBox("Buckling"); gb.setStyleSheet(_GRP)
-        fb = QFormLayout(); fb.setSpacing(8)
+        gb = QGroupBox("Buckling");        fb = QFormLayout(); fb.setSpacing(8)
         self.lbl_buck = _vl(); fb.addRow("Euler Crit. Load:", self.lbl_buck)
         self.lbl_shell = _vl(); fb.addRow("Shell Buck. σ:", self.lbl_shell)
         gb.setLayout(fb); lay.addWidget(gb)
 
         # Safety
-        gf = QGroupBox("Safety Assessment"); gf.setStyleSheet(_GRP)
-        ff = QFormLayout(); ff.setSpacing(8)
+        gf = QGroupBox("Safety Assessment");        ff = QFormLayout(); ff.setSpacing(8)
         self.lbl_sf = _vl(); ff.addRow("Safety Factor:", self.lbl_sf)
         self.lbl_mos = _vl(); ff.addRow("Margin of Safety:", self.lbl_mos)
         self.lbl_util = _vl(); ff.addRow("Yield Utilization:", self.lbl_util)
@@ -632,8 +594,7 @@ class StructuresWorkspace(QWidget):
         gf.setLayout(ff); lay.addWidget(gf)
 
         # Modal results (expanded)
-        gm = QGroupBox("Modal Analysis"); gm.setStyleSheet(_GRP)
-        fm = QFormLayout(); fm.setSpacing(5)
+        gm = QGroupBox("Modal Analysis");        fm = QFormLayout(); fm.setSpacing(5)
         self.lbl_modes = []
         for i in range(10):
             l = _vl()
@@ -643,40 +604,36 @@ class StructuresWorkspace(QWidget):
         gm.setLayout(fm); lay.addWidget(gm)
 
         # Resonance Assessment
-        gr = QGroupBox("Resonance Assessment"); gr.setStyleSheet(_GRP)
-        fr = QFormLayout(); fr.setSpacing(6)
+        gr = QGroupBox("Resonance Assessment");        fr = QFormLayout(); fr.setSpacing(6)
         self.lbl_motor_1p = _vl(); fr.addRow("Motor 1P:", self.lbl_motor_1p)
         self.lbl_motor_2p = _vl(); fr.addRow("Motor 2P:", self.lbl_motor_2p)
         self.lbl_aero_buff = _vl(); fr.addRow("Aero Buffet:", self.lbl_aero_buff)
         self.lbl_resonance_status = QLabel("—")
         self.lbl_resonance_status.setWordWrap(True)
-        self.lbl_resonance_status.setStyleSheet("color:#8b949e;font-size:11px;padding:4px;")
+        self.lbl_resonance_status.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:11px;padding:4px;")
         fr.addRow("Warnings:", self.lbl_resonance_status)
         gr.setLayout(fr); lay.addWidget(gr)
 
         # Flutter Assessment (preliminary)
-        gfl = QGroupBox("Fin Flutter (Preliminary)"); gfl.setStyleSheet(_GRP)
-        ffl = QFormLayout(); ffl.setSpacing(6)
+        gfl = QGroupBox("Fin Flutter (Preliminary)");        ffl = QFormLayout(); ffl.setSpacing(6)
         self.lbl_flutter_speed = _vl(); ffl.addRow("V_flutter:", self.lbl_flutter_speed)
         self.lbl_flutter_margin = _vl(); ffl.addRow("Margin:", self.lbl_flutter_margin)
         self.lbl_flutter_verdict = QLabel("—")
         self.lbl_flutter_verdict.setStyleSheet("font-weight:600;font-size:12px;padding:4px;")
         ffl.addRow("Verdict:", self.lbl_flutter_verdict)
         self.lbl_flutter_method = QLabel("NACA empirical")
-        self.lbl_flutter_method.setStyleSheet("color:#6e7681;font-size:10px;font-style:italic;")
+        self.lbl_flutter_method.setStyleSheet(f"color:{theme.TEXT_FAINT};font-size:10px;font-style:italic;")
         ffl.addRow("", self.lbl_flutter_method)
         gfl.setLayout(ffl); lay.addWidget(gfl)
 
         # Damping
-        gd = QGroupBox("Structural Damping"); gd.setStyleSheet(_GRP)
-        fd = QFormLayout(); fd.setSpacing(6)
+        gd = QGroupBox("Structural Damping");        fd = QFormLayout(); fd.setSpacing(6)
         self.lbl_damping_source = _vl(); fd.addRow("Source:", self.lbl_damping_source)
         self.lbl_damping_range = _vl(); fd.addRow("ζ Range:", self.lbl_damping_range)
         gd.setLayout(fd); lay.addWidget(gd)
 
         # Thermal results
-        gt = QGroupBox("Thermal"); gt.setStyleSheet(_GRP)
-        ft = QFormLayout(); ft.setSpacing(6)
+        gt = QGroupBox("Thermal");        ft = QFormLayout(); ft.setSpacing(6)
         self.lbl_tmax = _vl(); ft.addRow("Max Wall Temp:", self.lbl_tmax)
         self.lbl_tstag = _vl(); ft.addRow("Stagnation T:", self.lbl_tstag)
         self.lbl_tsig = _vl(); ft.addRow("Thermal Stress:", self.lbl_tsig)
@@ -903,13 +860,13 @@ class StructuresWorkspace(QWidget):
         self.lbl_mos.setText("∞" if mos > 1e6 else f"{mos:+.2f}")
         self.lbl_util.setText(f"{r['yield_utilization']*100:.1f}%")
         if sf >= 3.0:
-            self.lbl_verdict.setText("✓ SAFE"); self.lbl_verdict.setStyleSheet("color:#7ee787;font-weight:700;font-size:16px;padding:8px;")
+            self.lbl_verdict.setText("✓ SAFE"); self.lbl_verdict.setStyleSheet(f"color:{theme.OK};font-weight:700;font-size:16px;padding:8px;")
         elif sf >= 1.5:
-            self.lbl_verdict.setText("ADEQUATE"); self.lbl_verdict.setStyleSheet("color:#d29922;font-weight:700;font-size:16px;padding:8px;")
+            self.lbl_verdict.setText("ADEQUATE"); self.lbl_verdict.setStyleSheet(f"color:{theme.WARN};font-weight:700;font-size:16px;padding:8px;")
         elif sf >= 1.0:
-            self.lbl_verdict.setText("MARGINAL"); self.lbl_verdict.setStyleSheet("color:#f0883e;font-weight:700;font-size:16px;padding:8px;")
+            self.lbl_verdict.setText("MARGINAL"); self.lbl_verdict.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
         else:
-            self.lbl_verdict.setText("✕ FAILURE"); self.lbl_verdict.setStyleSheet("color:#f85149;font-weight:700;font-size:16px;padding:8px;")
+            self.lbl_verdict.setText("✕ FAILURE"); self.lbl_verdict.setStyleSheet(f"color:{theme.ERR};font-weight:700;font-size:16px;padding:8px;")
 
         # Update status bar with condition name
         self._status.setText(f"Condition: {condition} — σ_vm={r['von_mises']/1e6:.1f} MPa, SF={sf:.2f}")
@@ -1077,18 +1034,18 @@ class StructuresWorkspace(QWidget):
 
             # Update verdict
             if sf >= 3.0:
-                self.lbl_verdict.setText("✓ SAFE"); self.lbl_verdict.setStyleSheet("color:#7ee787;font-weight:700;font-size:16px;padding:8px;")
+                self.lbl_verdict.setText("✓ SAFE"); self.lbl_verdict.setStyleSheet(f"color:{theme.OK};font-weight:700;font-size:16px;padding:8px;")
             elif sf >= 1.5:
-                self.lbl_verdict.setText("ADEQUATE"); self.lbl_verdict.setStyleSheet("color:#d29922;font-weight:700;font-size:16px;padding:8px;")
+                self.lbl_verdict.setText("ADEQUATE"); self.lbl_verdict.setStyleSheet(f"color:{theme.WARN};font-weight:700;font-size:16px;padding:8px;")
             elif sf >= 1.0:
-                self.lbl_verdict.setText("MARGINAL"); self.lbl_verdict.setStyleSheet("color:#f0883e;font-weight:700;font-size:16px;padding:8px;")
+                self.lbl_verdict.setText("MARGINAL"); self.lbl_verdict.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
             else:
-                self.lbl_verdict.setText("✕ FAILURE"); self.lbl_verdict.setStyleSheet("color:#f85149;font-weight:700;font-size:16px;padding:8px;")
+                self.lbl_verdict.setText("✕ FAILURE"); self.lbl_verdict.setStyleSheet(f"color:{theme.ERR};font-weight:700;font-size:16px;padding:8px;")
 
             # Choose plot color and label based on condition
             lc_name = getattr(result, 'load_case_name', '') or self.lc_combo.currentText()
-            color_map = {"Max Thrust": "#f0883e", "Recovery Shock": "#f85149", "Thermal": "#da3633"}
-            plot_color = color_map.get(lc_name, "#f0883e")
+            color_map = {"Max Thrust": theme.ACCENT, "Recovery Shock": theme.ERR, "Thermal": theme.ERR_DEEP}
+            plot_color = color_map.get(lc_name, theme.ACCENT)
             ylabel = "Thermal Stress (MPa)" if lc_name in ("Thermal", "Aerodynamic Heating") else "Von Mises Stress (MPa)"
 
             if result.element_stresses and hasattr(self._stress_plot, 'update_plot'):
@@ -1101,7 +1058,7 @@ class StructuresWorkspace(QWidget):
                 if hasattr(self._temp_plot, 'update_plot'):
                     txs = [p[0] for p in result.station_temperatures]
                     tys = [p[1] for p in result.station_temperatures]
-                    self._temp_plot.update_plot(txs, tys, "Wall Temperature", "Position (m)", "T (K)", "#da3633")
+                    self._temp_plot.update_plot(txs, tys, "Wall Temperature", "Position (m)", "T (K)", theme.ERR_DEEP)
 
             # Feed FEM peak stresses into the 3D stress viewer + workstation suite
             self._last_bc = {
@@ -1147,12 +1104,12 @@ class StructuresWorkspace(QWidget):
                 warn_text = "\n".join(result.resonance_warnings)
                 self.lbl_resonance_status.setText(warn_text)
                 self.lbl_resonance_status.setStyleSheet(
-                    "color:#d29922;font-size:11px;padding:4px;font-weight:600;"
+                    f"color:{theme.WARN};font-size:11px;padding:4px;font-weight:600;"
                 )
             else:
                 self.lbl_resonance_status.setText("✓ No resonance concerns")
                 self.lbl_resonance_status.setStyleSheet(
-                    "color:#7ee787;font-size:11px;padding:4px;font-weight:600;"
+                    f"color:{theme.OK};font-size:11px;padding:4px;font-weight:600;"
                 )
 
             # Flutter assessment
@@ -1165,19 +1122,19 @@ class StructuresWorkspace(QWidget):
                 self.lbl_flutter_verdict.setText(verdict)
                 if '✓' in verdict or 'SAFE' in verdict:
                     self.lbl_flutter_verdict.setStyleSheet(
-                        "color:#7ee787;font-weight:700;font-size:12px;padding:4px;"
+                        f"color:{theme.OK};font-weight:700;font-size:12px;padding:4px;"
                     )
                 elif 'ADEQUATE' in verdict:
                     self.lbl_flutter_verdict.setStyleSheet(
-                        "color:#d29922;font-weight:700;font-size:12px;padding:4px;"
+                        f"color:{theme.WARN};font-weight:700;font-size:12px;padding:4px;"
                     )
                 elif 'MARGINAL' in verdict:
                     self.lbl_flutter_verdict.setStyleSheet(
-                        "color:#f0883e;font-weight:700;font-size:12px;padding:4px;"
+                        f"color:{theme.ACCENT};font-weight:700;font-size:12px;padding:4px;"
                     )
                 else:
                     self.lbl_flutter_verdict.setStyleSheet(
-                        "color:#f85149;font-weight:700;font-size:12px;padding:4px;"
+                        f"color:{theme.ERR};font-weight:700;font-size:12px;padding:4px;"
                     )
                 self.lbl_flutter_method.setText(
                     f"{fa.get('method', 'NACA')} | AR={fa.get('fin_AR', '?')}, t/c={fa.get('fin_t_c', '?')}"
@@ -1247,15 +1204,15 @@ class StructuresWorkspace(QWidget):
             limit_txt = f"{result.service_temp_limit_K:.0f} K"
             if result.exceeds_service_temp:
                 limit_txt += " EXCEEDED"
-                self.lbl_tlimit.setStyleSheet(_VAL + "color:#f85149;")
+                self.lbl_tlimit.setStyleSheet(theme.value_qss(theme.ERR))
             else:
                 limit_txt += " ✓ OK"
-                self.lbl_tlimit.setStyleSheet(_VAL + "color:#7ee787;")
+                self.lbl_tlimit.setStyleSheet(theme.value_qss(theme.OK))
             self.lbl_tlimit.setText(limit_txt)
             if result.station_temps and hasattr(self._temp_plot, 'update_plot'):
                 xs = [p[0] for p in result.station_temps]
                 ys = [p[1] for p in result.station_temps]
-                self._temp_plot.update_plot(xs, ys, "Wall Temperature", "Position (m)", "T (K)", "#f0883e")
+                self._temp_plot.update_plot(xs, ys, "Wall Temperature", "Position (m)", "T (K)", theme.ACCENT)
             self._center_tabs.setCurrentIndex(2)
             self._status.setText(f"Thermal: T_max={result.max_wall_temp_K:.0f} K, σ_th={result.max_thermal_stress/1e6:.1f} MPa")
 
@@ -1329,7 +1286,7 @@ class StructuresWorkspace(QWidget):
         try:
             self.lbl_score.setText("RUN ANALYSIS")
             self.lbl_score.setStyleSheet("font-weight:800;font-size:16px;padding:10px;"
-                                         "border-radius:6px;background:#161b22;color:#484f58;")
+                                         f"border-radius:6px;background:{theme.PANEL};color:{theme.LINE_STRONG};")
         except Exception:
             pass
         for lbl in ("_defl_summary",):
@@ -1351,13 +1308,13 @@ class StructuresWorkspace(QWidget):
         self._flight_loads = fl
         if fl.available and fl.source == "simulation":
             self.lbl_flight_src.setText("✓ Using Last Simulation")
-            self.lbl_flight_src.setStyleSheet("color:#7ee787;font-size:11px;font-weight:700;")
+            self.lbl_flight_src.setStyleSheet(f"color:{theme.OK};font-size:11px;font-weight:700;")
         elif fl.available:
             self.lbl_flight_src.setText("◐ Using State Maxima (no sim)")
-            self.lbl_flight_src.setStyleSheet("color:#d29922;font-size:11px;font-weight:600;")
+            self.lbl_flight_src.setStyleSheet(f"color:{theme.WARN};font-size:11px;font-weight:600;")
         else:
             self.lbl_flight_src.setText("○ No simulation data — manual loads")
-            self.lbl_flight_src.setStyleSheet("color:#8b949e;font-size:11px;font-weight:600;")
+            self.lbl_flight_src.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:11px;font-weight:600;")
         self.lbl_fl_v.setText(f"{fl.max_velocity:.0f} m/s" if fl.max_velocity else "—")
         self.lbl_fl_m.setText(f"{fl.max_mach:.2f}" if fl.max_mach else "—")
         self.lbl_fl_a.setText(f"{fl.max_accel_g:.1f} G" if fl.max_accel_g else "—")
@@ -1406,7 +1363,7 @@ class StructuresWorkspace(QWidget):
             f"<b>Time:</b> {c.time:.1f} s<br>"
             f"<b>Von Mises:</b> {c.von_mises/1e6:.0f} MPa<br>"
             f"<b>Safety Factor:</b> {c.safety_factor:.2f}<br>"
-            f"<span style='color:#8b949e'>Peak stress: {hs.name} ({hs.von_mises/1e6:.0f} MPa) · "
+            f"<span style='color:#8a8a92'>Peak stress: {hs.name} ({hs.von_mises/1e6:.0f} MPa) · "
             f"Peak buckling: {hb.name} ({hb.buckling_margin:.2f})</span>")
         self._status.setText(
             f"Worst case: {c.name} @ {c.time:.1f}s — σ_vm={c.von_mises/1e6:.0f} MPa, SF={c.safety_factor:.2f}")
@@ -1448,7 +1405,7 @@ class StructuresWorkspace(QWidget):
         self.lbl_score.setText(verdict)
         self.lbl_score.setStyleSheet(
             f"font-weight:800;font-size:16px;padding:10px;border-radius:6px;"
-            f"background:#161b22;color:{sc.color};border:1px solid {sc.color}66;")
+            f"background:#16161a;color:{sc.color};border:1px solid {sc.color}66;")
 
         self._populate_fin(rep.fin)
         self._populate_recovery(rep.recovery)
@@ -1479,20 +1436,20 @@ class StructuresWorkspace(QWidget):
         self.lbl_modal_f2.setText(f"{me.f2_hz:.0f} Hz" if me.f2_hz else "—")
         self.lbl_modal_f3.setText(f"{me.f3_hz:.0f} Hz" if me.f3_hz else "—")
         if me.low_freq:
-            self.lbl_modal_f1.setStyleSheet(_VAL + "color:#d29922;")
+            self.lbl_modal_f1.setStyleSheet(theme.value_qss(theme.WARN))
             self.lbl_modal_warn.setText(f"{me.warning}")
-            self.lbl_modal_warn.setStyleSheet("color:#d29922;font-size:10px;padding:2px;font-weight:600;")
+            self.lbl_modal_warn.setStyleSheet(f"color:{theme.WARN};font-size:10px;padding:2px;font-weight:600;")
         else:
-            self.lbl_modal_f1.setStyleSheet(_VAL)
+            self.lbl_modal_f1.setProperty("value", True)
             self.lbl_modal_warn.setText(f"✓ {me.total_mass_kg:.2f} kg, cantilever beam estimate")
-            self.lbl_modal_warn.setStyleSheet("color:#6e7681;font-size:10px;padding:2px;")
+            self.lbl_modal_warn.setStyleSheet(f"color:{theme.TEXT_FAINT};font-size:10px;padding:2px;")
 
     def _populate_thermal_tab(self, tp):
         if hasattr(self._temp_plot, "update_plot") and tp.body_station_temps:
             xs = [x for x, _, _ in tp.body_station_temps]
             ys = [T for _, T, _ in tp.body_station_temps]
             self._temp_plot.update_plot(xs, ys, "Wall Temperature Along Body",
-                                        "Position (nose=0 → tail=1)", "Temperature (K)", "#f0883e")
+                                        "Position (nose=0 → tail=1)", "Temperature (K)", theme.ACCENT)
 
     # ── Per-tab populators ────────────────────────────────────────────────────
     def _populate_fin(self, fa):
@@ -1506,7 +1463,7 @@ class StructuresWorkspace(QWidget):
         self.lbl_fin_loaded.setText(fa.highest_loaded_fin)
         sf = fa.safety_factor
         self.lbl_fin_sf.setText("∞" if sf > 1e6 else f"{sf:.2f}")
-        self.lbl_fin_sf.setStyleSheet(_VAL + f"font-size:18px;color:{fa.status_color};")
+        self.lbl_fin_sf.setStyleSheet(theme.value_qss(fa.status_color, 18))
         if hasattr(self._fin_plot, "update_plot") and fa.deflection_profile:
             xs = [p[0] for p in fa.deflection_profile]
             ys = [p[1] for p in fa.deflection_profile]
@@ -1523,7 +1480,7 @@ class StructuresWorkspace(QWidget):
         self.lbl_rec_peak.setText(f"{rl.peak_force_N:.0f} N")
         sf = rl.safety_factor
         self.lbl_rec_sf.setText("∞" if sf > 1e6 else f"{sf:.2f}")
-        self.lbl_rec_sf.setStyleSheet(_VAL + f"font-size:18px;color:{rl.status_color};")
+        self.lbl_rec_sf.setStyleSheet(theme.value_qss(rl.status_color, 18))
         self.lbl_rec_status.setText(rl.status)
         self.lbl_rec_status.setStyleSheet(f"font-weight:700;font-size:15px;padding:6px;color:{rl.status_color};")
         if hasattr(self._rec_plot, "ax"):
@@ -1549,7 +1506,7 @@ class StructuresWorkspace(QWidget):
         self.lbl_buck_applied.setText(f"{ba.applied_axial_N:.0f} N")
         g = ba.governing
         self.lbl_buck_gov.setText(f"{g.name}: ×{g.margin:.2f}")
-        self.lbl_buck_gov.setStyleSheet(_VAL + f"font-size:16px;color:{g.status_color};")
+        self.lbl_buck_gov.setStyleSheet(theme.value_qss(g.status_color, 16))
         self.lbl_buck_status.setText(ba.status)
         self.lbl_buck_status.setStyleSheet(f"font-weight:700;font-size:15px;padding:6px;color:{ba.status_color};")
         if hasattr(self._buck_plot, "ax"):
@@ -1580,16 +1537,16 @@ class StructuresWorkspace(QWidget):
             b = QPushButton(f"{comp.name}\nSF {comp.margin:.2f}" if comp.margin < 1e6 else f"{comp.name}\nSF ∞")
             b.setMinimumHeight(58)
             b.setStyleSheet(
-                f"QPushButton{{background:{comp.color};color:#0d1117;font-weight:700;"
+                f"QPushButton{{background:{comp.color};color:#0e0e10;font-weight:700;"
                 f"font-size:12px;border:none;border-radius:8px;padding:6px;}}"
-                f"QPushButton:hover{{border:2px solid #ffffff;}}")
+                f"QPushButton:hover{{border:2px solid {theme.TEXT_BRIGHT};}}")
             b.clicked.connect(lambda _=False, c=comp: self._on_fail_click(c))
             self._fail_grid.addWidget(b, i // 2, i % 2)
             self._fail_buttons[comp.name] = b
         if fm.weakest:
             self._fail_detail.setText(
                 f"<b>Weakest component:</b> {fm.weakest.name} (SF {fm.weakest.margin:.2f}, {fm.weakest.status})"
-                f"<br><span style='color:#8b949e'>Click any component for detail.</span>")
+                f"<br><span style='color:#8a8a92'>Click any component for detail.</span>")
         self._tab_failure.setCurrentIndex(1)
 
     def _on_fail_click(self, comp):
@@ -1612,12 +1569,12 @@ class StructuresWorkspace(QWidget):
             color = (0.95, 0.3 + 0.5*(1-frac), 0.2)
             ax.barh(y, frac, height=0.5, color=color, alpha=0.85, zorder=2)
             ax.text(0.02, y, f"{st.name}", va="center", ha="left",
-                    color="#e6edf3", fontsize=9, fontweight="bold", zorder=3)
+                    color=theme.TEXT_BRIGHT, fontsize=9, fontweight="bold", zorder=3)
             ax.text(frac + 0.02, y, f"{st.force_N:.0f} N", va="center", ha="left",
-                    color="#8b949e", fontsize=8, zorder=3)
+                    color=theme.TEXT_DIM, fontsize=8, zorder=3)
             if i < n - 1:
                 ax.annotate("", xy=(0.1, y-0.5), xytext=(0.1, y-0.0),
-                            arrowprops=dict(arrowstyle="->", color="#58a6ff", lw=1.5))
+                            arrowprops=dict(arrowstyle="->", color=theme.ACCENT, lw=1.5))
         ax.set_xlim(0, 1.4); ax.set_ylim(0.2, n + 0.8)
         ax.set_yticks([]); ax.set_xticks([])
         p.figure.tight_layout(); p.canvas.draw()
@@ -1794,5 +1751,5 @@ class StructuresWorkspace(QWidget):
         ax.bar(x, vals, color=color, alpha=0.85)
         ax.set_xticks(list(x)); ax.set_xticklabels(names, rotation=20, ha="right", fontsize=8)
         if hline is not None:
-            ax.axhline(hline, color="#f85149", ls="--", lw=1.2)
+            ax.axhline(hline, color=theme.ERR, ls="--", lw=1.2)
         plot.figure.tight_layout(); plot.canvas.draw()

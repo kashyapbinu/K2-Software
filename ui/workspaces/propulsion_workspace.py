@@ -17,6 +17,8 @@ _MOTOR_KEYS = ("motor_designation", "motor_avg_thrust", "motor_max_thrust",
                "motor_total_impulse", "motor_burn_time", "propellant_mass",
                "motor_dry_mass", "motor_length", "custom_thrust_curve")
 
+from ui import theme
+
 logger = logging.getLogger("K2.PropulsionWS")
 
 
@@ -24,8 +26,8 @@ class ValueLabel(QLabel):
     def __init__(self, text="—", parent=None):
         super().__init__(text, parent)
         self.setStyleSheet(
-            "color: #e6edf3; font-family: 'Cascadia Code', monospace; font-size: 13px; "
-            "font-weight: 600; padding: 2px 4px; background-color: #161b22; border-radius: 4px;")
+            f"color: {theme.TEXT_BRIGHT}; font-family: 'Cascadia Code', monospace; font-size: 13px; "
+            f"font-weight: 600; padding: 2px 4px; background-color: {theme.PANEL}; border-radius: 4px;")
 
 
 class _CurveFetcher(QThread):
@@ -53,6 +55,8 @@ class PropulsionWorkspace(QWidget):
         self.engine = engine
         self._motors = self._load_motors()
         self._curve_fetcher = None
+        # Where the plotted curve comes from: estimated | fetching | measured
+        self._curve_source = "estimated"
         self._wanted_motor_id = ""
         self._loading_stage = False     # guard re-entrant combo/spinbox signals
         self._multistage = False        # True when editing a multi-stage rocket
@@ -194,16 +198,16 @@ class PropulsionWorkspace(QWidget):
         fl.addRow("Motor:", self.motor_combo)
 
         self.lbl_count = QLabel("")
-        self.lbl_count.setStyleSheet("color: #8b949e; font-size: 11px;")
+        self.lbl_count.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px;")
         fl.addRow("", self.lbl_count)
 
         self.btn_custom_motor = QPushButton("Create Custom Motor")
-        self.btn_custom_motor.setStyleSheet("background-color: #0078D7; color: white; padding: 5px; margin-top: 5px;")
+        self.btn_custom_motor.setProperty("primary", True)
         self.btn_custom_motor.clicked.connect(self._open_custom_motor_dialog)
         fl.addRow("", self.btn_custom_motor)
 
         self.btn_liquid_engine = QPushButton("Design Liquid Engine")
-        self.btn_liquid_engine.setStyleSheet("background-color: #6e40c9; color: white; padding: 5px; margin-top: 2px;")
+        self.btn_liquid_engine.setProperty("primary", True)
         self.btn_liquid_engine.clicked.connect(self._open_liquid_engine_dialog)
         fl.addRow("", self.btn_liquid_engine)
 
@@ -413,6 +417,7 @@ class PropulsionWorkspace(QWidget):
                 motor_dry_mass=dry,
                 motor_length=m.get("length", 0.0),
                 custom_thrust_curve=[]))
+            self._curve_source = "estimated"
             self._load_real_curve(m.get("motor_id", ""), m["total_impulse"])
         self._update_display()
 
@@ -433,16 +438,24 @@ class PropulsionWorkspace(QWidget):
         except Exception:
             cached = None
         if cached:
+            self._curve_source = "measured"
             self._apply_curve([list(p) for p in cached])
             return
+        self._curve_source = "fetching"
         self._curve_fetcher = _CurveFetcher(motor_id, expected_impulse, self)
         self._curve_fetcher.done.connect(self._on_curve_fetched)
         self._curve_fetcher.start()
 
     def _on_curve_fetched(self, motor_id, curve):
         # Ignore stale results if the user switched motors meanwhile
-        if not curve or motor_id != self._wanted_motor_id:
+        if motor_id != self._wanted_motor_id:
             return
+        if not curve:
+            # Nothing published for this motor (or offline) - the estimate stands.
+            self._curve_source = "estimated"
+            self._update_display()
+            return
+        self._curve_source = "measured"
         self._apply_curve(curve)
         self._update_display()
 
@@ -521,10 +534,23 @@ class PropulsionWorkspace(QWidget):
 
         self.engine.update(motor_isp=isp, motor_mass_flow=mdot, motor_chamber_pressure=pc, emit=False)
         
-        if hasattr(s, "custom_thrust_curve") and s.custom_thrust_curve:
+        measured = bool(getattr(s, "custom_thrust_curve", None))
+        if measured:
             t = [pt[0] for pt in s.custom_thrust_curve]
             f = [pt[1] for pt in s.custom_thrust_curve]
         else:
             t, f = generate_thrust_curve(s.motor_avg_thrust, s.motor_max_thrust, s.motor_burn_time)
-            
-        self.thrust_plot.update_plot(t, f, "Thrust Curve", "Time (s)", "Thrust (N)", "#f0883e")
+
+        # Say which curve is on screen. A motor is first drawn as a trapezoid
+        # built from its catalog avg/max/burn numbers, then redrawn once the
+        # measured samples arrive - without this the swap looks like a glitch.
+        if measured:
+            note, dash = "measured samples (ThrustCurve.org)", "-"
+        elif self._curve_source == "fetching":
+            note, dash = "estimated from catalog figures - fetching measured samples...", "--"
+        else:
+            note, dash = "estimated from catalog figures", "--"
+
+        self.thrust_plot.update_plot(
+            t, f, "Thrust Curve", "Time (s)", "Thrust (N)", theme.ACCENT,
+            linestyle=dash, fill=measured, note=note)
