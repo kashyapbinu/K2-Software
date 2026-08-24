@@ -66,6 +66,13 @@ class CollapsibleSection(QWidget):
         outer.addWidget(self._header)
         outer.addWidget(self._body)
 
+    def retheme(self):
+        self.setStyleSheet(
+            f"#CollapsibleSection {{ background-color: {theme.PANEL};"
+            f" border: 1px solid {theme.LINE}; border-radius: 6px; }}"
+        )
+        self._header.setStyleSheet(_header_qss())
+
     # -- content ----------------------------------------------------------
     def set_content_layout(self, layout: QLayout):
         layout.setContentsMargins(10, 8, 10, 10)

@@ -41,6 +41,12 @@ class PlotWidget(QWidget):
         ax.spines["right"].set_visible(False)
         ax.grid(True, alpha=0.15, color=theme.LINE)
 
+    def retheme(self):
+        """Re-apply palette colours after a theme switch."""
+        self.figure.patch.set_facecolor(theme.BG)
+        self._style_axis(self.ax.get_title(), self.ax.get_xlabel(), self.ax.get_ylabel())
+        self.canvas.draw_idle()
+
     def clear(self):
         self.ax.clear()
         self.cursor_line = None

@@ -70,6 +70,11 @@ class ComponentPalette(QWidget):
         super().__init__(parent)
         self._setup_ui()
 
+    def retheme(self):
+        from PyQt6.QtWidgets import QToolButton
+        for btn in self.findChildren(QToolButton):
+            btn.setStyleSheet(card_qss())
+
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

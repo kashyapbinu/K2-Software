@@ -110,8 +110,7 @@ class SettingsDialog(QDialog):
         f.addRow("Colour scheme:", self.cmb_theme)
 
         f.addRow("", self._hint(
-            "Applies immediately. Panels that were already drawn keep their "
-            "current colours until K2 is restarted."
+            "Applies immediately, including charts and 3D views."
         ))
         return self._page(g)
 

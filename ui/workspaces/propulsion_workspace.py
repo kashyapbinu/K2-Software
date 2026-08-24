@@ -200,12 +200,12 @@ class PropulsionWorkspace(QWidget):
         fl.addRow("", self.lbl_count)
 
         self.btn_custom_motor = QPushButton("Create Custom Motor")
-        self.btn_custom_motor.setStyleSheet("background-color: #0078D7; color: white; padding: 5px; margin-top: 5px;")
+        self.btn_custom_motor.setProperty("primary", True)
         self.btn_custom_motor.clicked.connect(self._open_custom_motor_dialog)
         fl.addRow("", self.btn_custom_motor)
 
         self.btn_liquid_engine = QPushButton("Design Liquid Engine")
-        self.btn_liquid_engine.setStyleSheet("background-color: #6e40c9; color: white; padding: 5px; margin-top: 2px;")
+        self.btn_liquid_engine.setProperty("primary", True)
         self.btn_liquid_engine.clicked.connect(self._open_liquid_engine_dialog)
         fl.addRow("", self.btn_liquid_engine)
 

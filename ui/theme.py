@@ -13,6 +13,8 @@ baked in at construction until they are rebuilt - the global stylesheet does
 update live.
 """
 
+import re
+
 DARK = {
     # surfaces
     "BG": "#0e0e10",          # window ground
@@ -89,16 +91,24 @@ PALETTES = {"dark": DARK, "light": LIGHT}
 DEFAULT_MODE = "dark"
 
 _mode = DEFAULT_MODE
+_prev_mode = DEFAULT_MODE
 
 
 def set_mode(mode: str) -> str:
     """Make ``mode`` ('dark' or 'light') the active palette. Returns the mode."""
-    global _mode
+    global _mode, _prev_mode
     if mode not in PALETTES:
         mode = DEFAULT_MODE
+    if mode != _mode:
+        _prev_mode = _mode
     _mode = mode
     globals().update(PALETTES[mode])
     return mode
+
+
+def previous_mode() -> str:
+    """The palette in force before the last change - what widgets may still hold."""
+    return _prev_mode
 
 
 def mode() -> str:
@@ -532,3 +542,170 @@ def apply_matplotlib_theme():
         "lines.linewidth": 1.6,
         "font.size": 10,
     })
+
+
+# ---------------------------------------------------------------------------
+# Live re-theming
+#
+# The global stylesheet repaints Qt chrome the moment it is re-applied, but
+# anything that painted itself from the palette at construction - matplotlib
+# figures, VTK viewports, per-widget stylesheets - keeps the old colours. These
+# helpers walk a widget tree and bring those surfaces along, so switching the
+# theme does not need a restart.
+# ---------------------------------------------------------------------------
+
+def _restyle_axes(ax):
+    ax.set_facecolor(PANEL)
+    ax.tick_params(colors=TEXT_DIM, which="both")
+    for spine in ax.spines.values():
+        spine.set_color(LINE)
+    ax.xaxis.label.set_color(TEXT_DIM)
+    ax.yaxis.label.set_color(TEXT_DIM)
+    ax.title.set_color(TEXT)
+    for gl in ax.get_xgridlines() + ax.get_ygridlines():
+        gl.set_color(LINE)
+    leg = ax.get_legend()
+    if leg is not None:
+        frame = leg.get_frame()
+        frame.set_facecolor(PANEL)
+        frame.set_edgecolor(LINE)
+        for txt in leg.get_texts():
+            txt.set_color(TEXT)
+    for txt in ax.texts:
+        txt.set_color(TEXT)
+
+
+def restyle_matplotlib(root) -> int:
+    """Repaint every embedded matplotlib canvas under `root`. Returns the count.
+
+    Plotted data keeps its own colours - only the furniture (background, axes,
+    ticks, labels, grid, legend) is re-coloured.
+    """
+    try:
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+    except Exception:
+        return 0
+    n = 0
+    for canvas in root.findChildren(FigureCanvasQTAgg):
+        fig = getattr(canvas, "figure", None)
+        if fig is None:
+            continue
+        fig.patch.set_facecolor(BG)
+        for ax in fig.get_axes():
+            _restyle_axes(ax)
+        for txt in fig.texts:
+            txt.set_color(TEXT)
+        try:
+            canvas.draw_idle()
+        except Exception:
+            pass
+        n += 1
+    return n
+
+
+def restyle_viewports(root) -> int:
+    """Repaint the background of every embedded VTK/pyvista view under `root`."""
+    from PyQt6.QtWidgets import QWidget
+    seen, n = set(), 0
+    for w in [root] + root.findChildren(QWidget):
+        for attr in ("plotter", "_plotter"):
+            pl = getattr(w, attr, None)
+            if pl is None or id(pl) in seen:
+                continue
+            seen.add(id(pl))
+            try:
+                pl.set_background(BG, top=PANEL)
+                n += 1
+            except Exception:
+                pass
+    return n
+
+
+def restyle_widgets(root) -> int:
+    """Give widgets that own palette-dependent styles a chance to rebuild them.
+
+    A widget opts in by defining ``retheme()``.
+    """
+    from PyQt6.QtWidgets import QWidget
+    n = 0
+    for w in [root] + root.findChildren(QWidget):
+        fn = getattr(w, "retheme", None)
+        if callable(fn):
+            try:
+                fn()
+                n += 1
+            except Exception:
+                pass
+    return n
+
+
+# Which palette entry a colour most likely means, given the CSS property it
+# was written against. Ordered: first match wins, so shared values resolve to
+# the most plausible role (white as a background is a surface, white as text
+# is on-accent ink and should stay white).
+_SURFACE_KEYS = ("PANEL", "BG", "RAISED", "SUNKEN", "FIELD_BG", "BTN_BG",
+                 "SEL_BG", "PRIMARY_BG", "LINE", "LINE_STRONG")
+_INK_KEYS = ("SELECTION_TEXT", "PRIMARY_FG", "TEXT_BRIGHT", "TEXT", "TEXT_DIM",
+             "TEXT_FAINT", "ACCENT", "ACCENT_HOVER", "ACCENT_DEEP", "OK", "WARN",
+             "ERR", "ERR_DEEP", "INFO", "LINE_STRONG", "LINE")
+
+_DECL_RE = re.compile(r"([-a-zA-Z]+)\s*:\s*([^;{}]*)", re.S)
+_HEX_RE = re.compile(r"#[0-9a-fA-F]{6}")
+
+
+def _translate_stylesheet(qss: str, old: dict, new: dict) -> str:
+    """Rewrite palette colours in `qss` from the `old` palette to the `new` one.
+
+    Colours that are not palette entries (component colours, chart series) are
+    left alone.
+    """
+    def fix_decl(m):
+        prop, value = m.group(1), m.group(2)
+        if "#" not in value:
+            return m.group(0)
+        keys = _SURFACE_KEYS if "background" in prop.lower() else _INK_KEYS
+
+        def fix_hex(hm):
+            hexv = hm.group(0).lower()
+            for k in keys:
+                if str(old.get(k, "")).lower() == hexv:
+                    return new.get(k, hm.group(0))
+            return hm.group(0)
+
+        return f"{prop}:{_HEX_RE.sub(fix_hex, value)}"
+
+    return _DECL_RE.sub(fix_decl, qss)
+
+
+def restyle_stylesheets(root, from_mode: str = None) -> int:
+    """Re-colour inline widget stylesheets left over from the previous palette.
+
+    Most widgets build their stylesheet once, at construction, so a theme switch
+    would otherwise leave them painted in the palette that was active back then.
+    """
+    from PyQt6.QtWidgets import QWidget
+    old = PALETTES.get(from_mode or _prev_mode)
+    new = PALETTES[_mode]
+    if old is None or old is new:
+        return 0
+    n = 0
+    for w in [root] + root.findChildren(QWidget):
+        qss = w.styleSheet()
+        if not qss or "#" not in qss:
+            continue
+        fixed = _translate_stylesheet(qss, old, new)
+        if fixed != qss:
+            w.setStyleSheet(fixed)
+            n += 1
+    return n
+
+
+def restyle_all(root) -> dict:
+    """Apply every live re-theming pass to a widget tree."""
+    apply_matplotlib_theme()
+    return {
+        "stylesheets": restyle_stylesheets(root),
+        "widgets": restyle_widgets(root),
+        "figures": restyle_matplotlib(root),
+        "viewports": restyle_viewports(root),
+    }

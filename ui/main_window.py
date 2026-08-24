@@ -488,11 +488,18 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _on_theme_changed(self, mode: str):
-        """Repaint what the global stylesheet cannot reach on its own."""
+        """Repaint what the global stylesheet cannot reach on its own.
+
+        Matplotlib figures and VTK viewports bake their colours in when they
+        are built, so a theme switch has to walk the tree and repaint them.
+        """
         self.status_motor.setStyleSheet(f"color: {theme.TEXT_DIM}; padding-right: 8px;")
         self.status_sim.setStyleSheet(f"color: {theme.TEXT_DIM}; padding-right: 12px;")
-        self.console_panel.retheme()
-        logger.info("Theme set to %s — restart to restyle every panel", mode)
+        counts = theme.restyle_all(self)
+        logger.info(
+            "Theme set to %s — restyled %d stylesheets, %d widgets, %d figures, "
+            "%d viewports", mode, counts["stylesheets"], counts["widgets"],
+            counts["figures"], counts["viewports"])
 
     def _update_title(self):
         name = self.engine.state.name
