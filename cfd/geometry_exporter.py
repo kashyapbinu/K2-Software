@@ -72,6 +72,10 @@ except ImportError:
             rs = (radius / np.sqrt(np.pi)) * np.sqrt(
                 np.maximum(theta - 0.5 * np.sin(2.0 * theta), 0.0)
             )
+        elif key.startswith("agard"):
+            # AGARD-B ogive (AGARD AG-4/M3); see visualization.viewer_3d.
+            s = np.clip(1.0 - t, 0.0, 1.0)
+            rs = radius * (2.0 * s - 2.0 * s ** 3 + s ** 4)
         else:
             return _ogive_profile(length, radius, n)
         return zs, np.clip(rs, 0.0, radius)
@@ -149,6 +153,11 @@ def extract_cfd_geometry(assembly) -> dict:
                             "tip_chord":  getattr(child, "tip_chord", child.root_chord * 0.5),
                             "sweep_deg":  sweep_deg,
                             "thick":      max(0.002, getattr(child, "thickness", 0.003)),
+                            # Square / Rounded / Airfoil. The mesher used to
+                            # extrude every fin as a square-edged plank whatever
+                            # this said, which puts a blunt face across the whole
+                            # leading edge — 4% of chord on AGARD-B.
+                            "cross_section": getattr(child, "cross_section", "Square"),
                             # z_cursor here = nozzle end of this body tube
                             "z_base_k2":  z_cursor,
                         })
@@ -175,6 +184,7 @@ def extract_cfd_geometry(assembly) -> dict:
         "count": 0, "height": 0.0,
         "root_chord": 0.0, "tip_chord": 0.0,
         "sweep_deg": 0.0, "thick": 0.0, "z_base_k2": 0.0,
+        "cross_section": "Square",
     }
     if not fins:
         logger.info("No fin set in the assembly — meshing a finless body.")
@@ -236,6 +246,7 @@ def extract_cfd_geometry(assembly) -> dict:
         "fin_tip":      fin_data["tip_chord"],
         "fin_sweep_deg": fin_data["sweep_deg"],
         "fin_thick":    fin_data["thick"],
+        "fin_cross_section": fin_data.get("cross_section", "Square"),
         "fin_z_base_k2": fin_data["z_base_k2"],  # K2 z of fin root bottom
     }
 

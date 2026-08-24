@@ -423,6 +423,7 @@ class SU2Solver(CFDSolver):
             cad_units=cfg.cad_units,
             cad_wrap=cfg.cad_wrap,
             cad_wrap_resolution=cfg.cad_wrap_resolution,
+            cad_curvature_elements=cfg.cad_curvature_elements,
         )
         self._mesh_path = out_mesh
         logger.info(f"Mesh written to {out_mesh}")

@@ -94,6 +94,13 @@ def _bench_md(bm: Benchmark, plot_paths: list) -> str:
     for c in bm.comparisons:
         tol = (f"{c.tol_rel:.0%}" if c.tol_rel else "") + \
               (f" / {c.tol_abs:g}" if c.tol_abs else "")
+        # A one-sided row passes on the strength of its direction, so it can show
+        # a large relative deviation next to a small tolerance and still be a
+        # pass. Say so in the tolerance cell rather than leaving the reader to
+        # reconcile "30% error, 15% tolerance, ✓".
+        if getattr(c, "one_sided", ""):
+            arrow = "≤" if c.one_sided == "below" else "≥"
+            tol = f"{arrow} ref ({tol})" if tol else f"{arrow} ref"
         lines.append(
             f"| {c.label} | {c.k2:.4g} | {c.ref:.4g} | {c.source} | "
             f"{c.rel_err:.2%} | {tol or '—'} | {'✓' if c.passed else '✗'} |")
@@ -107,9 +114,52 @@ def _bench_md(bm: Benchmark, plot_paths: list) -> str:
 
 DOMAIN_TITLES = {
     "sim": "Flight Simulation (6DOF) ↔ Integrator exact solutions / OpenRocket",
-    "cfd": "Aerodynamics ↔ Taylor–Maccoll exact / SU2",
-    "structures": "Structures ↔ Textbook closed form / CalculiX",
+    "cfd": "Aerodynamics ↔ Wind-tunnel measurement / Taylor–Maccoll exact / SU2",
+    "structures": "Structures ↔ NAFEMS benchmarks / textbook closed form / CalculiX",
 }
+
+# Benchmarks whose reference is published external data rather than a formula
+# evaluated here or another solver run here. These are the rows that answer "has
+# this been checked against something outside this program", so the report calls
+# them out separately — labelled by what the published numbers actually are,
+# because the three kinds do not carry the same weight.
+#
+# "Measurement" means an instrument reading. A published *tabulation* of an exact
+# solution (NACA-1135) is not one, and neither is a NAFEMS target value, which is
+# an agreed converged answer the FE community reproduces. Lumping them together
+# would inflate the strongest claim the report makes.
+PUBLISHED_REFERENCES = {
+    "AEDC-TR-70-100": "wind-tunnel measurement",
+    "AGARD AR-138": "wind-tunnel measurement",
+    "NACA Report 1135": "published exact-solution tables",
+    "NAFEMS": "agreed benchmark target value",
+}
+
+
+def _published_kind(bm: Benchmark) -> str:
+    """What kind of published data this benchmark is checked against, if any."""
+    for tag, kind in PUBLISHED_REFERENCES.items():
+        if tag in bm.reference:
+            return kind
+    return ""
+
+
+def _is_measurement(bm: Benchmark) -> bool:
+    return _published_kind(bm) == "wind-tunnel measurement"
+
+
+def _provenance_table(benchmarks: list) -> str:
+    """One row per published-data benchmark: what it is checked against."""
+    rows = [b for b in benchmarks if _published_kind(b)]
+    if not rows:
+        return ""
+    out = ["### Comparisons against published data", "",
+           "| Benchmark | Source | Kind | Status |", "|---|---|---|---|"]
+    for b in rows:
+        status = "skipped" if b.skipped else _STATUS[b.passed]
+        out.append(f"| {b.name} | {b.reference} | {_published_kind(b)} | {status} |")
+    out.append("")
+    return "\n".join(out)
 
 
 def render(benchmarks: list) -> str:
@@ -118,13 +168,25 @@ def render(benchmarks: list) -> str:
     n_fail = sum(not b.passed and not b.skipped for b in benchmarks)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
+    n_meas = sum(_is_measurement(b) for b in benchmarks)
     md = ["# K2 Physics Validation Report", "",
           f"_Generated {ts}_", "",
           f"**{n_pass} passed · {n_fail} failed · {n_skip} skipped**", "",
-          "Each engine is benchmarked against an *independent* reference: the "
-          "6DOF integrator against exact ODE solutions, aerodynamics against the "
-          "Taylor–Maccoll exact cone solution and SU2, and structures against "
-          "textbook closed form and CalculiX.", ""]
+          "Each engine is benchmarked against an *independent* reference, in "
+          "three tiers of increasing strength:", "",
+          "1. **Exact solutions** — the 6DOF integrator against closed-form ODE "
+          "solutions, structures against textbook formulas, the cone solver "
+          "against Taylor–Maccoll.",
+          "2. **Code-to-code** — flight against OpenRocket, aerodynamics against "
+          "SU2, the airframe FEM against CalculiX.",
+          f"3. **Published measurement** — {n_meas} benchmark"
+          f"{'' if n_meas == 1 else 's'} compare K2 against wind-tunnel data "
+          "from the open literature. Agreement with another program proves "
+          "consistency; agreement with a measurement is the only tier that can "
+          "show the physics is right. The table below lists these alongside the "
+          "other published references (exact-solution tables, agreed benchmark "
+          "target values), which are external but are not measurements.", "",
+          _provenance_table(benchmarks)]
 
     for domain in ("sim", "cfd", "structures"):
         items = [b for b in benchmarks if b.domain == domain]

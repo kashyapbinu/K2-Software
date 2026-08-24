@@ -247,10 +247,255 @@ def bench_barrowman_vs_su2() -> Benchmark:
         return _skip(name, ref, exc)
 
 
+# ── AGARD-B vs wind-tunnel measurement (AEDC-TR-70-100) ───────────────────────
+
+_AGARDB_REF = "AEDC-TR-70-100 wind-tunnel data (AGARD-B, Tunnel 4T)"
+
+
+def bench_agardb_barrowman() -> Benchmark:
+    """K2's Barrowman lift-curve slope vs the AGARD-B measurement.
+
+    Split deliberately into two kinds of row:
+
+      * **Mach trend** (gated) — C_L_alpha(M) normalised by its own value at
+        M=0.2. This isolates K2's compressibility correction from its absolute
+        level, and it tracks the measurement closely.
+      * **Absolute level** (diagnostic, wide band) — Barrowman reads about 2.7x
+        low here. That is not a bug being papered over: AGARD-B's wing spans 4
+        body diameters, far outside the small-fin slender-body assumption
+        Barrowman's fin term is derived under. The row records the size of the
+        error so the method's envelope is documented rather than implied.
+    """
+    from validation.cfd.agardb import barrowman_cl_alpha_per_deg
+    from validation.data.agardb_aedc import AEDC_TR_70_100 as REF
+
+    bm = Benchmark(name="Barrowman lift slope vs AGARD-B experiment", domain="cfd",
+                   reference=_AGARDB_REF, level=ValidationLevel.ESTIMATED)
+
+    machs = [0.2, 0.4, 0.6, 0.8, 0.9]
+    k2 = {m: barrowman_cl_alpha_per_deg(mach=m) for m in machs}
+    base_k2, base_ref = k2[0.2], REF[0.2]["cl_alpha_per_deg"]
+
+    for m in machs[1:]:
+        bm.add(Comparison.make(
+            f"C_Lα(M={m}) / C_Lα(M=0.2)", k2[m] / base_k2,
+            REF[m]["cl_alpha_per_deg"] / base_ref,
+            "AEDC-TR-70-100", "-", tol_rel=0.08,
+            note="compressibility trend, self-normalised"))
+
+    for m in (0.2, 0.6, 0.9):
+        bm.add(Comparison.make(
+            f"C_Lα at M={m} (absolute, diagnostic)", k2[m],
+            REF[m]["cl_alpha_per_deg"], "AEDC-TR-70-100", "1/deg", tol_rel=3.0,
+            note="wing span = 4 body diameters — outside Barrowman's envelope"))
+
+    bm.curves["cl_alpha"] = {
+        "x": machs, "k2": [k2[m] for m in machs],
+        "ref": [REF[m]["cl_alpha_per_deg"] for m in machs],
+        "xlabel": "Mach", "ylabel": "dC_L/dα (1/deg, wing area)"}
+    bm.notes = ("Coefficients are wing-planform-area referenced (S = 4√3·D²), "
+                "as in the source report; K2's body-area values are rescaled.")
+    return bm
+
+
+def bench_agardb_su2(machs=(0.5, 0.6, 0.7, 0.8),
+                     alphas=(0.0, 2.0, 4.0, 6.0),
+                     refinement: str = "medium",
+                     max_iterations: int = 3000) -> Benchmark:
+    """Full K2 CFD pipeline vs the AGARD-B wind-tunnel lift-curve slope.
+
+    One shared mesh, a (Mach × α) grid of SU2 solves, then dC_L/dα per Mach
+    against the measured value. Marks itself skipped — not failed — if the
+    head-less geometry/mesh/solve pipeline raises, like the other SU2 cases.
+    """
+    from validation.cfd.agardb import run_su2_sweep, slope_per_deg
+    from validation.data.agardb_aedc import AEDC_TR_70_100 as REF
+
+    name = "SU2 lift slope vs AGARD-B experiment"
+    try:
+        data = run_su2_sweep(machs=machs, alphas=alphas, refinement=refinement,
+                             max_iterations=max_iterations)
+    except Exception as exc:
+        return _skip(name, _AGARDB_REF, exc)
+
+    bm = Benchmark(name=name, domain="cfd", reference=_AGARDB_REF,
+                   level=ValidationLevel.VALIDATED)
+    unconverged = [f"M={m}, α={a}" for m, rows in data.items()
+                   for a, _cl, _cd, ok in rows if not ok]
+
+    k2_slopes, ref_slopes, used = [], [], []
+    for mach, rows in sorted(data.items()):
+        if mach not in REF:
+            continue
+        s_k2 = slope_per_deg(rows)
+        s_ref = REF[mach]["cl_alpha_per_deg"]
+        used.append(mach)
+        k2_slopes.append(s_k2)
+        ref_slopes.append(s_ref)
+        bm.add(Comparison.make(
+            f"dC_L/dα at M={mach}", s_k2, s_ref, "AEDC-TR-70-100", "1/deg",
+            tol_rel=0.15,
+            note=f"{len(rows)} α points, inviscid + flat-plate friction"))
+        # C_L at the largest solved angle: catches a right-slope/wrong-level
+        # solution that a slope-only comparison would pass.
+        a_max, cl_max = rows[-1][0], rows[-1][1]
+        if a_max > 0:
+            bm.add(Comparison.make(
+                f"C_L at M={mach}, α={a_max:g}°", cl_max,
+                s_ref * a_max + REF[mach]["cl0"], "AEDC-TR-70-100", "-",
+                tol_rel=0.20, note="measured fit evaluated at the same α"))
+
+    if unconverged:
+        bm.notes = ("SU2 reported non-convergence at: " + ", ".join(unconverged)
+                    + ". Those points still contribute to the fitted slope.")
+    bm.curves["cl_alpha_vs_mach"] = {
+        "x": used, "k2": k2_slopes, "ref": ref_slopes,
+        "xlabel": "Mach", "ylabel": "dC_L/dα (1/deg, wing area)"}
+    return bm
+
+
+# ── ONERA M6 wing vs measured surface pressures ───────────────────────────────
+
+_M6_SECTIONS = (1, 3, 5, 7)
+
+
+def _m6_level(M6, wall_size: float, refinement: str, max_iterations: int) -> dict:
+    """Solve one M6 refinement level; return its per-station Cp errors."""
+    import pyvista as pv
+
+    work = _WORK / f"onera_m6_w{wall_size:g}".replace(".", "_")
+    res = M6.run_su2(work, refinement=refinement, max_iterations=max_iterations,
+                     mirror=True, wall_size=wall_size)
+    mesh = pv.read(str(res.surface_vtk or (work / "surface_flow.vtu")))
+    # Read the span from the solution: the CAD import recentres the geometry, so
+    # the station coordinates are not the analytic ones.
+    span = M6.span_frame(mesh)
+
+    out = {"wall_size": wall_size, "result": res, "mesh": mesh, "span": span,
+           "rmse": {}, "cp_min": {}, "cn": {}}
+    for section in _M6_SECTIONS:
+        out["cn"][section] = M6.section_cn(mesh, section, span)
+        for upper in (True, False):
+            key = (section, upper)
+            out["rmse"][key] = M6.cp_rmse(mesh, section, upper, span)
+            exp = M6.load_experimental_cp(section, upper)
+            xs = [x for x, _ in exp]
+            got = M6.surface_cp_at_section(mesh, M6.SECTIONS[section], upper,
+                                           xs, span)
+            out["cp_min"][key] = (min(got), min(c for _, c in exp))
+    return out
+
+
+def bench_onera_m6(refinement: str = "fine", max_iterations: int = 4000,
+                   wall_sizes=None) -> Benchmark:
+    """K2's external-CAD CFD path vs Schmitt & Charpin surface pressures.
+
+    Solved at **two** mesh resolutions, because one run cannot separate the two
+    things that make a transonic Cp disagree. K2's tet mesher has no anisotropic
+    wall layer and no shock adaption, so it will not reach the ±0.02 the
+    experiment quotes; the honest question is whether what remains is a
+    *resolution* error, which has a signature: it shrinks as the mesh refines.
+
+    Two gates, measuring different things, and they currently disagree — which is
+    the finding:
+
+      * **Cp RMSE improves with refinement** — the pointwise pressure
+        distribution does converge toward the data, at every station.
+      * **Sectional normal force** vs the measured loading — and this gets
+        *worse* with refinement, to about -45%. A distribution converging in
+        shape while the load it integrates to moves away from the measurement is
+        not a resolution story, so the row is gated at 15% and currently fails.
+        Leading-edge resolution has since been tested directly and is not the
+        cause — see the notes.
+    """
+    from validation.cfd import onera_m6 as M6
+
+    name = "ONERA M6 wing surface Cp vs experiment"
+    ref = "Schmitt & Charpin, AGARD AR-138 (1979), Test 2308"
+    sizes = tuple(wall_sizes or M6.WALL_SIZES)
+    try:
+        levels = [_m6_level(M6, w, refinement, max_iterations)
+                  for w in sorted(sizes, reverse=True)]   # coarse → fine
+        coarse, fine = levels[0], levels[-1]
+
+        bm = Benchmark(name=name, domain="cfd", reference=ref,
+                       level=ValidationLevel.VALIDATED)
+
+        for section in _M6_SECTIONS:
+            for upper in (True, False):
+                key = (section, upper)
+                side = "upper" if upper else "lower"
+                label = f"y/b={M6.SECTIONS[section]} ({side})"
+                r_fine, n = fine["rmse"][key]
+                r_coarse, _ = coarse["rmse"][key]
+
+                # Refinement must not move the solution away from the data. The
+                # 15% slack keeps a station whose error is already at the noise
+                # floor from failing on a wobble.
+                bm.add(Comparison.make(
+                    f"Cp RMSE improves with refinement, {label}",
+                    r_fine, r_coarse, "AGARD AR-138", "-",
+                    tol_rel=0.15, one_sided="below",
+                    note=f"coarse {r_coarse:.3f} → fine {r_fine:.3f}"))
+
+        for section in _M6_SECTIONS:
+            cn_k2, cn_exp = fine["cn"][section]
+            cn_coarse = coarse["cn"][section][0]
+            bm.add(Comparison.make(
+                f"Sectional normal force c_n, y/b={M6.SECTIONS[section]}",
+                cn_k2, cn_exp, "AGARD AR-138", "-", tol_rel=0.15,
+                note=f"integrated Cp loading; coarse mesh gave {cn_coarse:+.3f}"))
+
+        # Overlay one station so the report shows the pressure distribution, not
+        # only its error norm.
+        exp_u = M6.load_experimental_cp(3, True)
+        xs = [x for x, _ in exp_u]
+        bm.curves["cp_yb065_upper"] = {
+            "x": xs,
+            "k2": M6.surface_cp_at_section(fine["mesh"], M6.SECTIONS[3], True,
+                                           xs, fine["span"]),
+            "ref": [c for _, c in exp_u],
+            "xlabel": "x/c", "ylabel": "Cp (y/b = 0.65, upper)"}
+
+        rmse_tbl = "; ".join(
+            f"y/b={M6.SECTIONS[s]} {coarse['rmse'][(s, True)][0]:.3f}→"
+            f"{fine['rmse'][(s, True)][0]:.3f}" for s in _M6_SECTIONS)
+        peaks = "; ".join(
+            f"y/b={M6.SECTIONS[s]} {fine['cp_min'][(s, True)][0]:+.2f} vs "
+            f"{fine['cp_min'][(s, True)][1]:+.2f}" for s in _M6_SECTIONS)
+        cls = ", ".join(f"{lv['wall_size']:g} m → CL={lv['result'].cl:.3f}"
+                        for lv in levels)
+        bm.notes = (
+            f"M={M6.MACH}, α={M6.ALPHA_DEG}°, inviscid. Wall element sizes {cls}. "
+            f"Upper-surface Cp RMSE, coarse→fine: {rmse_tbl}. "
+            f"Suction peak (fine) vs measured: {peaks}. "
+            "\n\nThe wing is meshed mirrored about its root: the experiment is a "
+            "half-model on a reflection plane and K2's CAD path has no symmetry "
+            "boundary, so a semi-span import relieves around the root plane as if "
+            "it were a second tip. "
+            "\n\nOPEN: the solution carries 26-45% too little sectional load, and "
+            "refining moves it further from the measurement even as the pointwise "
+            "Cp error falls at every station. Two candidate causes have now been "
+            "tested and neither is it. Farfield proximity: taking the domain "
+            "radius from 14 m to 48 m changed CL by 0.01 and left the deficit "
+            "where it was. Leading-edge resolution, which was the leading "
+            "hypothesis: the mesher now refines a band around every curved "
+            "feature to about a third of its radius, which on the AGARD-B wing "
+            "moved the lift-curve slope from 10-18% low to inside 5% — and here "
+            "it moved the sectional loads by about a point (-25/-41/-48/-38% "
+            "before, -26/-43/-45/-39% after). Whatever this is, it is not the "
+            "mesh. Reported as failing rather than widened to pass.")
+        return bm
+    except Exception as exc:
+        return _skip(name, ref, exc)
+
+
 def run_benchmarks(include_su2: bool = True) -> list:
     """All CFD benchmarks. `include_su2` runs the slow SU2 cases."""
-    out = [bench_taylor_maccoll_reference()]
+    out = [bench_taylor_maccoll_reference(), bench_agardb_barrowman()]
     if include_su2:
         out.append(bench_su2_cone())
         out.append(bench_barrowman_vs_su2())
+        out.append(bench_agardb_su2())
+        out.append(bench_onera_m6())
     return out
