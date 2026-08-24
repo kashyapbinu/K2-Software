@@ -46,14 +46,16 @@ class PlotWidget(QWidget):
         self.cursor_line = None
         self._style_axis(self.ax.get_title(), self.ax.get_xlabel(), self.ax.get_ylabel())
 
-    def plot(self, x, y, color=theme.ACCENT, label=None, linewidth=1.5):
+    def plot(self, x, y, color=None, label=None, linewidth=1.5):
+        color = color or theme.ACCENT
         self.ax.plot(x, y, color=color, label=label, linewidth=linewidth)
         if label:
             self.ax.legend(facecolor=theme.PANEL, edgecolor=theme.LINE, labelcolor=theme.TEXT, fontsize=9)
         self.figure.tight_layout()
         self.canvas.draw()
 
-    def update_plot(self, x, y, title="", xlabel="", ylabel="", color=theme.ACCENT):
+    def update_plot(self, x, y, title="", xlabel="", ylabel="", color=None):
+        color = color or theme.ACCENT
         self.ax.clear()
         self._style_axis(title, xlabel, ylabel)
         self.ax.plot(x, y, color=color, linewidth=1.5)

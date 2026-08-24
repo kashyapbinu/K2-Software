@@ -490,13 +490,13 @@ class StressViewer(QWidget):
 
         if peak_pt is not None:
             sphere = pv.Sphere(radius=self._total_len * 0.018, center=peak_pt)
-            self.plotter.add_mesh(sphere, color="#ffffff", name="max_marker")
+            self.plotter.add_mesh(sphere, color=theme.TEXT_BRIGHT, name="max_marker")
             if mode == "Safety Factor":
                 txt = f"Min SF: {peak_val:.2f}\n{_REGION_LABEL.get(peak_region, peak_region)}"
             else:
                 txt = f"Peak: {peak_val:.1f} MPa\n{_REGION_LABEL.get(peak_region, peak_region)}"
             self.plotter.add_point_labels(
-                [peak_pt], [txt], font_size=12, text_color="#ffffff",
+                [peak_pt], [txt], font_size=12, text_color=theme.TEXT_BRIGHT,
                 point_color="#ff3b30", point_size=8, shape_color=theme.PANEL,
                 shape_opacity=0.7, always_visible=True, name="max_label")
 
@@ -519,7 +519,7 @@ class StressViewer(QWidget):
             return
         try:
             self.plotter.add_point_labels([point], [self._mode], font_size=10,
-                                          text_color="#ffffff", name="hover_label",
+                                          text_color=theme.TEXT_BRIGHT, name="hover_label",
                                           always_visible=True)
         except Exception:
             pass

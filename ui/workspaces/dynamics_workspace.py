@@ -32,10 +32,7 @@ from ui import theme
 logger = logging.getLogger("K2.DynWS")
 
 # Verdict colours
-_C_SAFE = theme.OK
-_C_CAUT = theme.WARN
-_C_BAD  = theme.ERR
-_C_INFO = theme.ACCENT
+# Palette is read at call time, never snapshotted at import.
 
 
 def _vl(t="—"):
@@ -45,10 +42,10 @@ def _vl(t="—"):
 def _verdict(margin_pct):
     """(text, colour) for a percentage safety margin."""
     if margin_pct >= 20.0:
-        return "SAFE", _C_SAFE
+        return "SAFE", theme.OK
     if margin_pct >= 10.0:
-        return "CAUTION", _C_CAUT
-    return "UNSAFE", _C_BAD
+        return "CAUTION", theme.WARN
+    return "UNSAFE", theme.ERR
 
 
 class DynThread(QThread):
@@ -517,7 +514,7 @@ class DynamicsWorkspace(QWidget):
         else:
             self.lbl_fmargin.setText("∞")
             self.lbl_fverdict.setText("SAFE")
-            self.lbl_fverdict.setStyleSheet(f"color:{_C_SAFE};font-weight:700;font-size:14px;padding:4px;")
+            self.lbl_fverdict.setStyleSheet(f"color:{theme.OK};font-weight:700;font-size:14px;padding:4px;")
 
         ax = getattr(self._flutter_plot, "ax", None)
         if ax is None:
@@ -532,11 +529,11 @@ class DynamicsWorkspace(QWidget):
             alts_a = np.array(alts); vf_a = np.array(vf)
             order = np.argsort(alts_a); alts_a = alts_a[order]; vf_a = vf_a[order]
             # Safe/caution/unsafe shading (relative to flutter boundary)
-            ax.fill_between(alts_a, 0, vf_a / 1.2, color=_C_SAFE, alpha=0.10)
-            ax.fill_between(alts_a, vf_a / 1.2, vf_a / 1.1, color=_C_CAUT, alpha=0.12)
-            ax.fill_between(alts_a, vf_a / 1.1, vf_a, color=_C_BAD, alpha=0.12)
+            ax.fill_between(alts_a, 0, vf_a / 1.2, color=theme.OK, alpha=0.10)
+            ax.fill_between(alts_a, vf_a / 1.2, vf_a / 1.1, color=theme.WARN, alpha=0.12)
+            ax.fill_between(alts_a, vf_a / 1.1, vf_a, color=theme.ERR, alpha=0.12)
             ax.plot(alts_a, vf_a, color=theme.ACCENT, linewidth=2.0, label="Flutter boundary")
-            ax.axhline(min(vf), color=_C_BAD, linestyle=":", linewidth=1.2,
+            ax.axhline(min(vf), color=theme.ERR, linestyle=":", linewidth=1.2,
                        label=f"Flutter onset {min(vf):.0f} m/s")
 
         # Actual flight max-velocity profile vs altitude
@@ -544,7 +541,7 @@ class DynamicsWorkspace(QWidget):
         if tr:
             import numpy as np
             ta = np.array(tr["alt"]) / 1000.0; tv = np.array(tr["vel"])
-            ax.plot(ta, tv, color=_C_INFO, linewidth=1.8, label="Flight velocity")
+            ax.plot(ta, tv, color=theme.ACCENT, linewidth=1.8, label="Flight velocity")
         ax.axhline(vmax, color=theme.TEXT, linestyle="--", linewidth=1.0,
                    label=f"Max flight {vmax:.0f} m/s")
         ax.legend(facecolor=theme.PANEL, edgecolor=theme.LINE, labelcolor=theme.TEXT, fontsize=8, loc="best")
@@ -562,9 +559,9 @@ class DynamicsWorkspace(QWidget):
             self._frf_plot.clear()
             self._frf_plot._style_axis("Frequency Response + Resonances", "Frequency (Hz)", "Magnitude (dB)")
             xs = [p[0] for p in r.frf_data]; ys = [p[1] for p in r.frf_data]
-            ax.plot(xs, ys, color=_C_INFO, linewidth=1.4)
+            ax.plot(xs, ys, color=theme.ACCENT, linewidth=1.4)
             for i, (f, mag, name) in enumerate(r.modal_markers):
-                ax.plot(f, mag, "o", color=_C_BAD, markersize=5)
+                ax.plot(f, mag, "o", color=theme.ERR, markersize=5)
                 ax.annotate(f"M{i+1}\n{f:.0f}Hz", (f, mag), textcoords="offset points",
                             xytext=(0, 8), ha="center", fontsize=8, color=theme.TEXT)
             self._frf_plot.figure.tight_layout(); self._frf_plot.canvas.draw()
@@ -587,7 +584,7 @@ class DynamicsWorkspace(QWidget):
             for c, val in enumerate(cells):
                 it = QTableWidgetItem(val)
                 if c == 3:
-                    it.setForeground(QColor({"Low": _C_SAFE, "Medium": _C_CAUT, "High": _C_BAD}[risk]))
+                    it.setForeground(QColor({"Low": theme.OK, "Medium": theme.WARN, "High": theme.ERR}[risk]))
                 self._res_table.setItem(i, c, it)
 
         if peaks:
@@ -662,7 +659,7 @@ class DynamicsWorkspace(QWidget):
         else:
             self.lbl_divmargin.setText("∞")
             self.lbl_divverdict.setText("SAFE")
-            self.lbl_divverdict.setStyleSheet(f"color:{_C_SAFE};font-weight:700;font-size:14px;padding:4px;")
+            self.lbl_divverdict.setStyleSheet(f"color:{theme.OK};font-weight:700;font-size:14px;padding:4px;")
         rev = getattr(r, "reversal_mach", 0.0)
         self.lbl_revmach.setText(f"{rev:.2f}" if rev > 0 else "none")
         self.lbl_effmax.setText(f"{getattr(r, 'effectiveness_at_max_mach', 1.0):+.2f}")
@@ -674,18 +671,18 @@ class DynamicsWorkspace(QWidget):
             self._aero_plot._style_axis("Aeroelastic Effectiveness (smooth reversal)", "Mach", "Effectiveness η")
             xs = [p[0] for p in r.effectiveness_data]; ys = [p[1] for p in r.effectiveness_data]
             # Authority regions (by effectiveness value)
-            ax.axhspan(0.3, 1.2, color=_C_SAFE, alpha=0.10)    # positive authority
-            ax.axhspan(-0.3, 0.3, color=_C_CAUT, alpha=0.12)   # neutral zone
-            ax.axhspan(-1.2, -0.3, color=_C_BAD, alpha=0.12)   # control reversal
-            ax.text(xs[0], 0.7, "AUTHORITY", color=_C_SAFE, fontsize=7, va="center")
-            ax.text(xs[0], 0.0, "NEUTRAL", color=_C_CAUT, fontsize=7, va="center")
-            ax.text(xs[0], -0.7, "REVERSAL", color=_C_BAD, fontsize=7, va="center")
+            ax.axhspan(0.3, 1.2, color=theme.OK, alpha=0.10)    # positive authority
+            ax.axhspan(-0.3, 0.3, color=theme.WARN, alpha=0.12)   # neutral zone
+            ax.axhspan(-1.2, -0.3, color=theme.ERR, alpha=0.12)   # control reversal
+            ax.text(xs[0], 0.7, "AUTHORITY", color=theme.OK, fontsize=7, va="center")
+            ax.text(xs[0], 0.0, "NEUTRAL", color=theme.WARN, fontsize=7, va="center")
+            ax.text(xs[0], -0.7, "REVERSAL", color=theme.ERR, fontsize=7, va="center")
             ax.plot(xs, ys, color=theme.TEXT_BRIGHT, linewidth=2.0)
             ax.axhline(0, color=theme.LINE_STRONG, linewidth=0.8)
             if rev > 0:
-                ax.axvline(rev, color=_C_BAD, linestyle="--", linewidth=1.4,
+                ax.axvline(rev, color=theme.ERR, linestyle="--", linewidth=1.4,
                            label=f"Reversal M={rev:.2f}")
-            ax.axvline(self.sp_mmax.value(), color=_C_INFO, linestyle="-", linewidth=1.4,
+            ax.axvline(self.sp_mmax.value(), color=theme.ACCENT, linestyle="-", linewidth=1.4,
                        label=f"Flight M={self.sp_mmax.value():.2f}")
             ax.legend(facecolor=theme.PANEL, edgecolor=theme.LINE, labelcolor=theme.TEXT, fontsize=8)
             self._aero_plot.figure.tight_layout(); self._aero_plot.canvas.draw()
@@ -812,7 +809,7 @@ class DynamicsWorkspace(QWidget):
         vdiv = (self._aero_result.divergence_speed_mps
                 if self._aero_result and self._aero_result.divergence_speed_mps < 1e6 else None)
 
-        verdict, vcol = "SAFE", _C_SAFE
+        verdict, vcol = "SAFE", theme.OK
         crosses = []
 
         # Boundaries
@@ -820,8 +817,8 @@ class DynamicsWorkspace(QWidget):
         if vf_sw:
             alts = np.array([p[0] / 1000.0 for p in vf_sw]); vf = np.array([p[1] for p in vf_sw])
             xmax = max(xmax, vf.max() * 1.1)
-            ax.fill_betweenx(alts, vf, xmax, color=_C_BAD, alpha=0.10)        # unsafe (flutter)
-            ax.fill_betweenx(alts, 0, vf, color=_C_SAFE, alpha=0.06)          # safe
+            ax.fill_betweenx(alts, vf, xmax, color=theme.ERR, alpha=0.10)        # unsafe (flutter)
+            ax.fill_betweenx(alts, 0, vf, color=theme.OK, alpha=0.06)          # safe
             ax.plot(vf, alts, color=theme.ACCENT, linewidth=2.0, label="Flutter boundary")
         if vdiv is not None:
             ax.axvline(vdiv, color="#bc8cff", linestyle="--", linewidth=1.4,
@@ -830,7 +827,7 @@ class DynamicsWorkspace(QWidget):
         # Actual trajectory + crossing checks
         if tr:
             ta = np.array(tr["alt"]) / 1000.0; tv = np.array(tr["vel"])
-            ax.plot(tv, ta, color=_C_INFO, linewidth=2.0, label="Actual trajectory")
+            ax.plot(tv, ta, color=theme.ACCENT, linewidth=2.0, label="Actual trajectory")
             if vf_sw:
                 vf_at = np.interp(tr["alt"], [p[0] for p in vf_sw], [p[1] for p in vf_sw])
                 if np.any(np.array(tr["vel"]) >= vf_at):
@@ -838,7 +835,7 @@ class DynamicsWorkspace(QWidget):
             if vdiv is not None and tr["vmax"] >= vdiv:
                 crosses.append("divergence")
             if crosses:
-                verdict, vcol = "UNSAFE", _C_BAD
+                verdict, vcol = "UNSAFE", theme.ERR
         else:
             ax.text(0.5, 0.5, "No simulation trajectory.\nRun a simulation, then re-open Dynamics.",
                     transform=ax.transAxes, ha="center", va="center", color=theme.TEXT_DIM, fontsize=10)
@@ -909,11 +906,11 @@ class DynamicsWorkspace(QWidget):
                  + 0.15 * res_score + 0.10 * rev_score)
         # Qualitative 3-level verdict (no numeric score shown to the user).
         if score >= 75:
-            rating, col = "✅ Good", _C_SAFE
+            rating, col = "✅ Good", theme.OK
         elif score >= 50:
-            rating, col = "⚠️ Marginal", _C_CAUT
+            rating, col = "⚠️ Marginal", theme.WARN
         else:
-            rating, col = "❌ Poor", _C_BAD
+            rating, col = "❌ Poor", theme.ERR
         self._safety_score = score; self._safety_rating = rating
         self.lbl_overall.setText(rating)
         self.lbl_overall.setStyleSheet(
@@ -980,7 +977,7 @@ class DynamicsWorkspace(QWidget):
         lines = [("✗ " if s == "UNSAFE" else "! ") + msg for s, msg in warns]
         self.lbl_warnings.setText("\n".join(lines))
         self.lbl_warnings.setStyleSheet(
-            f"color:{_C_BAD if has_bad else _C_CAUT};font-size:11px;font-weight:600;")
+            f"color:{theme.ERR if has_bad else theme.WARN};font-size:11px;font-weight:600;")
 
     # ===============================================================
     # Report export

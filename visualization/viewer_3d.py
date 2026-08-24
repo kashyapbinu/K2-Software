@@ -239,7 +239,8 @@ class Viewer3D(QWidget):
     def _toggle_wireframe(self, checked):
         self._wireframe_mode = checked
         if checked:
-            self.plotter.set_background("white")
+            # Flat drafting sheet: paper-white in light, ink-dark in dark.
+            self.plotter.set_background(_viewport_bg()[1])
             self.plotter.enable_parallel_projection()
             self.btn_wireframe.setText("Switch to 3D Solid Mode")
             self._restyle_wireframe_button(active=True)

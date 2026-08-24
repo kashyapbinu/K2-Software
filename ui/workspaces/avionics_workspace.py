@@ -29,7 +29,8 @@ class StatusLight(QLabel):
         self.setStyleSheet(f"color: {theme.LINE_STRONG}; font-weight: 600; font-size: 12px; "
             f"padding: 6px 12px; background-color: {theme.PANEL}; border: 1px solid {theme.RAISED}; border-radius: 6px;")
 
-    def set_active(self, active, color=theme.OK):
+    def set_active(self, active, color=None):
+        color = color or theme.OK
         if active:
             self.setStyleSheet(f"color: {color}; font-weight: 700; font-size: 12px; "
                 f"padding: 6px 12px; background-color: #0e0e10; "

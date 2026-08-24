@@ -1708,7 +1708,7 @@ class OptimizationWorkspace(QWidget):
             x_p = [d.objectives.get(k1, 0) for d in result.pareto_front]
             y_p = [d.objectives.get(k2, 0) for d in result.pareto_front]
             ax.scatter(x_p, y_p, c=theme.OK, s=40, zorder=4,
-                       edgecolors="#ffffff", linewidths=0.8, label="Pareto Front")
+                       edgecolors=theme.TEXT_BRIGHT, linewidths=0.8, label="Pareto Front")
             # Sort and connect
             pairs = sorted(zip(x_p, y_p))
             if pairs:
@@ -1786,7 +1786,7 @@ class OptimizationWorkspace(QWidget):
         ux = (max(x_vals) if dir1 == "maximize" else min(x_vals)) if x_vals else 0
         uy = (max(y_vals) if dir2 == "maximize" else min(y_vals)) if y_vals else 0
         ax.scatter([ux], [uy], c=theme.ACCENT, s=120, marker="D", zorder=5,
-                   label="Utopia Point", edgecolors="#ffffff", linewidths=1)
+                   label="Utopia Point", edgecolors=theme.TEXT_BRIGHT, linewidths=1)
 
         ax.set_xlabel(k1.replace("_", " ").title(), color=theme.TEXT_DIM, fontsize=10)
         ax.set_ylabel(k2.replace("_", " ").title(), color=theme.TEXT_DIM, fontsize=10)
@@ -1920,7 +1920,7 @@ class OptimizationWorkspace(QWidget):
             bx = _get_val(self._result.best_design, x_key)
             by = _get_val(self._result.best_design, y_key)
             ax.scatter([bx], [by], c=theme.ACCENT, s=100, marker="*",
-                       zorder=5, edgecolors="#ffffff", linewidths=1)
+                       zorder=5, edgecolors=theme.TEXT_BRIGHT, linewidths=1)
 
         # Colorbar - remove the previous one first. ax.clear() does not touch
         # the colorbar's own axes, so every refresh used to add another one and
@@ -1985,7 +1985,7 @@ class OptimizationWorkspace(QWidget):
             if hasattr(c, '_is_selection'):
                 c.remove()
         sc = ax.scatter([self._dse_x_vals[idx]], [self._dse_y_vals[idx]],
-                        c="none", s=200, edgecolors="#ffffff", linewidths=2, zorder=10)
+                        c="none", s=200, edgecolors=theme.TEXT_BRIGHT, linewidths=2, zorder=10)
         sc._is_selection = True
         self._canvas_dse.draw_idle()
 
@@ -2128,7 +2128,7 @@ class OptimizationWorkspace(QWidget):
                         pass
 
                     ax_right.scatter(x_data, y_data, c=responses, cmap="viridis",
-                                     s=15, edgecolors="#ffffff", linewidths=0.3,
+                                     s=15, edgecolors=theme.TEXT_BRIGHT, linewidths=0.3,
                                      zorder=3, alpha=0.7)
                 except Exception:
                     ax_right.text(0.5, 0.5, "Could not fit surface",

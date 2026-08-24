@@ -1552,7 +1552,8 @@ class MissionVisualizerWorkspace(QWidget):
             text += f"  @ {alt:.0f} m"
         self._add_timeline_entry(t, text, color, events=True)
 
-    def _add_timeline_entry(self, t, text, color=theme.TEXT_DIM, events=False):
+    def _add_timeline_entry(self, t, text, color=None, events=False):
+        color = color or theme.TEXT_DIM
         targets = [self._timeline_list]
         if events:
             targets.append(self._events_list)

@@ -22,8 +22,7 @@ from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QPainter, QColor, QPen, QBrush
 
-from ui.widgets.design_widgets import (CollapsibleBox, MetricGrid, MplCanvas,
-    ACCENT, MUTED, WARN, GOOD, BG, PANEL)
+from ui.widgets.design_widgets import CollapsibleBox, MetricGrid, MplCanvas
 from physics.internal_ballistics import (Propellant, BatesGrain, TubularGrain,
     EndBurnerGrain, StarGrain, MotorSimulator)
 
@@ -109,7 +108,7 @@ class CustomMotorDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Custom Motor Builder")
         self.setMinimumSize(1180, 760)
-        self.setStyleSheet(f"background-color:{theme.PANEL}; color:#ffffff;")
+        self.setStyleSheet(f"background-color:{theme.PANEL}; color:{theme.TEXT};")
         self._last_result = None
         self._summary = None
 
@@ -256,7 +255,7 @@ class CustomMotorDialog(QDialog):
             box = CollapsibleBox(title); box.add_widget(grid); sv.addWidget(box)
         self.warn_box = CollapsibleBox("Engineering validation")
         self.lbl_warn = QLabel("Simulate a motor to see validation checks.")
-        self.lbl_warn.setWordWrap(True); self.lbl_warn.setStyleSheet(f"color:{MUTED};")
+        self.lbl_warn.setWordWrap(True); self.lbl_warn.setStyleSheet(f"color:{theme.TEXT_DIM};")
         self.warn_box.add_widget(self.lbl_warn); sv.addWidget(self.warn_box)
         sv.addStretch()
         tabs.addTab(sa, "Summary")
@@ -448,7 +447,7 @@ class CustomMotorDialog(QDialog):
         self.g_perf.set("Cf (SL)", f"{s['cf_sl']:.3f}")
         self.g_perf.set("Cf (vac)", f"{s['cf_vac']:.3f}")
         self.g_perf.set("Overall efficiency", f"{s['efficiency']*100:.1f} %")
-        self.g_perf.set("Loss %", f"{loss:.1f} %", WARN if loss > 12 else ACCENT)
+        self.g_perf.set("Loss %", f"{loss:.1f} %", theme.ACCENT if loss > 12 else theme.ACCENT)
         self.g_perf.set("Ideal thrust", f"{s['thrust_ideal']:.0f} N")
         self.g_perf.set("Delivered thrust", f"{s['thrust_delivered']:.0f} N")
         self.g_perf.set("Avg thrust", f"{s['avg_thrust']:.0f} N")
@@ -467,11 +466,11 @@ class CustomMotorDialog(QDialog):
         w = s["warnings"]
         if not w:
             self.lbl_warn.setText("✓ No issues flagged — inputs within typical ranges.")
-            self.lbl_warn.setStyleSheet(f"color:{GOOD};")
+            self.lbl_warn.setStyleSheet(f"color:{theme.OK};")
             self.warn_box.toggle.setText("Engineering validation  ✓")
         else:
             self.lbl_warn.setText("⚠ " + "\n\n⚠ ".join(w))
-            self.lbl_warn.setStyleSheet(f"color:{WARN};")
+            self.lbl_warn.setStyleSheet(f"color:{theme.ACCENT};")
             self.warn_box.toggle.setText(f"Engineering validation  ⚠ {len(w)}")
 
     @staticmethod
@@ -541,14 +540,14 @@ class CustomMotorDialog(QDialog):
         ln = s["nozzle_length"] * u
         xs = [0.0, lc, lc + lconv, lc + lconv + ln]
         ys = [rc, rc, rt, re]
-        ax.plot(xs, ys, color=ACCENT, lw=2)
-        ax.plot(xs, [-v for v in ys], color=ACCENT, lw=2)
-        ax.fill_between(xs, ys, [-v for v in ys], color=ACCENT, alpha=0.10)
-        ax.plot([0, xs[-1]], [0, 0], color=MUTED, ls="--", lw=0.8)
+        ax.plot(xs, ys, color=theme.ACCENT, lw=2)
+        ax.plot(xs, [-v for v in ys], color=theme.ACCENT, lw=2)
+        ax.fill_between(xs, ys, [-v for v in ys], color=theme.ACCENT, alpha=0.10)
+        ax.plot([0, xs[-1]], [0, 0], color=theme.TEXT_DIM, ls="--", lw=0.8)
         ax.plot([0, 0], [-rc, rc], color=theme.ERR, lw=3)
-        ax.annotate("forward closure", (0, rc), color=MUTED, fontsize=8, ha="left", va="bottom")
-        ax.annotate("throat", (xs[2], rt), color=MUTED, fontsize=8, ha="center", va="bottom")
-        ax.annotate("exit", (xs[3], re), color=MUTED, fontsize=8, ha="right", va="bottom")
+        ax.annotate("forward closure", (0, rc), color=theme.TEXT_DIM, fontsize=8, ha="left", va="bottom")
+        ax.annotate("throat", (xs[2], rt), color=theme.TEXT_DIM, fontsize=8, ha="center", va="bottom")
+        ax.annotate("exit", (xs[3], re), color=theme.TEXT_DIM, fontsize=8, ha="right", va="bottom")
         ax.set_aspect("equal", adjustable="datalim")
         c.figure.tight_layout(); c.canvas.draw()
 
@@ -557,8 +556,8 @@ class CustomMotorDialog(QDialog):
         if not s:
             return
         c = self.canvas_pie; c.clear(); ax = c.ax
-        ax.set_facecolor(BG)
-        ax.set_title("Mass Breakdown", color=ACCENT, fontsize=12, fontweight="bold")
+        ax.set_facecolor(theme.BG)
+        ax.set_title("Mass Breakdown", color=theme.ACCENT, fontsize=12, fontweight="bold")
         inert = max(s["dry_mass"], 1e-6)
         case = 0.55 * inert; nozzle = 0.25 * inert; struct = 0.20 * inert
         vals = [s["prop_mass"], case, nozzle, struct]
@@ -568,7 +567,7 @@ class CustomMotorDialog(QDialog):
                                      zip(vals, labels, colors) if v > 1e-6])
         ax.pie(vals, labels=labels, colors=colors, autopct="%1.1f%%",
                textprops={"color": theme.TEXT_BRIGHT, "fontsize": 9})
-        ax.text(0, -1.35, f"Wet mass {s['wet_mass']:.2f} kg", ha="center", color=MUTED, fontsize=9)
+        ax.text(0, -1.35, f"Wet mass {s['wet_mass']:.2f} kg", ha="center", color=theme.TEXT_DIM, fontsize=9)
         c.figure.tight_layout(); c.canvas.draw()
 
     def _draw_sensitivity(self):
@@ -600,12 +599,12 @@ class CustomMotorDialog(QDialog):
             highs.append((max(vals) - base) / base * 100.0)
         y = range(len(rows))
         ax.barh(list(y), [h - l for h, l in zip(highs, lows)], left=lows,
-                color=ACCENT, alpha=0.7, height=0.5)
+                color=theme.ACCENT, alpha=0.7, height=0.5)
         ax.axvline(0, color=theme.ERR, lw=1, ls="--")
         ax.set_yticks(list(y)); ax.set_yticklabels(rows, color=theme.TEXT)
         for i, (l, h) in enumerate(zip(lows, highs)):
-            ax.text(h, i, f" {h:+.0f}%", va="center", color=MUTED, fontsize=8)
-            ax.text(l, i, f"{l:+.0f}% ", va="center", ha="right", color=MUTED, fontsize=8)
+            ax.text(h, i, f" {h:+.0f}%", va="center", color=theme.TEXT_DIM, fontsize=8)
+            ax.text(l, i, f"{l:+.0f}% ", va="center", ha="right", color=theme.TEXT_DIM, fontsize=8)
         c.figure.tight_layout(); c.canvas.draw()
 
     # ── export / apply ───────────────────────────────────────────────────────

@@ -144,7 +144,7 @@ class DeformationViewer(QWidget):
         self.plotter.add_point_labels(
             [deformed.points[tip_idx]],
             [f"Max: {self._max_defl_mm:.2f} mm  (shape ×{self._exag:.0f}, auto-fit)"],
-            font_size=11, text_color="#ffffff", point_color="#ff3b30",
+            font_size=11, text_color=theme.TEXT_BRIGHT, point_color="#ff3b30",
             point_size=8, shape_color=theme.PANEL, shape_opacity=0.7,
             always_visible=True, name="defl_label")
 

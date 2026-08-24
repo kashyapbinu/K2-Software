@@ -21,12 +21,8 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QGridLayout, QLabel,
 from PyQt6.QtCore import Qt
 
 # Shared palette (matches ui/styles.py)
-ACCENT = theme.ACCENT
-MUTED = theme.TEXT_DIM
-WARN = theme.ACCENT
-GOOD = theme.OK
-BG = theme.BG
-PANEL = theme.PANEL
+# Read through ui.theme at draw time - a module-level snapshot would freeze
+# whichever palette happened to be active when this module was imported.
 
 
 class CollapsibleBox(QWidget):
@@ -75,14 +71,15 @@ class MetricGrid(QWidget):
         for i, name in enumerate(names):
             r, c = divmod(i, 2)
             k = QLabel(name + ":")
-            k.setStyleSheet(f"color:{MUTED};")
+            k.setStyleSheet(f"color:{theme.TEXT_DIM};")
             v = QLabel("—")
-            v.setStyleSheet(f"color:{ACCENT}; font-weight:600;")
+            v.setStyleSheet(f"color:{theme.ACCENT}; font-weight:600;")
             g.addWidget(k, r, c * 2)
             g.addWidget(v, r, c * 2 + 1)
             self.labels[name] = v
 
-    def set(self, name, text, color=ACCENT):
+    def set(self, name, text, color=None):
+        color = color or theme.ACCENT
         if name in self.labels:
             self.labels[name].setText(text)
             self.labels[name].setStyleSheet(f"color:{color}; font-weight:600;")
@@ -94,7 +91,7 @@ class MplCanvas(QWidget):
     def __init__(self, parent=None, toolbar=True):
         super().__init__(parent)
         self.figure = Figure(figsize=(6, 4), dpi=100)
-        self.figure.patch.set_facecolor(BG)
+        self.figure.patch.set_facecolor(theme.BG)
         self.canvas = FigureCanvas(self.figure)
         self.ax = self.figure.add_subplot(111)
         lay = QVBoxLayout(self)
@@ -107,10 +104,10 @@ class MplCanvas(QWidget):
 
     def style_ax(self, title="", xlabel="", ylabel=""):
         ax = self.ax
-        ax.set_facecolor(PANEL)
-        ax.set_title(title, color=ACCENT, fontsize=12, fontweight="bold", pad=10)
-        ax.set_xlabel(xlabel, color=MUTED, fontsize=10)
-        ax.set_ylabel(ylabel, color=MUTED, fontsize=10)
+        ax.set_facecolor(theme.PANEL)
+        ax.set_title(title, color=theme.ACCENT, fontsize=12, fontweight="bold", pad=10)
+        ax.set_xlabel(xlabel, color=theme.TEXT_DIM, fontsize=10)
+        ax.set_ylabel(ylabel, color=theme.TEXT_DIM, fontsize=10)
         ax.tick_params(colors=theme.LINE_STRONG, labelsize=9)
         for s in ("top", "right"):
             ax.spines[s].set_visible(False)

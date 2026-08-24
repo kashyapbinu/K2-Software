@@ -660,7 +660,7 @@ class MonteCarloWorkspace(QWidget):
                     linewidth=1.5, alpha=0.8, label="Normal fit")
 
         # Mean line
-        ax.axvline(mu, color="#ffffff", linestyle="--", linewidth=1.2,
+        ax.axvline(mu, color=theme.TEXT_BRIGHT, linestyle="--", linewidth=1.2,
                    alpha=0.9, label=f"Mean: {mu:.1f} m")
 
         # ±1σ lines
@@ -800,13 +800,13 @@ class MonteCarloWorkspace(QWidget):
         uys = getattr(r, "unstable_landing_y", None)
         if uxs and uys:
             ax.scatter(uxs, uys, c=theme.ERR, s=26, marker="D",
-                       edgecolors="#ffffff", linewidths=0.5, zorder=7,
+                       edgecolors=theme.TEXT_BRIGHT, linewidths=0.5, zorder=7,
                        label=f"Unstable ({len(uxs)})")
 
         # Launch point crosshair
         ax.axhline(0, color=theme.LINE_STRONG, linewidth=0.5, alpha=0.5)
         ax.axvline(0, color=theme.LINE_STRONG, linewidth=0.5, alpha=0.5)
-        ax.plot(0, 0, "+", color="#ffffff", markersize=12, markeredgewidth=2,
+        ax.plot(0, 0, "+", color=theme.TEXT_BRIGHT, markersize=12, markeredgewidth=2,
                 zorder=5, label="Launch")
 
         ax.set_aspect("equal", adjustable="datalim")
@@ -845,7 +845,7 @@ class MonteCarloWorkspace(QWidget):
 
         mean_d = float(np.mean(dists))
         max_d = float(np.max(dists))
-        ax.axvline(mean_d, color="#ffffff", linestyle="--", linewidth=1.2,
+        ax.axvline(mean_d, color=theme.TEXT_BRIGHT, linestyle="--", linewidth=1.2,
                    alpha=0.9, label=f"Mean: {mean_d:.0f} m")
         ax.axvline(max_d, color=theme.ERR, linestyle="--", linewidth=1,
                    alpha=0.7, label=f"Max: {max_d:.0f} m")
@@ -891,7 +891,7 @@ class MonteCarloWorkspace(QWidget):
                 boxprops=dict(facecolor=color, alpha=0.4, edgecolor=color),
                 whiskerprops=dict(color=color, linewidth=1.2),
                 capprops=dict(color=color, linewidth=1.2),
-                medianprops=dict(color="#ffffff", linewidth=1.5),
+                medianprops=dict(color=theme.TEXT_BRIGHT, linewidth=1.5),
                 flierprops=dict(marker="o", markerfacecolor=color,
                                 markeredgecolor=color, markersize=3, alpha=0.5),
             )

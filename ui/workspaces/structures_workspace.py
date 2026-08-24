@@ -1539,7 +1539,7 @@ class StructuresWorkspace(QWidget):
             b.setStyleSheet(
                 f"QPushButton{{background:{comp.color};color:#0e0e10;font-weight:700;"
                 f"font-size:12px;border:none;border-radius:8px;padding:6px;}}"
-                f"QPushButton:hover{{border:2px solid #ffffff;}}")
+                f"QPushButton:hover{{border:2px solid {theme.TEXT_BRIGHT};}}")
             b.clicked.connect(lambda _=False, c=comp: self._on_fail_click(c))
             self._fail_grid.addWidget(b, i // 2, i % 2)
             self._fail_buttons[comp.name] = b

@@ -22,8 +22,7 @@ from PyQt6.QtWidgets import (QDialog, QHBoxLayout, QVBoxLayout, QFormLayout,
     QTabWidget, QSizePolicy, QCheckBox, QToolButton)
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 
-from ui.widgets.design_widgets import (CollapsibleBox, MetricGrid, MplCanvas,
-    ACCENT, MUTED, WARN, GOOD, BG, PANEL)
+from ui.widgets.design_widgets import CollapsibleBox, MetricGrid, MplCanvas
 from physics.liquid_propulsion import (LiquidEngineDesign, PropellantCombo,
     PROPELLANT_COMBOS, ENGINE_CYCLES, COOLING_METHODS, THRUST_PROFILES,
     OPT_MODES, ambient_pressure_at_altitude)
@@ -42,7 +41,7 @@ class LiquidEngineDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Liquid Engine Designer")
         self.setMinimumSize(1180, 780)
-        self.setStyleSheet(f"background-color:{theme.PANEL}; color:#ffffff;")
+        self.setStyleSheet(f"background-color:{theme.PANEL}; color:{theme.TEXT};")
         self._result = None
         self._design = None
         self._loading = True
@@ -104,7 +103,7 @@ class LiquidEngineDialog(QDialog):
         self.combo_opt.currentIndexChanged.connect(self._on_opt_changed)
         of_.addRow("Mode:", self.combo_opt)
         self.lbl_opt = QLabel("—")
-        self.lbl_opt.setStyleSheet(f"color:{GOOD};")
+        self.lbl_opt.setStyleSheet(f"color:{theme.OK};")
         of_.addRow("Optimum O/F:", self.lbl_opt)
         left.addWidget(og)
 
@@ -253,7 +252,7 @@ class LiquidEngineDialog(QDialog):
         self.warn_box = CollapsibleBox("Engineering validation")
         self.lbl_warn = QLabel("Run a design to see validation checks.")
         self.lbl_warn.setWordWrap(True)
-        self.lbl_warn.setStyleSheet(f"color:{MUTED};")
+        self.lbl_warn.setStyleSheet(f"color:{theme.TEXT_DIM};")
         self.warn_box.add_widget(self.lbl_warn)
         sv.addWidget(self.warn_box)
         sv.addStretch()
@@ -429,7 +428,7 @@ class LiquidEngineDialog(QDialog):
         self.g_perf.set("Cf (ideal)", f"{m['cf_ideal']:.3f}")
         self.g_perf.set("Cf (delivered)", f"{m['cf']:.3f}")
         self.g_perf.set("Overall efficiency", f"{m['efficiency']*100:.1f} %")
-        self.g_perf.set("Loss %", f"{loss:.1f} %", WARN if loss > 12 else ACCENT)
+        self.g_perf.set("Loss %", f"{loss:.1f} %", theme.ACCENT if loss > 12 else theme.ACCENT)
         self.g_perf.set("Mass flow", f"{m['mdot']:.2f} kg/s")
         self.g_perf.set("Ox flow", f"{m['mdot_ox']:.2f} kg/s")
         self.g_perf.set("Fuel flow", f"{m['mdot_fuel']:.2f} kg/s")
@@ -486,11 +485,11 @@ class LiquidEngineDialog(QDialog):
         w = d.warnings
         if not w:
             self.lbl_warn.setText("✓ No issues flagged — inputs within typical ranges.")
-            self.lbl_warn.setStyleSheet(f"color:{GOOD};")
+            self.lbl_warn.setStyleSheet(f"color:{theme.OK};")
             self.warn_box.toggle.setText("Engineering validation  ✓")
         else:
             self.lbl_warn.setText("⚠ " + "\n\n⚠ ".join(w))
-            self.lbl_warn.setStyleSheet(f"color:{WARN};")
+            self.lbl_warn.setStyleSheet(f"color:{theme.ACCENT};")
             self.warn_box.toggle.setText(f"Engineering validation  ⚠ {len(w)}")
 
     # ── drawing ─────────────────────────────────────────────────────────────
@@ -559,14 +558,14 @@ class LiquidEngineDialog(QDialog):
         x_inj, x_cyl, x_thr, x_exit = 0.0, lc, lc + lconv, lc + lconv + ln
         xs = [x_inj, x_cyl, x_thr, x_exit]
         ys = [rc, rc, rt, re]
-        ax.plot(xs, ys, color=ACCENT, lw=2)
-        ax.plot(xs, [-v for v in ys], color=ACCENT, lw=2)
-        ax.fill_between(xs, ys, [-v for v in ys], color=ACCENT, alpha=0.10)
-        ax.plot([x_inj, x_exit], [0, 0], color=MUTED, ls="--", lw=0.8)
+        ax.plot(xs, ys, color=theme.ACCENT, lw=2)
+        ax.plot(xs, [-v for v in ys], color=theme.ACCENT, lw=2)
+        ax.fill_between(xs, ys, [-v for v in ys], color=theme.ACCENT, alpha=0.10)
+        ax.plot([x_inj, x_exit], [0, 0], color=theme.TEXT_DIM, ls="--", lw=0.8)
         ax.plot([x_inj, x_inj], [-rc, rc], color=theme.ERR, lw=3)  # injector face
-        ax.annotate("injector", (x_inj, rc), color=MUTED, fontsize=8, ha="left", va="bottom")
-        ax.annotate("throat", (x_thr, rt), color=MUTED, fontsize=8, ha="center", va="bottom")
-        ax.annotate("exit", (x_exit, re), color=MUTED, fontsize=8, ha="right", va="bottom")
+        ax.annotate("injector", (x_inj, rc), color=theme.TEXT_DIM, fontsize=8, ha="left", va="bottom")
+        ax.annotate("throat", (x_thr, rt), color=theme.TEXT_DIM, fontsize=8, ha="center", va="bottom")
+        ax.annotate("exit", (x_exit, re), color=theme.TEXT_DIM, fontsize=8, ha="right", va="bottom")
         ax.set_aspect("equal", adjustable="datalim")
         c.figure.tight_layout()
         c.canvas.draw()
@@ -578,11 +577,11 @@ class LiquidEngineDialog(QDialog):
         c = self.canvas_flow
         c.clear()
         ax = c.ax
-        ax.set_facecolor(PANEL)
+        ax.set_facecolor(theme.PANEL)
         ax.set_xlim(0, 10)
         ax.set_ylim(0, 6)
         ax.axis("off")
-        ax.set_title("Engine Flow Schematic", color=ACCENT, fontsize=12, fontweight="bold")
+        ax.set_title("Engine Flow Schematic", color=theme.ACCENT, fontsize=12, fontweight="bold")
 
         def box(x, y, w, h, text, color):
             ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.05",
@@ -622,8 +621,8 @@ class LiquidEngineDialog(QDialog):
         c = self.canvas_pie
         c.clear()
         ax = c.ax
-        ax.set_facecolor(BG)
-        ax.set_title("Mass Breakdown", color=ACCENT, fontsize=12, fontweight="bold")
+        ax.set_facecolor(theme.BG)
+        ax.set_title("Mass Breakdown", color=theme.ACCENT, fontsize=12, fontweight="bold")
         dry = max(d.dry_mass, 1e-6)
         eng = 0.30 * dry
         tank = 0.50 * dry
@@ -636,7 +635,7 @@ class LiquidEngineDialog(QDialog):
         ax.pie(vals, labels=labels, colors=colors, autopct="%1.1f%%",
                textprops={"color": theme.TEXT_BRIGHT, "fontsize": 9})
         ax.text(0, -1.35, f"Wet mass {d.wet_mass:.1f} kg", ha="center",
-                color=MUTED, fontsize=9)
+                color=theme.TEXT_DIM, fontsize=9)
         c.figure.tight_layout()
         c.canvas.draw()
 
@@ -663,13 +662,13 @@ class LiquidEngineDialog(QDialog):
             highs.append((max(isp) - base) / base * 100.0)
         y = range(len(rows))
         ax.barh(list(y), [h - l for h, l in zip(highs, lows)],
-                left=lows, color=ACCENT, alpha=0.7, height=0.5)
+                left=lows, color=theme.ACCENT, alpha=0.7, height=0.5)
         ax.axvline(0, color=theme.ERR, lw=1, ls="--")
         ax.set_yticks(list(y))
         ax.set_yticklabels(rows, color=theme.TEXT)
         for i, (l, h) in enumerate(zip(lows, highs)):
-            ax.text(h, i, f" {h:+.1f}%", va="center", color=MUTED, fontsize=8)
-            ax.text(l, i, f"{l:+.1f}% ", va="center", ha="right", color=MUTED, fontsize=8)
+            ax.text(h, i, f" {h:+.1f}%", va="center", color=theme.TEXT_DIM, fontsize=8)
+            ax.text(l, i, f"{l:+.1f}% ", va="center", ha="right", color=theme.TEXT_DIM, fontsize=8)
         c.figure.tight_layout()
         c.canvas.draw()
 
