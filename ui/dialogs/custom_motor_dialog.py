@@ -447,7 +447,7 @@ class CustomMotorDialog(QDialog):
         self.g_perf.set("Cf (SL)", f"{s['cf_sl']:.3f}")
         self.g_perf.set("Cf (vac)", f"{s['cf_vac']:.3f}")
         self.g_perf.set("Overall efficiency", f"{s['efficiency']*100:.1f} %")
-        self.g_perf.set("Loss %", f"{loss:.1f} %", theme.ACCENT if loss > 12 else theme.ACCENT)
+        self.g_perf.set("Loss %", f"{loss:.1f} %", theme.WARN if loss > 12 else theme.ACCENT)
         self.g_perf.set("Ideal thrust", f"{s['thrust_ideal']:.0f} N")
         self.g_perf.set("Delivered thrust", f"{s['thrust_delivered']:.0f} N")
         self.g_perf.set("Avg thrust", f"{s['avg_thrust']:.0f} N")
@@ -470,7 +470,7 @@ class CustomMotorDialog(QDialog):
             self.warn_box.toggle.setText("Engineering validation  ✓")
         else:
             self.lbl_warn.setText("⚠ " + "\n\n⚠ ".join(w))
-            self.lbl_warn.setStyleSheet(f"color:{theme.ACCENT};")
+            self.lbl_warn.setStyleSheet(f"color:{theme.WARN};")
             self.warn_box.toggle.setText(f"Engineering validation  ⚠ {len(w)}")
 
     @staticmethod

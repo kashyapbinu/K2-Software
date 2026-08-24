@@ -428,7 +428,7 @@ class LiquidEngineDialog(QDialog):
         self.g_perf.set("Cf (ideal)", f"{m['cf_ideal']:.3f}")
         self.g_perf.set("Cf (delivered)", f"{m['cf']:.3f}")
         self.g_perf.set("Overall efficiency", f"{m['efficiency']*100:.1f} %")
-        self.g_perf.set("Loss %", f"{loss:.1f} %", theme.ACCENT if loss > 12 else theme.ACCENT)
+        self.g_perf.set("Loss %", f"{loss:.1f} %", theme.WARN if loss > 12 else theme.ACCENT)
         self.g_perf.set("Mass flow", f"{m['mdot']:.2f} kg/s")
         self.g_perf.set("Ox flow", f"{m['mdot_ox']:.2f} kg/s")
         self.g_perf.set("Fuel flow", f"{m['mdot_fuel']:.2f} kg/s")
@@ -489,7 +489,7 @@ class LiquidEngineDialog(QDialog):
             self.warn_box.toggle.setText("Engineering validation  ✓")
         else:
             self.lbl_warn.setText("⚠ " + "\n\n⚠ ".join(w))
-            self.lbl_warn.setStyleSheet(f"color:{theme.ACCENT};")
+            self.lbl_warn.setStyleSheet(f"color:{theme.WARN};")
             self.warn_box.toggle.setText(f"Engineering validation  ⚠ {len(w)}")
 
     # ── drawing ─────────────────────────────────────────────────────────────
