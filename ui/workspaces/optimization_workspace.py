@@ -344,6 +344,7 @@ class OptimizationWorkspace(QWidget):
         lay.addWidget(self._build_mode_group())
         lay.addWidget(self._build_mc_group())
         lay.addWidget(self._build_surrogate_group())
+        self._sync_surrogate_availability()
         lay.addWidget(self._build_variables_group())
         lay.addWidget(self._build_objectives_group())
         lay.addWidget(self._build_constraints_group())
@@ -366,6 +367,8 @@ class OptimizationWorkspace(QWidget):
             "Differential Evolution", "Particle Swarm",
         ])
         f.addRow("Method:", self.combo_algorithm)
+        self.combo_algorithm.currentIndexChanged.connect(
+            lambda _: self._sync_surrogate_availability())
 
         self.spin_pop = QSpinBox()
         self.spin_pop.setRange(10, 500)
@@ -475,13 +478,22 @@ class OptimizationWorkspace(QWidget):
 
         self.chk_surrogate = QCheckBox("Enable Surrogate Acceleration")
         self.chk_surrogate.setStyleSheet(_CHK)
-        # NOTE: surrogate acceleration is not yet wired into the optimization
-        # engine (config flag is read but no algorithm consumes it). Disabled
-        # to avoid implying a speedup that does not happen. Re-enable once
-        # _run_* algorithms use core.surrogate_model.
-        self.chk_surrogate.setEnabled(False)
         self.chk_surrogate.setChecked(False)
-        self.chk_surrogate.setToolTip("Not yet implemented — full simulation is always used.")
+        self.chk_surrogate.setToolTip(
+            "Train a surrogate on designs the simulator has already scored, and "
+            "use it to pre-screen each generation's offspring.\n\n"
+            "Every fitness in the results is still a real simulation — the "
+            "surrogate only picks which designs get simulated, so a poor "
+            "surrogate can waste a run but cannot corrupt the reported optimum. "
+            "Simulation count per generation is unchanged.\n\n"
+            "Experimental, off by default. Benchmarked over 3 seeds at 1680 "
+            "simulations per run it showed no reliable gain — it won twice and "
+            "lost badly once, at a cross-validated R² of about 0.55. Watch the "
+            "Surrogate CV R² in the results panel: below ~0.5 the screening is "
+            "mostly noise.\n\n"
+            "Supported by Genetic Algorithm and NSGA-II. Ignored by "
+            "Differential Evolution and PSO, whose update rules pair each trial "
+            "one-to-one with its parent.")
         vl.addWidget(self.chk_surrogate)
 
         f = QFormLayout()
@@ -494,21 +506,43 @@ class OptimizationWorkspace(QWidget):
         self.combo_surrogate.setEnabled(False)
         f.addRow("Model:", self.combo_surrogate)
 
-        self.spin_surrogate_samples = QSpinBox()
-        self.spin_surrogate_samples.setRange(50, 2000)
-        self.spin_surrogate_samples.setValue(200)
-        self.spin_surrogate_samples.setEnabled(False)
-        f.addRow("Initial Samples:", self.spin_surrogate_samples)
+        self.spin_surrogate_pool = QSpinBox()
+        self.spin_surrogate_pool.setRange(2, 10)
+        self.spin_surrogate_pool.setValue(4)
+        self.spin_surrogate_pool.setPrefix("x ")
+        self.spin_surrogate_pool.setEnabled(False)
+        self.spin_surrogate_pool.setToolTip(
+            "Offspring proposed per slot actually simulated. Higher means the "
+            "surrogate chooses from a wider pool — free in simulation time, but "
+            "it leans harder on the surrogate being right.")
+        f.addRow("Screening Pool:", self.spin_surrogate_pool)
 
-        self.chk_active_learning = QCheckBox("Active Learning")
-        self.chk_active_learning.setStyleSheet(_CHK)
-        self.chk_active_learning.setChecked(True)
-        self.chk_active_learning.setEnabled(False)
-        f.addRow("", self.chk_active_learning)
+        self.chk_surrogate.toggled.connect(self.combo_surrogate.setEnabled)
+        self.chk_surrogate.toggled.connect(self.spin_surrogate_pool.setEnabled)
 
         vl.addLayout(f)
         g.setLayout(vl)
+        self._surrogate_group = g
         return g
+
+    def _sync_surrogate_availability(self):
+        """Grey out surrogate acceleration for the algorithms that ignore it.
+
+        DE and PSO derive each trial vector from one specific parent, so there
+        is no pool of interchangeable offspring to screen — the config flag
+        would be read and silently do nothing.
+        """
+        supported = self.combo_algorithm.currentIndex() in (0, 1)   # GA, NSGA-II
+        g = getattr(self, "_surrogate_group", None)
+        if g is None:
+            return
+        g.setEnabled(supported)
+        if not supported:
+            self.chk_surrogate.setChecked(False)
+            g.setToolTip("Surrogate screening applies to Genetic Algorithm and "
+                         "NSGA-II only.")
+        else:
+            g.setToolTip("")
 
     # ── Design Variables ─────────────────────────────────────────────────────
 
@@ -1158,7 +1192,11 @@ class OptimizationWorkspace(QWidget):
         self.lbl_stat_feasible = _vl(); fs.addRow("Feasible:", self.lbl_stat_feasible)
         self.lbl_stat_best_gen = _vl(); fs.addRow("Best Generation:", self.lbl_stat_best_gen)
         self.lbl_stat_hv = _vl(); fs.addRow("Hypervolume:", self.lbl_stat_hv)
-        self.lbl_stat_surrogate = _vl(); fs.addRow("Surrogate R²:", self.lbl_stat_surrogate)
+        self.lbl_stat_surrogate = _vl(); fs.addRow("Surrogate CV R²:", self.lbl_stat_surrogate)
+        self.lbl_stat_surrogate.setToolTip(
+            "Cross-validated R² of the screening surrogate on held-out designs. "
+            "Negative means it predicts worse than the mean fitness — screening "
+            "added nothing that run.")
         gs.setLayout(fs)
         lay.addWidget(gs)
 
@@ -1322,7 +1360,7 @@ class OptimizationWorkspace(QWidget):
             validation_mc_sims=self.spin_mc_val.value(),
             use_surrogate=self.chk_surrogate.isChecked(),
             surrogate_type=surr_map.get(self.combo_surrogate.currentIndex(), "random_forest"),
-            surrogate_initial_samples=self.spin_surrogate_samples.value(),
+            surrogate_pool_factor=self.spin_surrogate_pool.value(),
             target_apogee=self.spin_target_apogee.value(),
             mission_mode=(mode_val == "mission"),
             robust_mode=(mode_val == "robust"),
@@ -2596,9 +2634,16 @@ class OptimizationWorkspace(QWidget):
         hv = self._hypervolume(result.pareto_front, active) if len(active) >= 2 else None
         self.lbl_stat_hv.setText(f"{hv:.4f}" if hv is not None else "N/A (single-obj)")
 
-        if result.surrogate_accuracy:
-            r2 = result.surrogate_accuracy.get("r2", 0)
-            self.lbl_stat_surrogate.setText(f"{r2:.3f}")
+        acc = result.surrogate_accuracy
+        if acc:
+            r2 = acc.get("r2", 0.0)
+            n = acc.get("n_samples", 0)
+            if acc.get("cv_used"):
+                self.lbl_stat_surrogate.setText(f"{r2:.3f}  (n={n})")
+            else:
+                # Too few designs to hold any out — say so rather than show a
+                # training-set R² that would read as near-perfect.
+                self.lbl_stat_surrogate.setText(f"{r2:.3f}  (no CV, n={n})")
         else:
             self.lbl_stat_surrogate.setText("N/A")
 

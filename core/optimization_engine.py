@@ -120,7 +120,8 @@ class OptimizationConfig:
     validation_mc_sims: int = 50
     use_surrogate: bool = False
     surrogate_type: str = "random_forest"
-    surrogate_initial_samples: int = 200
+    surrogate_initial_samples: int = 200   # standalone response-surface sampling
+    surrogate_pool_factor: int = 4         # candidates proposed per slot simulated
     target_apogee: float = 0.0
     mission_mode: bool = False
     robust_mode: bool = False
@@ -1036,6 +1037,223 @@ def _failed_candidate(variables: dict) -> CandidateDesign:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  SURROGATE  PRE-SCREENING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _encode_variables(variables: dict, enabled_dvs: list) -> np.ndarray:
+    """Numeric feature row for one candidate.
+
+    ``_dict_to_vec`` cannot be reused: it assumes every value is numeric, and a
+    discrete variable such as the motor holds a string. Those are encoded as
+    the option's index in ``discrete_options``.
+    """
+    row = np.zeros(len(enabled_dvs), dtype=float)
+    for j, dv in enumerate(enabled_dvs):
+        v = variables.get(dv.name, dv.current_val)
+        if dv.var_type == "discrete" and dv.discrete_options:
+            try:
+                row[j] = float(dv.discrete_options.index(v))
+            except ValueError:
+                row[j] = 0.0
+        else:
+            try:
+                row[j] = float(v)
+            except (TypeError, ValueError):
+                row[j] = 0.0
+    return row
+
+
+class _SurrogateScreener:
+    """Surrogate-assisted pre-screening of offspring.
+
+    Learns fitness as a function of the design vector from candidates the
+    simulator has *already* scored, so building it costs no extra simulations.
+    Each generation the algorithm proposes ``surrogate_pool_factor`` times more
+    offspring than it can afford to simulate; the surrogate predicts their
+    fitness and only the most promising batch is handed to the simulator.
+
+    Every fitness that reaches the population is still a real simulation
+    result — the surrogate only chooses *which* designs get simulated, it never
+    supplies a fitness value. A badly fitted surrogate can therefore waste a
+    generation, but it cannot corrupt the reported optimum.
+
+    Note this does not cut the number of simulations per generation; it raises
+    the quality of the designs those simulations are spent on, so the run
+    should reach a given fitness in fewer generations.
+    """
+
+    POOL_CAP = 2000          # hard ceiling on predictions per generation
+    EXPLORE_FRACTION = 0.25  # share of each batch kept unscreened, for diversity
+    MAX_TRAIN = 4000         # cap training rows so refit cost stays bounded
+    SCORE_EVERY = 5          # generations between (relatively costly) CV scores
+
+    def __init__(self, config: OptimizationConfig, enabled_dvs: list,
+                 rng: np.random.Generator):
+        from core.surrogate_model import create_surrogate
+
+        self._dvs = enabled_dvs
+        self._rng = rng
+        self._pool_factor = max(1, int(getattr(config, "surrogate_pool_factor", 4) or 4))
+        self._model = create_surrogate(config.surrogate_type)
+        self._X: list = []
+        self._y: list = []
+        self._dirty = False
+        self._ready = False
+        self._score: dict = None
+        self._fits = 0
+        self._screened = 0
+        # Enough rows to have any hope of a signal: a few per design variable.
+        self._min_train = max(20, 4 * len(enabled_dvs))
+
+    # ── data ────────────────────────────────────────────────────────────────
+
+    def observe(self, candidates: list):
+        """Record real (simulated) evaluations as training data."""
+        for cd in candidates:
+            if cd is None or not np.isfinite(cd.fitness):
+                continue
+            self._X.append(_encode_variables(cd.variables, self._dvs))
+            self._y.append(float(cd.fitness))
+        if len(self._X) > self.MAX_TRAIN:
+            self._X = self._X[-self.MAX_TRAIN:]
+            self._y = self._y[-self.MAX_TRAIN:]
+        self._dirty = True
+
+    def pool_size(self, n_keep: int) -> int:
+        """How many offspring the algorithm should propose for *n_keep* slots."""
+        if len(self._X) < self._min_train:
+            return n_keep
+        return int(min(n_keep * self._pool_factor, self.POOL_CAP))
+
+    # ── model ───────────────────────────────────────────────────────────────
+
+    def _refit(self, generation: int):
+        if not self._dirty or len(self._X) < self._min_train:
+            return
+        X = np.asarray(self._X, dtype=float)
+        y = np.asarray(self._y, dtype=float)
+        # A constant target carries no gradient to screen on, and several
+        # models fail outright on it.
+        if float(np.std(y)) <= 0.0:
+            self._ready = False
+            self._dirty = False
+            return
+        try:
+            self._model.fit(X, y)
+            self._ready = True
+            self._fits += 1
+            self._dirty = False
+        except Exception as e:
+            logger.warning(f"Surrogate refit failed, screening disabled this "
+                           f"generation: {e}")
+            self._ready = False
+            self._dirty = False
+            return
+        if generation % self.SCORE_EVERY == 0:
+            self._rescore()
+
+    def _rescore(self):
+        try:
+            self._score = self._model.score()
+            logger.info(
+                f"Surrogate ({type(self._model).__name__}): CV R²="
+                f"{self._score['r2']:.3f} train R²={self._score['r2_train']:.3f} "
+                f"n={self._score['n_samples']}")
+        except Exception as e:
+            logger.debug(f"Surrogate scoring failed: {e}")
+
+    # ── screening ───────────────────────────────────────────────────────────
+
+    def screen(self, child_dicts: list, n_keep: int, generation: int = 0) -> list:
+        """Cut a proposed pool down to the *n_keep* designs worth simulating."""
+        self._refit(generation)
+        if not self._ready or len(child_dicts) <= n_keep:
+            return child_dicts[:n_keep]
+
+        try:
+            X = np.asarray([_encode_variables(d, self._dvs) for d in child_dicts],
+                           dtype=float)
+            pred = np.asarray(self._model.predict(X), dtype=float)
+        except Exception as e:
+            logger.warning(f"Surrogate prediction failed, taking pool head: {e}")
+            return child_dicts[:n_keep]
+
+        pred = np.where(np.isfinite(pred), pred, -np.inf)
+        order = np.argsort(pred)[::-1]
+
+        # Keep a random slice as well as the predicted best. Trusting the
+        # ranking completely would collapse diversity whenever the surrogate is
+        # confidently wrong — and on early generations it usually is.
+        n_explore = min(int(round(n_keep * self.EXPLORE_FRACTION)),
+                        len(child_dicts) - n_keep)
+        n_exploit = n_keep - n_explore
+
+        chosen = list(order[:n_exploit])
+        rest = order[n_exploit:]
+        if n_explore > 0 and len(rest) > 0:
+            chosen += list(self._rng.choice(rest, size=min(n_explore, len(rest)),
+                                            replace=False))
+        self._screened += 1
+        return [child_dicts[i] for i in chosen[:n_keep]]
+
+    # ── reporting ───────────────────────────────────────────────────────────
+
+    def final_score(self) -> Optional[dict]:
+        """Cross-validated accuracy for the result panel, or None if unused."""
+        if self._dirty and len(self._X) >= self._min_train:
+            try:
+                self._model.fit(np.asarray(self._X, dtype=float),
+                                np.asarray(self._y, dtype=float))
+                self._ready = True
+                self._dirty = False
+            except Exception as e:
+                logger.debug(f"Final surrogate fit failed: {e}")
+        if not self._ready:
+            return None
+        self._rescore()
+        if self._score is None:
+            return None
+        out = dict(self._score)
+        out.update({"model": type(self._model).__name__,
+                    "generations_screened": self._screened,
+                    "refits": self._fits})
+        return out
+
+
+class _NullScreener:
+    """No-op stand-in used when surrogate acceleration is off."""
+
+    def observe(self, candidates: list):
+        pass
+
+    def pool_size(self, n_keep: int) -> int:
+        return n_keep
+
+    def screen(self, child_dicts: list, n_keep: int, generation: int = 0) -> list:
+        return child_dicts[:n_keep]
+
+    def final_score(self):
+        return None
+
+
+def _make_screener(config: OptimizationConfig, enabled_dvs: list,
+                   rng: np.random.Generator):
+    """Build a screener for this run, falling back to the no-op on any problem."""
+    if not getattr(config, "use_surrogate", False) or not enabled_dvs:
+        return _NullScreener()
+    try:
+        s = _SurrogateScreener(config, enabled_dvs, rng)
+        logger.info(f"Surrogate screening on: {config.surrogate_type}, "
+                    f"pool ×{s._pool_factor}, min train {s._min_train}")
+        return s
+    except Exception as e:
+        # sklearn/scipy missing, or an unknown model name — the run must still
+        # go ahead, just without acceleration.
+        logger.warning(f"Surrogate unavailable, running without screening: {e}")
+        return _NullScreener()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  GENETIC OPERATORS  (pure, no Qt)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1357,6 +1575,7 @@ def _run_genetic_algorithm(config: OptimizationConfig,
     n_elite = max(2, pop_size // 10)
     total_evals = 0
     estimated_evals = max(1, config.mc_sims_per_candidate * pop_size * (config.max_generations + 1))
+    screener = _make_screener(config, dvs, rng)
     executor = _make_executor(config)
     try:
         # Initialise population — build all candidates, evaluate as one batch
@@ -1385,6 +1604,7 @@ def _run_genetic_algorithm(config: OptimizationConfig,
                                     cancel_flag=cancel_flag)
         population = [c for c in population if c is not None]
         total_evals += config.mc_sims_per_candidate * len(population)
+        screener.observe(population)
 
         if cancel_flag and cancel_flag[0]:
             return OptimizationResult(
@@ -1392,6 +1612,7 @@ def _run_genetic_algorithm(config: OptimizationConfig,
                 total_evaluations=total_evals,
                 elapsed_time=time.time() - t0,
                 algorithm_used="ga",
+                surrogate_accuracy=screener.final_score(),
             )
 
         gen_history = []
@@ -1427,9 +1648,14 @@ def _run_genetic_algorithm(config: OptimizationConfig,
             # Elitism — carry top n_elite unchanged
             new_pop = list(population[:n_elite])
 
-            # Build all offspring var-dicts first (serial, cheap), then eval batch
+            # Build all offspring var-dicts first (serial, cheap), then eval batch.
+            # With surrogate screening on we build a larger pool and keep only
+            # the most promising n_children of it — breeding is cheap, the
+            # simulation that follows is not.
+            n_children = pop_size - n_elite
+            n_pool = screener.pool_size(n_children)
             child_dicts = []
-            while len(child_dicts) < pop_size - n_elite:
+            while len(child_dicts) < n_pool:
                 p1 = _tournament_select(population, 3, rng)
                 p2 = _tournament_select(population, 3, rng)
 
@@ -1449,9 +1675,10 @@ def _run_genetic_algorithm(config: OptimizationConfig,
                 c1_vars = _repair_individual(c1_vars, config.design_variables, base_config)
                 c2_vars = _repair_individual(c2_vars, config.design_variables, base_config)
                 child_dicts.append(c1_vars)
-                if len(child_dicts) < pop_size - n_elite:
+                if len(child_dicts) < n_pool:
                     child_dicts.append(c2_vars)
 
+            child_dicts = screener.screen(child_dicts, n_children, generation=gen)
             child_seeds = [total_evals + k for k in range(len(child_dicts))]
 
             done = [len(new_pop)]
@@ -1474,6 +1701,7 @@ def _run_genetic_algorithm(config: OptimizationConfig,
                                       cancel_flag=cancel_flag)
             children = [c for c in children if c is not None]
             total_evals += config.mc_sims_per_candidate * len(children)
+            screener.observe(children)
             new_pop.extend(children)
             population = new_pop
 
@@ -1488,6 +1716,7 @@ def _run_genetic_algorithm(config: OptimizationConfig,
             total_evaluations=total_evals,
             elapsed_time=time.time() - t0,
             algorithm_used="ga",
+            surrogate_accuracy=screener.final_score(),
         )
     finally:
         if executor is not None:
@@ -1513,6 +1742,11 @@ def _run_nsga2(config: OptimizationConfig,
     else:
         sort_objs = config.objectives
 
+    # Screening ranks on the scalar fitness, not the Pareto ordering — it only
+    # decides which offspring are worth simulating, and the non-dominated sort
+    # that follows still runs on real objective values. The unscreened
+    # exploration slice is what keeps the front from collapsing.
+    screener = _make_screener(config, dvs, rng)
     executor = _make_executor(config)
     try:
         # Initialise — batch-evaluate the random population
@@ -1523,6 +1757,7 @@ def _run_nsga2(config: OptimizationConfig,
                                     init_seeds, cancel_flag=cancel_flag)
         population = [c for c in population if c is not None]
         total_evals += config.mc_sims_per_candidate * len(population)
+        screener.observe(population)
 
         gen_history = []
 
@@ -1564,8 +1799,9 @@ def _run_nsga2(config: OptimizationConfig,
                 callback(gen, config.max_generations, gen_data["best_fitness"], gen_data)
 
             # Build all offspring var-dicts (serial), then evaluate as one batch
+            n_pool = screener.pool_size(pop_size)
             child_dicts = []
-            while len(child_dicts) < pop_size:
+            while len(child_dicts) < n_pool:
                 # Binary tournament (rank, then crowding)
                 i1, i2 = rng.choice(len(population), 2, replace=False)
                 p1 = population[i1] if (population[i1].rank < population[i2].rank or
@@ -1590,11 +1826,13 @@ def _run_nsga2(config: OptimizationConfig,
                 c1_vars = _repair_individual(c1_vars, config.design_variables, base_config)
                 child_dicts.append(c1_vars)
 
+            child_dicts = screener.screen(child_dicts, pop_size, generation=gen)
             child_seeds = [total_evals + k for k in range(len(child_dicts))]
             offspring = _parallel_eval(executor, base_config, child_dicts, config,
                                        child_seeds, cancel_flag=cancel_flag)
             offspring = [c for c in offspring if c is not None]
             total_evals += config.mc_sims_per_candidate * len(offspring)
+            screener.observe(offspring)
 
             # Combine parent + offspring, select best pop_size
             combined = population + offspring
@@ -1634,6 +1872,7 @@ def _run_nsga2(config: OptimizationConfig,
             total_evaluations=total_evals,
             elapsed_time=time.time() - t0,
             algorithm_used="nsga2",
+            surrogate_accuracy=screener.final_score(),
         )
     finally:
         if executor is not None:
