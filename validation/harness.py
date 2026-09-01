@@ -106,15 +106,30 @@ class Comparison:
     rel_err: float = 0.0
     note: str = ""
     one_sided: str = ""       # "" | "below" | "above" — see passes()
+    # A row that DOCUMENTS a known gap rather than asserting agreement.
+    #
+    # Some comparisons here carry deliberately wide bands (300%, 100%) because
+    # the method being measured is outside its own envelope — Barrowman's fin
+    # term against a wing spanning four body diameters, for instance. Those
+    # bands are honest and the notes explain them, but a row 63% from the
+    # reference was still counted as a PASS in the report's headline, so
+    # "18 passed - 1 failed" told a reader the suite agreed with its references
+    # 18 times when three of those rows were recording disagreement.
+    #
+    # Diagnostics are now counted and rendered separately. They still cannot
+    # fail a benchmark (that is the point of them), and they are no longer
+    # allowed to look like agreement either.
+    diagnostic: bool = False
 
     @classmethod
     def make(cls, label, k2, ref, source, units="", tol_rel=0.0,
-             tol_abs=0.0, note="", one_sided="") -> "Comparison":
+             tol_abs=0.0, note="", one_sided="", diagnostic=False) -> "Comparison":
         return cls(
             label=label, k2=float(k2), ref=float(ref), source=source,
             units=units, tol_rel=tol_rel, tol_abs=tol_abs,
             passed=passes(k2, ref, tol_rel, tol_abs, one_sided),
             rel_err=rel_error(k2, ref), note=note, one_sided=one_sided,
+            diagnostic=diagnostic,
         )
 
 
@@ -139,14 +154,29 @@ class Benchmark:
     def passed(self) -> bool:
         if self.skipped:
             return True   # a skip is not a failure; the report flags it separately
-        return all(c.passed for c in self.comparisons) and bool(self.comparisons)
+        gated = [c for c in self.comparisons if not c.diagnostic]
+        return all(c.passed for c in gated) and bool(gated)
+
+    @property
+    def gated(self) -> list:
+        """Comparisons that actually assert agreement (diagnostics excluded)."""
+        return [c for c in self.comparisons if not c.diagnostic]
+
+    @property
+    def diagnostics(self) -> list:
+        """Comparisons that document a known gap rather than asserting one."""
+        return [c for c in self.comparisons if c.diagnostic]
 
     def summary(self) -> str:
         if self.skipped:
             return f"[SKIP] {self.name}: {self.skip_reason}"
-        n_pass = sum(c.passed for c in self.comparisons)
+        gated = self.gated
+        n_pass = sum(c.passed for c in gated)
         flag = "PASS" if self.passed else "FAIL"
-        return f"[{flag}] {self.name}: {n_pass}/{len(self.comparisons)} within tolerance"
+        out = f"[{flag}] {self.name}: {n_pass}/{len(gated)} within tolerance"
+        if self.diagnostics:
+            out += f"  (+{len(self.diagnostics)} diagnostic)"
+        return out
 
     # ── persistence (so slow runs are cached for the report) ──
     def to_dict(self) -> dict:
