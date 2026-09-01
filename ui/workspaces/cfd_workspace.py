@@ -1366,7 +1366,7 @@ class CFDWorkspace(QWidget):
 
         btn_cam = QPushButton(icon("reset_view"), "Reset Camera")
         btn_cam.setFixedHeight(28)
-        btn_cam.clicked.connect(lambda: self._plotter.reset_camera())
+        btn_cam.clicked.connect(self._reset_camera)
         bl.addWidget(btn_cam)
         lay.addWidget(bar)
 
@@ -1910,14 +1910,27 @@ class CFDWorkspace(QWidget):
         except Exception as e:
             self._log(f"Export error: {e}")
 
-    def _preview(self, path: Path):
+    def _reset_camera(self):
+        """Reset Camera button. Needs its own repaint (auto_update=False)."""
         try:
+            self._plotter.reset_camera()
+            self._plotter.render()
+        except Exception:
+            pass
+
+    def _preview(self, path: Path, keep_camera: bool = False):
+        try:
+            cam = self._plotter.camera_position if keep_camera else None
             self._plotter.clear()
             mesh = pv.read(str(path))
             self._plotter.add_mesh(mesh, color="#b0b8c8", opacity=0.9,
                                    show_edges=True, edge_color=theme.LINE, line_width=0.5)
             self._plotter.add_axes()
-            self._plotter.reset_camera()
+            if keep_camera:
+                self._plotter.camera_position = cam
+            else:
+                self._plotter.reset_camera()
+            self._plotter.render()
             self._status_lbl.setText(
                 f"Geometry: {path.name}  |  {mesh.n_cells:,} triangles"
             )
@@ -2145,7 +2158,8 @@ class CFDWorkspace(QWidget):
 
         # Nothing from the last solve may outlive this click: if the new run
         # fails, stale coefficients must not sit there looking like its output.
-        self._clear_results()
+        # The geometry stays on screen — it is what this run is solving.
+        self._clear_results(keep_geometry=True)
         self._btn_run.setEnabled(False)
         self._btn_stop.setEnabled(True)
         self._set_params_locked(True)
@@ -2489,7 +2503,8 @@ class CFDWorkspace(QWidget):
             self._solver_thread.terminate()
             self._solver_thread.wait(2000)  # wait up to 2s for cleanup
             self._log("Solver stopped by user.")
-            self._clear_results("Partial run discarded — no results to show.")
+            self._clear_results("Partial run discarded — no results to show.",
+                                keep_geometry=True)
         self._btn_run.setEnabled(True)
         self._btn_stop.setEnabled(False)
         self._progress.setVisible(False)
@@ -2764,7 +2779,7 @@ class CFDWorkspace(QWidget):
 
         self._refresh_vis()
 
-    def _clear_results(self, reason: str = ""):
+    def _clear_results(self, reason: str = "", keep_geometry: bool = False):
         """Drop every artefact of the previous solve.
 
         Without this a failed or stopped run left the last successful result on
@@ -2790,10 +2805,24 @@ class CFDWorkspace(QWidget):
             if w is not None:
                 w.setEnabled(False)
         # Blank the 3D view too — a stale flow field is the most convincing
-        # wrong answer of the lot.
+        # wrong answer of the lot. The geometry is not stale though: when the
+        # caller is starting or failing a run the body is still the current
+        # body, so put it straight back rather than leaving an empty scene.
+        # Camera is preserved so the view does not jump on every Run click.
         try:
             self._plotter.clear()
             self._last_vis_idx = -1
+            # getattr: _current_stl is only bound once geometry has been
+            # exported or a CAD file loaded, and a bare attribute access here
+            # would be swallowed by the except below — taking the render with
+            # it, which is the very thing this block exists to guarantee.
+            stl = getattr(self, "_current_stl", None)
+            if keep_geometry and stl and Path(stl).is_file():
+                self._preview(stl, keep_camera=True)
+            # auto_update=False means nothing repaints on its own: without this
+            # the cleared actors stay on screen until the user clicks in the
+            # view, and the body appears to vanish on that click.
+            self._plotter.render()
         except Exception:
             pass
         if reason:
@@ -2805,7 +2834,8 @@ class CFDWorkspace(QWidget):
             if line.strip():
                 self._log(f"ERROR: {line}")
         self._clear_results(
-            "Previous results cleared — this run produced none."
+            "Previous results cleared — this run produced none.",
+            keep_geometry=True,
         )
         self._btn_run.setEnabled(True)
         self._btn_stop.setEnabled(False)
@@ -3061,6 +3091,24 @@ class CFDWorkspace(QWidget):
         self._refresh_timer.start()  # restart the 300ms countdown
 
     def _refresh_vis(self):
+        """Rebuild the 3D scene, then force one repaint.
+
+        The interactor is created with auto_update=False, so pyvistaqt never
+        starts its periodic render timer and VTK keeps presenting the last
+        drawn frame until the user happens to click in the view. Every scene
+        change therefore has to end in an explicit render(), or the picture on
+        screen belongs to the previous state. _refresh_vis_impl has a dozen
+        early returns, so the render lives here in a finally.
+        """
+        try:
+            self._refresh_vis_impl()
+        finally:
+            try:
+                self._plotter.render()
+            except Exception:
+                pass
+
+    def _refresh_vis_impl(self):
         idx = self._vis_combo.currentIndex()
         self._plotter.clear()
         # Screen-space ambient occlusion is a depth-buffer pass: it darkens
@@ -4440,10 +4488,11 @@ class CFDWorkspace(QWidget):
                 except Exception:
                     pass
             self._plotter.add_axes()
+            self._plotter.render()
         else:
             # Turn off and revert to normal view
             self._plotter.clear_plane_widgets()
-            self._refresh_vis()
+            self._refresh_vis()   # renders
 
     def reset_workspace(self):
         """Blank CFD results + plots/3D view (called on New Project)."""
@@ -4574,6 +4623,7 @@ class CFDWorkspace(QWidget):
         else:
             try:
                 self._plotter.disable_picking()
+                self._plotter.render()   # else the last picked marker lingers
             except Exception:
                 pass
             self._status_lbl.setText("Probe mode OFF")
