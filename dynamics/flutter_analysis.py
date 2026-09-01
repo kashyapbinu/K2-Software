@@ -800,9 +800,16 @@ def flutter_speed(span: float, root_chord: float, tip_chord: float,
     # Taper ratio
     lam = tip_chord / root_chord if root_chord > 0 else 0
 
-    # Thickness-to-chord ratio (use mean chord)
-    c_mean = (root_chord + tip_chord) / 2
-    tc = thickness / c_mean if c_mean > 0 else 0.01
+    # Thickness-to-chord ratio, referenced to the ROOT chord.
+    #
+    # This used the mean chord while structures/workstation.py used the root,
+    # so the Dynamics and Structures tabs reported different flutter speeds for
+    # the same fin — identical for an untapered fin, 1.54x apart at taper 0.5
+    # and 2.15x at taper 0.2, since V_f scales with (t/c)^1.5. The root is the
+    # conservative choice: it is the larger chord, so the smaller t/c, so the
+    # lower V_f. Fin flutter is sudden and destructive, so under-predicting the
+    # onset speed is the safer error.
+    tc = thickness / root_chord if root_chord > 0 else 0.01
 
     if tc <= 0 or AR <= 0:
         return float('inf')
