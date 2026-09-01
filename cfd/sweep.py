@@ -206,12 +206,37 @@ def analytic_friction_cd(
         cf = 0.455 / (math.log10(re) ** 2.58)
         return cf * (1.0 + 0.144 * mach * mach) ** -0.65
 
-    # Body of revolution: cone-slant nose + cylinder, Re over full length.
-    s_nose = math.pi * r * math.sqrt(nose_L * nose_L + r * r)
-    s_body = 2.0 * math.pi * r * body_L
-    fineness = L / (2.0 * r)
+    # ── Wetted area of the body ──────────────────────────────────────────────
+    # Integrate the REAL meridian when the geometry carries one. The previous
+    # form was a cone slant plus a cylinder:
+    #
+    #     s_nose = pi * r * sqrt(nose_L**2 + r**2)
+    #     s_body = 2 * pi * r * body_L
+    #
+    # which is exact only for a straight cone on a constant-radius tube. An
+    # ogive, a conical transition, a flare or a boattail has no representation
+    # there at all, and every one of them changes the wetted area this drag is
+    # proportional to. The mesher revolves the true profile
+    # (_revolve_profile_solid) and this is now the same shape.
+    #
+    # Frustum lateral area between consecutive stations: pi*(r0+r1)*slant.
+    prof = [(float(p[0]), float(p[1]))
+            for p in (geometry.get("profile") or []) if len(p) >= 2]
+    if len(prof) >= 2:
+        s_body_total = sum(
+            math.pi * (r0 + r1) * math.hypot(x1 - x0, r1 - r0)
+            for (x0, r0), (x1, r1) in zip(prof, prof[1:])
+        )
+        r_max = max(rr for _, rr in prof)
+    else:
+        s_body_total = (math.pi * r * math.sqrt(nose_L * nose_L + r * r)
+                        + 2.0 * math.pi * r * body_L)
+        r_max = r
+    # Hoerner's body form factor wants the body's own slenderness, so it takes
+    # the widest station rather than the nominal tube radius.
+    fineness = L / (2.0 * max(r_max, 1e-9))
     ff_body = 1.0 + 60.0 / fineness ** 3 + 0.0025 * fineness
-    cd_f = cf_turb(reynolds) * ff_body * (s_nose + s_body) / ref_area
+    cd_f = cf_turb(reynolds) * ff_body * s_body_total / ref_area
 
     # Fins: both faces of each panel, Re over the mean chord.
     n_fin = int(geometry.get("fin_count", 0))
@@ -409,31 +434,9 @@ def run_sweep_point(
             pass  # progress already streamed via callback
     result = solver.parse_results()
 
-    # Hybrid Euler polar: the inviscid solve has no skin friction, so add the
-    # analytic flat-plate build-up to the total drag. Pressure/wave drag, lift,
-    # moments and CP keep their integrated (inviscid) values untouched.
-    if cfg.euler_analytic_friction:
-        if cfg.external_cad and cfg.cad_info:
-            cd_f = analytic_friction_cd_cad(
-                cfg.cad_info, result.reynolds, result.mach,
-                result.reference_area_m2,
-            )
-        else:
-            cd_f = analytic_friction_cd(
-                cfg.geometry_dict, result.reynolds, result.mach,
-                result.reference_area_m2,
-            )
-        if cd_f is not None:
-            result.cd += cd_f
-            result.cd_friction = cd_f
-            result.force_axial = result.cd * result.dynamic_pressure * result.reference_area_m2
-            result.solver_name = "SU2 Euler + flat-plate friction"
-            logger.info(f"Analytic friction added: Cd_f={cd_f:.4f}")
-        else:
-            logger.warning(
-                "Euler+friction mode: geometry/Reynolds unavailable — "
-                "Cd is inviscid-only for this point."
-            )
+    # Hybrid Euler polar: the friction build-up is applied inside
+    # SU2Solver.parse_results now, so it reaches the single-run path as well as
+    # the sweep. Applying it here too would double-count it.
 
     logger.info(
         f"Sweep point {var}={value:g} → Cd={result.cd:.4f} Cl={result.cl:.4f} "

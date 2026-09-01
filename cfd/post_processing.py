@@ -161,9 +161,26 @@ def extract_cp_distribution(
     n_stations: int = 100,
     freestream_pressure: float = None,
     dynamic_pressure: float = None,
+    side: str = "mean",
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Extract circumferentially-averaged Cp distribution along the rocket body.
+    Circumferentially-averaged Cp along the body axis, weighted by cell area.
+
+    Three things were wrong with the previous version and each of them changed
+    the curve rather than the noise on it:
+
+    * It averaged POINTS (``np.mean(cp_vals[mask])``). Wall mesh density follows
+      the geometry, not the flow: on a measured surface mesh the cell areas span
+      3.3e4 : 1 and the edge ratio is 183 : 1, with the slivers packed onto the
+      nose tip and the fin edges. One sample per point therefore describes the
+      tip, not the airframe -- the same bias :func:`field_percentiles` exists to
+      remove for the colour bars (point 95th percentile of Cp 0.936, area
+      weighted 0.046). Cells are now weighted by their own area.
+    * It averaged over EVERY point at a station, fins included, so at the fin
+      station the "body Cp" was a blend of body skin and fin panel.
+    * At incidence it averaged the windward and leeward sides together, which
+      is where the loading is -- the two sides cancel and the curve reports a
+      body carrying no normal force. ``side`` now selects one of them.
 
     Parameters
     ----------
@@ -172,10 +189,15 @@ def extract_cp_distribution(
     n_stations : int - number of sampling stations along the body
     freestream_pressure : float - P_inf for computing Cp from Pressure
     dynamic_pressure : float - q_inf for computing Cp from Pressure
+    side : "mean" | "windward" | "leeward"
+        Which half of the circumference to average. AoA rotates the freestream
+        in the x-z plane (see the SU2 config), so the split is by the sign of z:
+        windward is z < 0, the side the flow runs into at positive alpha.
 
     Returns
     -------
-    (x_normalized, cp_values) : normalized position [0,1] and Cp values
+    (x_normalized, cp_values) : normalized position [0,1] and Cp values.
+    Empty arrays when there is no usable Cp field.
     """
     if surface_mesh is None:
         return np.array([]), np.array([])
@@ -198,31 +220,75 @@ def extract_cp_distribution(
         logger.warning("No Cp data available for distribution extraction.")
         return np.array([]), np.array([])
 
-    pts = surface_mesh.points
-    cp_vals = surface_mesh[cp_name]
-
-    # Determine axis index
     ax_idx = {"x": 0, "y": 1, "z": 2}.get(axis.lower(), 0)
 
-    x_coords = pts[:, ax_idx]
+    # Work on CELLS, so every sample carries an area. Falls back to the old
+    # point average only if the mesh cannot produce cell data or areas.
+    try:
+        surf = surface_mesh.extract_surface() \
+            if hasattr(surface_mesh, "extract_surface") else surface_mesh
+        cell = surf.point_data_to_cell_data() \
+            if cp_name in surf.point_data else surf
+        cp_vals = np.asarray(cell.cell_data[cp_name], dtype=float)
+        centers = np.asarray(surf.cell_centers().points, dtype=float)
+        weights = np.abs(np.asarray(
+            surf.compute_cell_sizes(length=False, area=True,
+                                    volume=False)["Area"], dtype=float))
+        if (weights.shape != cp_vals.shape or centers.shape[0] != cp_vals.shape[0]
+                or not np.any(weights > 0)):
+            raise ValueError("cell areas unusable")
+    except Exception as exc:                                  # noqa: BLE001
+        logger.debug(f"Cp distribution fell back to point sampling: {exc}")
+        centers = np.asarray(surface_mesh.points, dtype=float)
+        cp_vals = np.asarray(surface_mesh[cp_name], dtype=float).ravel()
+        weights = np.ones_like(cp_vals)
+
+    ok = np.isfinite(cp_vals) & np.isfinite(weights) & (weights > 0)
+    centers, cp_vals, weights = centers[ok], cp_vals[ok], weights[ok]
+    if cp_vals.size == 0:
+        return np.array([]), np.array([])
+
+    # Keep the body, drop the fins. The body is a surface of revolution about
+    # the flow axis, so its cells sit at a radius that varies smoothly with x
+    # while a fin panel reaches far outside it at one station. Anything beyond
+    # the 75th percentile radius AT ITS OWN STATION is treated as a fin.
+    lat = np.delete(np.arange(3), ax_idx)
+    radius = np.hypot(centers[:, lat[0]], centers[:, lat[1]])
+
+    if side in ("windward", "leeward"):
+        # AoA tilts the freestream in x-z, so z separates the two sides.
+        z = centers[:, 2]
+        sel = z < 0 if side == "windward" else z > 0
+        if sel.sum() >= 8:
+            centers, cp_vals, weights, radius = (
+                centers[sel], cp_vals[sel], weights[sel], radius[sel])
+        else:
+            logger.debug(f"Cp distribution: too few cells on the {side} side; "
+                         f"reporting the full circumference instead.")
+
+    x_coords = centers[:, ax_idx]
     x_min, x_max = float(x_coords.min()), float(x_coords.max())
     x_range = x_max - x_min
     if x_range < 1e-6:
         return np.array([]), np.array([])
 
-    # Bin and average Cp at each station
     stations = np.linspace(x_min, x_max, n_stations + 1)
-    x_norm = np.zeros(n_stations)
-    cp_avg = np.zeros(n_stations)
+    idx = np.clip(np.searchsorted(stations, x_coords, side="right") - 1,
+                  0, n_stations - 1)
 
+    x_norm = ((stations[:-1] + stations[1:]) * 0.5 - x_min) / x_range
+    cp_avg = np.zeros(n_stations)
+    last = 0.0
     for i in range(n_stations):
-        mask = (x_coords >= stations[i]) & (x_coords < stations[i + 1])
-        if np.any(mask):
-            cp_avg[i] = float(np.mean(cp_vals[mask]))
-        elif i > 0:
-            cp_avg[i] = cp_avg[i - 1]  # carry forward
-        x_norm[i] = (stations[i] + stations[i + 1]) / 2.0
-        x_norm[i] = (x_norm[i] - x_min) / x_range  # normalize to [0, 1]
+        m = idx == i
+        if not np.any(m):
+            cp_avg[i] = last                       # carry forward across gaps
+            continue
+        r, w, c = radius[m], weights[m], cp_vals[m]
+        body = r <= np.percentile(r, 75) * 1.05
+        if body.sum() >= 3:
+            w, c = w[body], c[body]
+        cp_avg[i] = last = float(np.sum(w * c) / np.sum(w))
 
     return x_norm, cp_avg
 
@@ -624,8 +690,15 @@ def compute_mesh_statistics(
         "total_nodes": 0,
         "mean_aspect_ratio": 0.0,
         "max_aspect_ratio": 0.0,
+        # Retained for callers that still read them. Skew is NOT computed any
+        # more: VTK returns a constant -1.0 for tetrahedra, so the value was a
+        # sentinel rather than a measurement. Scaled Jacobian replaces it.
         "max_skewness": 0.0,
         "mean_skewness": 0.0,
+        "mean_scaled_jacobian": 0.0,
+        "min_scaled_jacobian": 0.0,
+        "growth_p99": 0.0,
+        "growth_max": 0.0,
         "quality_rating": "Unknown",
         "quality_color": "#8b949e",
         "yplus_min": 0.0,
@@ -640,28 +713,64 @@ def compute_mesh_statistics(
         stats["total_cells"] = vm.n_cells
         stats["total_nodes"] = vm.n_points
 
-        # Cell quality analysis
-        try:
-            qual = vm.compute_cell_quality(quality_measure="aspect_ratio")
-            ar = qual["CellQuality"]
-            stats["mean_aspect_ratio"] = float(np.mean(ar))
-            stats["max_aspect_ratio"] = float(np.max(ar))
-        except Exception:
-            pass
-
-        try:
-            qual = vm.compute_cell_quality(quality_measure="skew")
-            sk = qual["CellQuality"]
-            stats["mean_skewness"] = float(np.mean(sk))
-            stats["max_skewness"] = float(np.max(sk))
-        except Exception:
-            pass
+        # Cell quality analysis.
+        #
+        # Two bugs lived here, both silent because the handlers were bare
+        # `except: pass`:
+        #
+        #  * ``compute_cell_quality`` was REMOVED in PyVista 0.48 (it is
+        #    ``cell_quality`` now, and it names its output array after the
+        #    measure rather than "CellQuality"). Every call raised
+        #    AttributeError, so aspect ratio and skew came back 0.0 and the
+        #    rating below fell through to "Unknown" -- on every mesh, for as
+        #    long as 0.48 has been installed.
+        #  * ``skew`` is not defined for tetrahedra. VTK returns exactly -1.0
+        #    for every tet, so even when the call worked the number was a
+        #    sentinel. Scaled Jacobian is the shape metric for tets, and unlike
+        #    skew it also detects inversion (<= 0 means the cell is turned
+        #    inside out).
+        for _measure, _lo_key, _hi_key in (
+            ("aspect_ratio", "mean_aspect_ratio", "max_aspect_ratio"),
+            ("scaled_jacobian", "mean_scaled_jacobian", "min_scaled_jacobian"),
+        ):
+            arr = None
+            for _call in ("cell_quality", "compute_cell_quality"):
+                fn = getattr(vm, _call, None)
+                if fn is None:
+                    continue
+                try:
+                    q = (fn(_measure) if _call == "cell_quality"
+                         else fn(quality_measure=_measure))
+                    key = next((k for k in (_measure, "CellQuality")
+                                if k in q.array_names), None)
+                    if key is None:
+                        continue
+                    a = np.asarray(q[key], dtype=float)
+                    a = a[np.isfinite(a)]
+                    if a.size:
+                        arr = a
+                        break
+                except Exception as exc:                      # noqa: BLE001
+                    logger.debug(f"{_call}({_measure}) unavailable: {exc}")
+            if arr is None:
+                logger.warning(f"Cell quality measure '{_measure}' unavailable "
+                               f"— the mesh quality rating will be incomplete.")
+                continue
+            stats[_lo_key] = float(np.mean(arr))
+            # Aspect ratio is worst when large, scaled Jacobian when small.
+            stats[_hi_key] = float(np.max(arr) if _measure == "aspect_ratio"
+                                   else np.min(arr))
 
     elif sm is not None:
         stats["total_cells"] = sm.n_cells
         stats["total_nodes"] = sm.n_points
 
-    # Y+ from surface mesh
+    # Y+ from surface mesh. Area-weighted percentiles, not np.mean over points:
+    # wall cell areas span 3.3e4 : 1 with the slivers on the nose tip, so a
+    # point-counted mean describes the tip rather than the airframe (measured:
+    # 241 point-counted against an area-weighted median of 338 on the same
+    # surface). Reading y+ LOW is the dangerous direction -- it is the number
+    # that decides whether skin friction can be trusted at all.
     if sm is not None:
         from cfd.boundary_layer import extract_yplus
         yp = extract_yplus(sm)
@@ -670,16 +779,45 @@ def compute_mesh_statistics(
             if len(valid) > 0:
                 stats["yplus_min"] = float(np.min(valid))
                 stats["yplus_max"] = float(np.max(valid))
-                stats["yplus_mean"] = float(np.mean(valid))
+                name = next((n for n in ("Y_Plus", "YPlus", "y_plus")
+                             if n in sm.array_names), None)
+                w = field_percentiles(sm, name, [50.0]) if name else None
+                stats["yplus_mean"] = (float(w[0]) if w is not None
+                                       and np.isfinite(w[0])
+                                       else float(np.mean(valid)))
 
-    # Quality rating
+    # ── Cell-to-cell growth ratio ────────────────────────────────────────────
+    # Aspect ratio and skew describe the shape of one cell. Neither can see the
+    # thing that actually bounds the accuracy of a finite-volume scheme: how
+    # much the cell size changes ACROSS a face, which is where every flux and
+    # every gradient is evaluated. A mesh whose size collapses over one band
+    # scores "Good" on both of the old metrics.
+    if vm is not None:
+        try:
+            ratio = _neighbour_size_ratio(vm)
+            if ratio is not None:
+                stats["growth_p99"] = float(np.percentile(ratio, 99))
+                stats["growth_max"] = float(ratio.max())
+        except Exception:
+            pass
+
+    # ── Quality rating ───────────────────────────────────────────────────────
+    # Three axes, because no one of them can condemn a mesh on its own:
+    #   aspect ratio     the shape of a cell
+    #   scaled Jacobian  whether that shape has degenerated or inverted
+    #   growth p99       how much the size changes across a face, which is where
+    #                    every flux and gradient is actually evaluated
     ar = stats["mean_aspect_ratio"]
-    sk = stats["max_skewness"]
+    sj = stats.get("min_scaled_jacobian", 1.0)
+    gp99 = stats.get("growth_p99", 0.0)
     if ar > 0:
-        if ar < 5.0 and sk < 0.7:
+        if sj <= 0.0:
+            stats["quality_rating"] = "Invalid"
+            stats["quality_color"] = "#f85149"
+        elif ar < 2.0 and sj > 0.10 and (gp99 == 0.0 or gp99 <= 1.5):
             stats["quality_rating"] = "Good"
             stats["quality_color"] = "#7ee787"
-        elif ar < 15.0 and sk < 0.85:
+        elif ar < 4.0 and sj > 0.02 and (gp99 == 0.0 or gp99 <= 2.5):
             stats["quality_rating"] = "Fair"
             stats["quality_color"] = "#d29922"
         else:
@@ -687,6 +825,34 @@ def compute_mesh_statistics(
             stats["quality_color"] = "#f85149"
 
     return stats
+
+
+def _neighbour_size_ratio(vm) -> Optional[np.ndarray]:
+    """max(h_a/h_b, h_b/h_a) over every interior face of a tet grid, or None."""
+    try:
+        cells = vm.cells_dict if hasattr(vm, "cells_dict") else {}
+        tets = cells.get(10)                 # VTK_TETRA
+        if tets is None or len(tets) < 100:
+            return None
+        tets = np.asarray(tets, dtype=np.int64)
+        p = np.asarray(vm.points, dtype=float)
+        v6 = np.abs(np.einsum("ij,ij->i",
+                              p[tets[:, 1]] - p[tets[:, 0]],
+                              np.cross(p[tets[:, 2]] - p[tets[:, 0]],
+                                       p[tets[:, 3]] - p[tets[:, 0]])))
+        h = np.maximum(v6, 1e-30) ** (1.0 / 3.0)
+        combos = ((0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3))
+        faces = np.concatenate([np.sort(tets[:, c], axis=1) for c in combos])
+        owner = np.tile(np.arange(len(tets)), 4)
+        order = np.lexsort((faces[:, 2], faces[:, 1], faces[:, 0]))
+        faces, owner = faces[order], owner[order]
+        same = np.all(faces[1:] == faces[:-1], axis=1)
+        a, b = owner[:-1][same], owner[1:][same]
+        if a.size == 0:
+            return None
+        return np.maximum(h[a] / h[b], h[b] / h[a])
+    except Exception:
+        return None
 
 
 # ── Surface sampling helpers ─────────────────────────────────────────────────
@@ -1420,8 +1586,23 @@ def inject_cfd_results_into_engine(result: "CFDResult", engine) -> None:
     Structures workspace and other downstream consumers.
     """
     if not result.converged:
-        logger.warning("CFD did not converge — not injecting results into engine.")
+        logger.warning(
+            f"CFD did not converge — not injecting results into engine. "
+            f"{getattr(result, 'convergence_note', '')}"
+        )
         return
+    # Injecting a drag coefficient that is missing its friction component makes
+    # the flight simulation over-predict apogee, and nothing downstream of the
+    # engine can tell that happened. Say so at the moment the number crosses
+    # over, not only in the CFD log the user has already scrolled past.
+    if not getattr(result, "wall_resolved", True):
+        logger.warning(
+            f"INJECTING A LOWER-BOUND DRAG: {result.wall_warning} "
+            f"Cd={result.cd:.5f} carries Cd_friction={result.cd_friction:.5f}. "
+            f"The flight simulation will under-predict drag and therefore "
+            f"over-predict apogee. Re-run with 'Euler + flat-plate friction' or "
+            f"a prism boundary layer for a trustworthy total drag."
+        )
     try:
         engine.update(
             cfd_cd=result.cd,

@@ -74,12 +74,29 @@ class CFDConfig:
 
     # Mesh quality
     mesh_refinement: str = "medium"     # "coarse" | "medium" | "fine"
-    # Accepted and IGNORED: the mesher is tet-only. Extruding prisms leaves them
-    # overlapping the tets rather than bounded by them, which produces a mesh
-    # SU2 cannot converge on (cfd/meshing.py step 7). Kept at their defaults so
-    # call sites do not have to change if that is ever solved.
+
+    # ── Prism boundary layer ─────────────────────────────────────────────────
+    # Off by default, but REACHABLE — which it was not. cfd/meshing.py has had
+    # a working prism path since 2026-08-19 (measured on the finned test rocket:
+    # y+ median 0.41 with 100% of wall points below 1, against ~3500 on the
+    # tet-only mesh) and nothing outside that module could switch it on: there
+    # was no config field, generate_mesh() never passed the argument, and the UI
+    # had no control. Every mesh the product shipped was tet-only, so every
+    # viscous run reported a skin friction that was not physical.
+    #
+    # Default stays False until the AGARD-B, ONERA M6 and cone benchmarks have
+    # been re-run on prism meshes; the failure modes are loud (the mesher raises
+    # rather than falling back) so an opt-in is safe.
+    bl_prisms: bool = False
     boundary_layer_layers: int = 15     # prism layers near wall
     boundary_layer_growth: float = 1.2  # growth rate
+    # First-layer height (m). None = the mesher picks one from a y+ target.
+    bl_first_height: Optional[float] = None
+    # STL carrier resolution for the reparametrised extrusion source, and a
+    # ceiling on how far the nose apex may be blunted to let the stack wrap it.
+    # Both None = mesher defaults. See cfd/meshing.py for why these exist.
+    bl_tessellation: Optional[float] = None
+    bl_max_apex_radius: Optional[float] = None
 
     # Advanced mesh control (override presets)
     custom_wall_size: float | None = None       # element size near wall (m), overrides refinement preset
@@ -196,6 +213,28 @@ class CFDResult:
     converged: bool = False
     iterations: int = 0
     final_residual: float = 1.0
+    # How far the density residual actually fell, in decades, from the first
+    # iteration to the last. This is the criterion that means something:
+    # REF_DIMENSIONALIZATION is DIMENSIONAL, so the residual's ABSOLUTE value
+    # depends on the flow scale rather than the solution quality -- a measured
+    # M=0.8 case started at rms[Rho]=-3.04 and rms[RhoE]=+2.44, which makes a
+    # fixed -6 floor mean "3 decades" for one equation and "8 decades" for
+    # another. Reported so a run's convergence can be judged rather than
+    # assumed.
+    residual_drop_decades: float = 0.0
+    # Why the run was accepted (or not) -- shown in the UI beside the flag, so
+    # "Converged: Yes" is never the whole story.
+    convergence_note: str = ""
+
+    # ── Trustworthiness of the wall-dependent quantities ─────────────────────
+    # A tet-only mesh puts the first cell far outside the range any turbulence
+    # model can integrate to the wall, and there is no wall model behind it
+    # (see cfd/solvers/su2_solver.py). Skin friction is then not small, it is
+    # absent -- measured Cf median 3.2e-6 against a flat-plate 1.9e-3, i.e.
+    # ~600x low, on a shipped SST solution. The result carries that verdict so
+    # the UI and the exports do not have to re-derive it, and cannot forget to.
+    wall_resolved: bool = True          # False => cd_friction is not physical
+    wall_warning: str = ""              # human-readable reason, "" when fine
 
     # VTK output paths (for visualization)
     volume_vtk: Optional[Path] = None

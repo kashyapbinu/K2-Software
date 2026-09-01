@@ -230,18 +230,46 @@ def bench_barrowman_vs_su2() -> Benchmark:
                                1.0 if res.cl > 0 else 0.0, 1.0, "sign", "bool",
                                tol_abs=0.5))
 
-        # ── Diagnostic: low-order Barrowman vs RANS (order-of-magnitude) ──
-        # Barrowman is a preliminary-design method; for the canonical rocket's
-        # large fins (span ≈ 2.4× body radius) it under-predicts normal force vs
-        # RANS by ~3×. These rows DOCUMENT that gap (loose order-of-magnitude
-        # band) rather than claim a tight match — run a mesh-convergence study in
-        # the CFD workspace for a trustworthy absolute reference.
-        bm.add(Comparison.make("Drag coefficient Cd (diagnostic)", k2["cd"], res.cd,
-                               "SU2", "-", tol_rel=1.0,
-                               note="Barrowman vs RANS — order-of-magnitude only"))
-        bm.add(Comparison.make("Normal-force Cn vs SU2 Cl (diagnostic)",
-                               k2["cn"], res.cl, "SU2 (Cl)", "-", tol_rel=1.0,
-                               note="Barrowman under-predicts ~3× for large fins"))
+        # ── Gated: low-order Barrowman vs RANS, in the SAME axes ──
+        # These carried a 100% band while they read 45% and 71% off, which is
+        # not a tolerance — nothing short of a sign error could trip it. Both
+        # rows were 100%-banded because two real defects were being absorbed
+        # rather than found:
+        #
+        #   * the analytic model counted all four fins of a cruciform set as
+        #     lifting panels (physics.aerodynamics.compute_fin_cn_alpha), and
+        #   * this row compared K2's BODY-AXIS Cn against SU2's WIND-AXIS Cl.
+        #
+        # With the fin count fixed and the axes reconciled the gap is 13%, so
+        # the band is 25%: wide enough for a preliminary-design method against
+        # RANS on a 2.4-body-radius fin, tight enough to catch the next one.
+        #
+        # CL = CN·cos(alpha) - CA·sin(alpha). K2's cd at incidence is the
+        # wind-axis drag, which is what SU2's CD is too, so it stands in for CA
+        # to within the sin(alpha) weighting on a term that is itself small.
+        # Put both sides in the SAME axes before comparing. K2's `cd` is a
+        # WIND-axis drag (the engine applies it anti-parallel to the velocity
+        # vector, simulation_engine.py:640) while `cn` is a BODY-axis normal
+        # force, so rotate SU2's pair into body axes rather than guessing at
+        # K2's. The row used to compare K2's Cn against SU2's Cl outright.
+        cos_a, sin_a = math.cos(math.radians(aoa)), math.sin(math.radians(aoa))
+        cn_su2 = res.cl * cos_a + res.cd * sin_a
+        bm.add(Comparison.make("Normal force Cn (body axes)",
+                               k2["cn"], cn_su2, "SU2", "-", tol_rel=0.10,
+                               note="SU2 CL/CD rotated into body axes"))
+
+        # DIAGNOSTIC, and it should stay uncomfortable. K2's drag build-up is
+        # OpenRocket's, including base drag as a function of Mach alone
+        # (0.12 + 0.13*M^2). Against the AGARD-B wind tunnel that model runs
+        # +19.9% at M=0.2 rising to +84.3% at M=0.9 — see the C_D0 rows in
+        # bench_agardb_barrowman. This row inherits that error; the 12% here is
+        # not evidence the drag model is good, only that SU2's canonical drag
+        # happens to sit between K2 and the measurement.
+        bm.add(Comparison.make("Drag coefficient Cd (wind axes)",
+                               k2["cd"], res.cd, "SU2", "-", tol_rel=0.10,
+                               diagnostic=True,
+                               note="inherits the OpenRocket base-drag model; "
+                                    "see the AGARD-B C_D0 rows"))
         return bm
     except Exception as exc:
         return _skip(name, ref, exc)
@@ -255,18 +283,29 @@ _AGARDB_REF = "AEDC-TR-70-100 wind-tunnel data (AGARD-B, Tunnel 4T)"
 def bench_agardb_barrowman() -> Benchmark:
     """K2's Barrowman lift-curve slope vs the AGARD-B measurement.
 
-    Split deliberately into two kinds of row:
+    Two kinds of row, both now GATED against the measurement:
 
-      * **Mach trend** (gated) — C_L_alpha(M) normalised by its own value at
-        M=0.2. This isolates K2's compressibility correction from its absolute
-        level, and it tracks the measurement closely.
-      * **Absolute level** (diagnostic, wide band) — Barrowman reads about 2.7x
-        low here. That is not a bug being papered over: AGARD-B's wing spans 4
-        body diameters, far outside the small-fin slender-body assumption
-        Barrowman's fin term is derived under. The row records the size of the
-        error so the method's envelope is documented rather than implied.
+      * **Mach trend** — C_L_alpha(M) normalised by its own value at M=0.2.
+        This isolates K2's compressibility correction from its absolute level.
+      * **Absolute level** — the lift-curve slope itself, within 10%.
+
+    The absolute rows spent most of their life as 300%-band diagnostics, on the
+    reading that a wing spanning four body diameters is outside Barrowman's
+    envelope and a 63% miss was therefore expected. Both halves of that were
+    wrong, and 2026-08-31 fixed them:
+
+      1. ``AeroModel.from_state`` reads flat fields and ignores
+         ``state.assembly``, so the AGARD-B wing never reached the aero model —
+         its ``or``-fallbacks had substituted a generic 4-fin rocket. 63% -> 21%.
+      2. The fin term carried Barrowman's ``K_fb = 1 + tau``, which is only the
+         fin-in-presence-of-body half of the wing-body interference. Adding the
+         body-carryover half, ``(1 + tau)^2`` per NACA Report 1307, took it to
+         under 5% at every Mach in the dataset.
+
+    A method being low-order is a reason to check it against measurement, not a
+    licence to widen the band until it passes.
     """
-    from validation.cfd.agardb import barrowman_cl_alpha_per_deg
+    from validation.cfd.agardb import barrowman_cl_alpha_per_deg, barrowman_cd0
     from validation.data.agardb_aedc import AEDC_TR_70_100 as REF
 
     bm = Benchmark(name="Barrowman lift slope vs AGARD-B experiment", domain="cfd",
@@ -285,9 +324,35 @@ def bench_agardb_barrowman() -> Benchmark:
 
     for m in (0.2, 0.6, 0.9):
         bm.add(Comparison.make(
-            f"C_Lα at M={m} (absolute, diagnostic)", k2[m],
-            REF[m]["cl_alpha_per_deg"], "AEDC-TR-70-100", "1/deg", tol_rel=3.0,
-            note="wing span = 4 body diameters — outside Barrowman's envelope"))
+            f"C_Lα at M={m} (absolute)", k2[m],
+            REF[m]["cl_alpha_per_deg"], "AEDC-TR-70-100", "1/deg", tol_rel=0.10,
+            note="absolute lift-curve slope vs wind tunnel, wing-area referenced"))
+
+    # Zero-lift drag against the same report's measured C_D0 — the only measured
+    # drag in the suite. DIAGNOSTIC, at a real 10% band, so the report shows the
+    # gap at its true size instead of hiding it behind a band wide enough to
+    # pass. K2's drag build-up is OpenRocket's, and its base drag is a function
+    # of Mach alone (0.12 + 0.13*M^2, over half of this vehicle's total drag):
+    #
+    #     M=0.2  +19.9%     M=0.5  +32.5%     M=0.9  +84.3%
+    #
+    # The error grows monotonically with Mach, which is a wrong term rather than
+    # scatter: the measured C_D0 rises 8% between M=0.2 and M=0.9 while the
+    # model rises 88%. SU2 on this same geometry sits within 1.5% of the tunnel
+    # at M=0.5, so the analytic model is the outlier, not the reference.
+    #
+    # Hoerner's boundary-layer-coupled base drag (C_D,base = 0.029/sqrt(C_D,f),
+    # *Fluid-Dynamic Drag* ch.13) brings every one of these inside +/-5.5%. It
+    # is NOT applied: it would diverge from OpenRocket, whose drag model is
+    # separately validated. Caveat on the reference too — this C_D0 column is
+    # the weaker of the report's two aggregates and its base term is
+    # sting-dependent (see validation.data.agardb_aedc), so it is a 10%-class
+    # reference at best. Treat this as a documented decision, not a TODO.
+    for m in (0.2, 0.5, 0.9):
+        bm.add(Comparison.make(
+            f"C_D0 at M={m} (diagnostic)", barrowman_cd0(mach=m), REF[m]["cd0"],
+            "AEDC-TR-70-100", "-", tol_rel=0.10, diagnostic=True,
+            note="OpenRocket base-drag model vs wind tunnel — known open gap"))
 
     bm.curves["cl_alpha"] = {
         "x": machs, "k2": [k2[m] for m in machs],

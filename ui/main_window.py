@@ -374,6 +374,12 @@ class MainWindow(QMainWindow):
                 return
             state, assembly = load_project(path)
             if state:
+                # Every CFD coefficient, stress contour, flight trace and
+                # optimization history on screen belongs to the OUTGOING
+                # rocket. Drop them before the new state repopulates anything,
+                # or they sit there looking like results for the file just
+                # opened. Reset first so set_state/set_assembly can refill.
+                self._reset_all_workspaces()
                 self.engine.set_state(state)
                 # Restore the component tree (design) too, not just the numbers.
                 if assembly is not None:
@@ -421,6 +427,9 @@ class MainWindow(QMainWindow):
         try:
             from import_export.ork_importer import import_ork
             assembly = import_ork(path)
+            # Same as Open: the imported design is a different rocket, so the
+            # previous one's results must not outlive it on screen.
+            self._reset_all_workspaces()
             self.design_ws.set_assembly(assembly)
             self._current_file = None
             self._update_title()

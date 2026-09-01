@@ -166,7 +166,11 @@ def _extract_stage_geometry(stage) -> dict:
         geom["fin_root_chord"] = fins.root_chord
         geom["fin_tip_chord"] = fins.tip_chord
         geom["fin_span"] = fins.height
-        geom["fin_sweep_angle"] = fins.sweep_angle
+        # DEGREES on the component, RADIANS on the state/StageConfig — the aero
+        # model does a bare math.tan on this field. Passing it through unchanged
+        # made a 30-degree fin reach AeroModel as 30 radians (tan = -6.4, a fin
+        # swept forward past its own root chord) on every multistage flight.
+        geom["fin_sweep_angle"] = math.radians(fins.sweep_angle)
         geom["fin_thickness"] = getattr(fins, "thickness", 0.003)
         # fin_position is stage-LOCAL (from the stage's own top): assembly
         # positions are absolute from the nose tip, so subtract the stage top.

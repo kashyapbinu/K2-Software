@@ -551,16 +551,20 @@ def fin_analysis(state, flight: FlightLoads, material_name: str) -> FinAnalysis:
         fa.natural_frequency_Hz = (1.875 ** 2 / (2 * math.pi)) * \
             math.sqrt(EI / (m_per_len * span ** 4))
 
-    # ── NACA TN-4197 flutter velocity (model-rocket form) ──
-    P, T, rho = isa(flight.maxq_altitude or 3000.0)
+    # ── NACA TN-4197 flutter velocity ──
+    # Delegated to dynamics.flutter_analysis rather than re-derived here: this
+    # was a second copy of the same equation, and the two drifted (it used the
+    # root chord for t/c, the other the mean chord), so the Structures and
+    # Dynamics tabs disagreed by up to 2.15x on the same fin.
+    from dynamics.flutter_analysis import flutter_speed
+    alt_flutter = flight.maxq_altitude or 3000.0
+    _P, T, _rho = isa(alt_flutter)
     a_sound = speed_of_sound(T)
-    AR = (span ** 2) / A_fin if A_fin > 0 else 1.0
-    lam = tip / root if root > 0 else 0.5
-    tc = thick / root if root > 0 else 0.03
     G_shear = mat.G if mat.G > 0 else mat.E / (2 * (1 + mat.nu))
-    denom = (1.337 * (AR ** 3) * P * (lam + 1)) / (2 * (AR + 2) * (tc ** 3))
-    if denom > 0:
-        fa.flutter_speed_m_s = a_sound * math.sqrt(G_shear / denom)
+    v_f = flutter_speed(span=span, root_chord=root, tip_chord=tip,
+                        thickness=thick, shear_modulus=G_shear,
+                        altitude_m=alt_flutter)
+    fa.flutter_speed_m_s = v_f if math.isfinite(v_f) else 0.0
     v_max = flight.max_velocity or (flight.max_mach * a_sound)
     fa.flutter_margin = fa.flutter_speed_m_s / v_max if v_max > 0 else float("inf")
 

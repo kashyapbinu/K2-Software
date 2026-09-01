@@ -33,6 +33,22 @@ def _make_val_label(text="—"):
     return lbl
 
 
+def _utf8_env():
+    """Environment for a mesh subprocess whose stdout the parent reads as UTF-8.
+
+    On Windows the child otherwise picks the locale codec (cp1252) for its
+    pipe, which breaks the mesh log both ways: characters outside cp1252
+    ('→') raise UnicodeEncodeError inside logging, and characters that do
+    encode ('±') produce bytes the UTF-8 parent cannot decode. Set at the
+    interpreter level so it also covers the frozen build, where the script's
+    own sys.stdout.reconfigure() may run too late.
+    """
+    import os
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8:replace"
+    return env
+
+
 # ── Worker thread — runs mesh gen (subprocess) + SU2 solver ──────────────────
 # Gmsh calls signal.signal() during initialize(), which ONLY works in the
 # main thread of the main interpreter. So we run mesh generation in a
@@ -101,6 +117,7 @@ class SolverThread(QThread):
             "refinement":           cfg.mesh_refinement,
             "domain_length_scale":  cfg.domain_length_scale,
             "domain_radius_scale":  cfg.domain_radius_scale,
+            "bl_prisms":            cfg.bl_prisms,
             "bl_layers":            cfg.boundary_layer_layers,
             "bl_growth":            cfg.boundary_layer_growth,
             "geometry_dict":        cfg.geometry_dict,
@@ -115,6 +132,10 @@ class SolverThread(QThread):
             "cad_units":            cfg.cad_units,
             "cad_wrap":             cfg.cad_wrap,
             "cad_wrap_resolution":  cfg.cad_wrap_resolution,
+            # Was missing, so a curvature-element setting reached generate_mesh()
+            # on the in-process path and was silently dropped on the subprocess
+            # path the UI actually uses.
+            "cad_curvature_elements": cfg.cad_curvature_elements,
         }
 
         params_file = cfg.work_dir / "_mesh_params.json"
@@ -123,6 +144,19 @@ class SolverThread(QThread):
         script_file = cfg.work_dir / "_run_mesh.py"
         script_file.write_text(
             "import sys, json, logging\n"
+            # The parent decodes this pipe as UTF-8, but the child would
+            # otherwise encode it with the Windows locale codec (cp1252).
+            # Mesh logs contain '→' and '±': the former is not in
+            # cp1252 at all, so logging raised UnicodeEncodeError, dropped the
+            # message and dumped a handler traceback into the CFD console on
+            # every mesh build; the latter encoded to a byte that is not valid
+            # UTF-8, so the parent replaced it with a mojibake marker.
+            # Reconfigure before basicConfig so the handler binds the UTF-8
+            # stream, not the one it replaced.
+            "try:\n"
+            "    sys.stdout.reconfigure(encoding='utf-8', errors='replace')\n"
+            "except Exception:\n"
+            "    pass\n"
             "logging.basicConfig(level=logging.INFO, "
             "format='%(name)s: %(message)s', stream=sys.stdout)\n"
             f"sys.path.insert(0, {repr(k2_root)})\n"
@@ -136,6 +170,7 @@ class SolverThread(QThread):
             "    refinement=params['refinement'],\n"
             "    domain_length_scale=params['domain_length_scale'],\n"
             "    domain_radius_scale=params['domain_radius_scale'],\n"
+            "    bl_prisms=params.get('bl_prisms', False),\n"
             "    bl_layers=params['bl_layers'],\n"
             "    bl_growth=params['bl_growth'],\n"
             "    geometry_dict=params['geometry_dict'],\n"
@@ -148,6 +183,7 @@ class SolverThread(QThread):
             "    cad_units=params.get('cad_units', 'auto'),\n"
             "    cad_wrap=params.get('cad_wrap', False),\n"
             "    cad_wrap_resolution=params.get('cad_wrap_resolution', 'medium'),\n"
+            "    cad_curvature_elements=params.get('cad_curvature_elements'),\n"
             ")\n"
             "print('MESH_OK')\n",
             encoding="utf-8",
@@ -171,6 +207,7 @@ class SolverThread(QThread):
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=_utf8_env(),
             creationflags=(0x08000000 if sys.platform == "win32" else 0),
         )
         proc = self._mesh_proc
@@ -478,6 +515,7 @@ class SweepThread(QThread):
             "refinement":           cfg.mesh_refinement,
             "domain_length_scale":  cfg.domain_length_scale,
             "domain_radius_scale":  cfg.domain_radius_scale,
+            "bl_prisms":            cfg.bl_prisms,
             "bl_layers":            cfg.boundary_layer_layers,
             "bl_growth":            cfg.boundary_layer_growth,
             "geometry_dict":        cfg.geometry_dict,
@@ -492,12 +530,29 @@ class SweepThread(QThread):
             "cad_units":            cfg.cad_units,
             "cad_wrap":             cfg.cad_wrap,
             "cad_wrap_resolution":  cfg.cad_wrap_resolution,
+            # Was missing, so a curvature-element setting reached generate_mesh()
+            # on the in-process path and was silently dropped on the subprocess
+            # path the UI actually uses.
+            "cad_curvature_elements": cfg.cad_curvature_elements,
         }
         params_file = cfg.work_dir / "_mesh_params.json"
 
         script_file = cfg.work_dir / "_run_mesh.py"
         script_file.write_text(
             "import sys, json, logging\n"
+            # The parent decodes this pipe as UTF-8, but the child would
+            # otherwise encode it with the Windows locale codec (cp1252).
+            # Mesh logs contain '→' and '±': the former is not in
+            # cp1252 at all, so logging raised UnicodeEncodeError, dropped the
+            # message and dumped a handler traceback into the CFD console on
+            # every mesh build; the latter encoded to a byte that is not valid
+            # UTF-8, so the parent replaced it with a mojibake marker.
+            # Reconfigure before basicConfig so the handler binds the UTF-8
+            # stream, not the one it replaced.
+            "try:\n"
+            "    sys.stdout.reconfigure(encoding='utf-8', errors='replace')\n"
+            "except Exception:\n"
+            "    pass\n"
             "logging.basicConfig(level=logging.INFO, "
             "format='%(name)s: %(message)s', stream=sys.stdout)\n"
             f"sys.path.insert(0, {repr(k2_root)})\n"
@@ -511,6 +566,7 @@ class SweepThread(QThread):
             "    refinement=params['refinement'],\n"
             "    domain_length_scale=params['domain_length_scale'],\n"
             "    domain_radius_scale=params['domain_radius_scale'],\n"
+            "    bl_prisms=params.get('bl_prisms', False),\n"
             "    bl_layers=params['bl_layers'],\n"
             "    bl_growth=params['bl_growth'],\n"
             "    geometry_dict=params['geometry_dict'],\n"
@@ -523,6 +579,7 @@ class SweepThread(QThread):
             "    cad_units=params.get('cad_units', 'auto'),\n"
             "    cad_wrap=params.get('cad_wrap', False),\n"
             "    cad_wrap_resolution=params.get('cad_wrap_resolution', 'medium'),\n"
+            "    cad_curvature_elements=params.get('cad_curvature_elements'),\n"
             ")\n"
             "print('MESH_OK')\n",
             encoding="utf-8",
@@ -540,6 +597,7 @@ class SweepThread(QThread):
             cmd,
             cwd=k2_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace",
+            env=_utf8_env(),
             creationflags=(0x08000000 if sys.platform == "win32" else 0),
         )
         proc = self._mesh_proc
@@ -751,6 +809,8 @@ class CFDWorkspace(QWidget):
             "Reference length for Cm and Reynolds. 0 = the bounding-box extent "
             "along the flow axis. Set it to a mean chord for wing-type bodies."
         )
+        # Re is linear in this, so the conditions preview has to follow it.
+        self._sp_ref_len.valueChanged.connect(self._update_isa)
 
         cad_form.addRow("Units:", self._cb_cad_units)
         cad_form.addRow("Repair:", self._chk_wrap)
@@ -809,13 +869,62 @@ class CFDWorkspace(QWidget):
         self._lbl_T   = _make_val_label(); al.addRow("Temperature:",    self._lbl_T)
         self._lbl_rho = _make_val_label(); al.addRow("Density:",        self._lbl_rho)
         self._lbl_a   = _make_val_label(); al.addRow("Speed of Sound:", self._lbl_a)
-        self._lbl_Re  = _make_val_label(); al.addRow("Reynolds:",       self._lbl_Re)
+        self._lbl_Re  = _make_val_label(); al.addRow("Reynolds (pending):", self._lbl_Re)
         self._lbl_q   = _make_val_label(); al.addRow("Dyn. Pressure:",  self._lbl_q)
         lay.addWidget(atm_grp)
 
         self._sp_mach.valueChanged.connect(self._update_isa)
         self._sp_alt.valueChanged.connect(self._update_isa)
         self._update_isa()
+
+        # ── Fidelity ──
+        # These two live OUTSIDE the sweep panel deliberately. The hybrid mode
+        # was previously a sweep-only control, so the single-run button — the
+        # primary path — always used whatever the turbulence combo said, default
+        # k-omega SST. On a tet-only mesh that is wall-unresolved RANS, and a
+        # measured SST solution on this mesh family returned a skin friction of
+        # Cf = 3.2e-6 against a flat-plate 1.9e-3, i.e. ~600x low. The setting
+        # that exists to avoid exactly that could not be reached from the run
+        # the users actually press.
+        fid_grp = QGroupBox("Fidelity")
+        fil = QVBoxLayout(fid_grp)
+        fil.setSpacing(6)
+
+        self._chk_euler_fric = QCheckBox("Euler + flat-plate friction (recommended)")
+        self._chk_euler_fric.setChecked(True)
+        self._chk_euler_fric.setStyleSheet(f"color:{theme.TEXT}; font-size:12px;")
+        self._chk_euler_fric.setToolTip(
+            "Solve inviscid (Euler) and add an analytic skin-friction build-up\n"
+            "(Schlichting flat plate + form factors) to Cd.\n\n"
+            "Applies to single runs AND sweeps. Recommended whenever the mesh\n"
+            "has no prism boundary layer: RANS cannot resolve the wall there,\n"
+            "so its skin friction is not merely approximate, it is absent.\n"
+            "Uncheck to use the turbulence model selected above."
+        )
+        fil.addWidget(self._chk_euler_fric)
+
+        self._chk_bl_prisms = QCheckBox("Prism boundary layer (unsupported)")
+        self._chk_bl_prisms.setChecked(False)
+        self._chk_bl_prisms.setStyleSheet(f"color:{theme.TEXT}; font-size:12px;")
+        self._chk_bl_prisms.setToolTip(
+            "Extrude real prism layers off the wall instead of meshing the\n"
+            "boundary layer with tetrahedra.\n\n"
+            "UNSUPPORTED - leave this off unless you are developing it.\n\n"
+            "On the canonical rocket the mesh BUILDS and is structurally\n"
+            "sound (5.3M cells, 141k prisms, wall manifold, no inverted\n"
+            "cells) and SU2 then will not solve it: the density residual\n"
+            "fell ZERO decades in 98 iterations and drag read 0.898 against\n"
+            "0.343 from the supported path.\n\n"
+            "Not a settings problem. gmsh's extrusion has no corner\n"
+            "treatment, so fronts collide at a sharp nose tip or a fin root.\n"
+            "It also blunts the nose apex to let the stack wrap it, which\n"
+            "changes the geometry being solved.\n\n"
+            "For trustworthy drag use 'Euler + flat-plate friction' above.\n"
+            "If this fails it refuses in ~30 s with the reason - no retry,\n"
+            "no silent fallback."
+        )
+        fil.addWidget(self._chk_bl_prisms)
+        lay.addWidget(fid_grp)
 
         # ── Analysis mode: single point vs sweep (polar) ──
         mode_grp = QGroupBox("Analysis Mode")
@@ -857,21 +966,8 @@ class CFDWorkspace(QWidget):
         swl.addRow("Stop:",  self._sp_sw_stop)
         swl.addRow("Step:",  self._sp_sw_step)
 
-        # Hybrid fidelity mode: inviscid SU2 + analytic flat-plate friction.
-        # Recommended default — wall-unresolved RANS on the tet-only mesh
-        # (y+ >> 1, no prism layers) produces spurious viscous body lift that
-        # biases CP forward and roughly doubles Cd₀.
-        self._chk_euler_fric = QCheckBox("Euler + flat-plate friction (recommended)")
-        self._chk_euler_fric.setChecked(True)
-        self._chk_euler_fric.setStyleSheet(f"color:{theme.TEXT}; font-size:12px;")
-        self._chk_euler_fric.setToolTip(
-            "Solve each sweep point inviscid (Euler) and add an analytic\n"
-            "skin-friction build-up (Schlichting flat plate + form factors)\n"
-            "to Cd. Cleaner CP/stability and realistic Cd₀ on this mesh,\n"
-            "which cannot resolve the boundary layer for RANS (y+ ≫ 1).\n"
-            "Uncheck to sweep with the turbulence model selected above."
-        )
-        swl.addRow("", self._chk_euler_fric)
+        # (The Euler + flat-plate friction control now lives in the Fidelity
+        # group above, where it applies to single runs as well as sweeps.)
 
         self._lbl_sweep_info = QLabel("9 points")
         self._lbl_sweep_info.setStyleSheet(f"color:{theme.TEXT_DIM}; font-size:11px; padding:2px 0;")
@@ -1272,7 +1368,7 @@ class CFDWorkspace(QWidget):
 
         btn_cam = QPushButton(icon("reset_view"), "Reset Camera")
         btn_cam.setFixedHeight(28)
-        btn_cam.clicked.connect(lambda: self._plotter.reset_camera())
+        btn_cam.clicked.connect(self._reset_camera)
         bl.addWidget(btn_cam)
         lay.addWidget(bar)
 
@@ -1406,6 +1502,19 @@ class CFDWorkspace(QWidget):
         self._lbl_cl   = _make_val_label(); cf.addRow("Lift Cl:",       self._lbl_cl)
         self._lbl_cm   = _make_val_label(); cf.addRow("Moment Cm:",     self._lbl_cm)
         self._lbl_conv = _make_val_label(); cf.addRow("Converged:",     self._lbl_conv)
+        # Five decimal places on a coefficient is a claim about precision. The
+        # panel used to make it next to a green "Converged: Yes" and nothing
+        # else, while the log carried the reason the friction component was
+        # missing. These two rows put the caveat where the number is.
+        self._lbl_conv_why = _make_val_label()
+        self._lbl_conv_why.setWordWrap(True)
+        self._lbl_conv_why.setStyleSheet(
+            f"color:{theme.TEXT_DIM}; font-size:10px;")
+        cf.addRow("", self._lbl_conv_why)
+        self._lbl_trust = _make_val_label()
+        self._lbl_trust.setWordWrap(True)
+        self._lbl_trust.setVisible(False)
+        cf.addRow("", self._lbl_trust)
         lay.addWidget(coef_grp)
 
         # ── Forces & CP ──
@@ -1425,7 +1534,7 @@ class CFDWorkspace(QWidget):
         sf.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         self._lbl_solver = _make_val_label(); sf.addRow("Solver:",    self._lbl_solver)
         self._lbl_turb_r = _make_val_label(); sf.addRow("Model:",     self._lbl_turb_r)
-        self._lbl_re_r   = _make_val_label(); sf.addRow("Reynolds:",  self._lbl_re_r)
+        self._lbl_re_r   = _make_val_label(); sf.addRow("Reynolds (this run):",  self._lbl_re_r)
         self._lbl_q_r    = _make_val_label(); sf.addRow("Dyn. Press:", self._lbl_q_r)
         lay.addWidget(solver_grp)
 
@@ -1438,7 +1547,22 @@ class CFDWorkspace(QWidget):
         self._lbl_nodes  = _make_val_label(); mf.addRow("Nodes:",       self._lbl_nodes)
         self._lbl_mq     = _make_val_label(); mf.addRow("Quality:",     self._lbl_mq)
         self._lbl_ar     = _make_val_label(); mf.addRow("Aspect Ratio:", self._lbl_ar)
+        self._lbl_growth = _make_val_label(); mf.addRow("Growth ratio:", self._lbl_growth)
+        self._lbl_growth.setToolTip(
+            "How much the cell size changes between face-adjacent cells\n"
+            "(99th percentile, and the worst pair).\n\n"
+            "This is what bounds a finite-volume scheme's accuracy: every\n"
+            "flux and every gradient is evaluated across a face. Aspect ratio\n"
+            "and skew describe one cell's shape and cannot see it.\n"
+            "Target <= 1.2; above 2 expect elevated numerical entropy."
+        )
         self._lbl_yp_r   = _make_val_label(); mf.addRow("Y+ Range:",    self._lbl_yp_r)
+        self._lbl_yp_r.setToolTip(
+            "Wall y+ over the surface. Area-weighted median, plus the range.\n\n"
+            "y+ < 5 is needed for a turbulence model to integrate to the wall,\n"
+            "and there is no wall function behind it. Above ~30 the reported\n"
+            "skin friction is not physical."
+        )
         lay.addWidget(mesh_grp)
 
         # Inject button
@@ -1508,6 +1632,42 @@ class CFDWorkspace(QWidget):
         return scroll
 
     # ── Logic ─────────────────────────────────────────────────────────────────
+    def _preview_reference_length(self) -> float:
+        """Reference length the solve WILL normalise by, from live UI state.
+
+        Resolved through the same helper the solver uses, so the Reynolds
+        preview cannot disagree with the run. Assembly mode has no
+        geometry_dict until Run builds one, so the length is taken straight
+        off the assembly \u2014 it is the same value extract_cfd_geometry() puts
+        in that dict.
+        """
+        from cfd.solvers.su2_solver import resolve_reference_values
+        geo = None
+        cad = None
+        ext = None
+        # getattr: neither _cad_info nor _current_stl is bound in __init__, and
+        # this runs from the first _update_isa() during construction.
+        info = getattr(self, "_cad_info", None)
+        if self._rb_cad.isChecked() and info:
+            cad = info
+            ext = info.get("source")
+        elif self.assembly_provider:
+            try:
+                asm = self.assembly_provider()
+                if asm is not None:
+                    geo = {"max_diameter": 0.0, "length": float(asm.total_length())}
+            except Exception:
+                geo = None
+        _area, length = resolve_reference_values(
+            external_cad=ext,
+            cad_info=cad,
+            geometry_dict=geo,
+            geometry_stl=getattr(self, "_current_stl", None),
+            ref_length_override=self._sp_ref_len.value() or None,
+            quiet=True,          # runs on every spinbox tick
+        )
+        return length
+
     def _update_isa(self):
         from cfd.solvers.base import isa_conditions
         try:
@@ -1515,13 +1675,20 @@ class CFDWorkspace(QWidget):
             a = math.sqrt(1.4 * 287.05 * T)
             V = self._sp_mach.value() * a
             mu = 1.716e-5 * (T / 273.15) ** 1.5 * (273.15 + 110.4) / (T + 110.4)
-            Re = rho * V * 1.0 / mu  # assume L=1m, updated after geometry
+            # Re scales linearly with the reference length, so hardcoding L=1 m
+            # here (as this did) understated it by the body length \u2014 1.68x for
+            # the canonical rocket \u2014 and silently ignored the Ref. length box
+            # whose own tooltip says it sets Reynolds.
+            L_ref = self._preview_reference_length()
+            Re = rho * V * L_ref / mu
             q = 0.5 * rho * V ** 2
             self._lbl_P.setText(f"{P/1000:.2f} kPa")
             self._lbl_T.setText(f"{T:.1f} K  ({T-273.15:.1f} \u00b0C)")
             self._lbl_rho.setText(f"{rho:.4f} kg/m\u00b3")
             self._lbl_a.setText(f"{a:.1f} m/s")
-            self._lbl_Re.setText(f"{Re:.2e}")
+            # Name the length, so a Reynolds that looks off can be traced to
+            # the reference it was built on rather than doubted.
+            self._lbl_Re.setText(f"{Re:.2e}   (L_ref = {L_ref:.3f} m)")
             self._lbl_q.setText(f"{q/1000:.2f} kPa")
         except Exception:
             pass
@@ -1730,6 +1897,7 @@ class CFDWorkspace(QWidget):
         # preview shows, what the discrete mesher consumes, and the fallback
         # the solver reads bounds from.
         self._current_stl = Path(info.preview_stl)
+        self._update_isa()   # ref length just changed -> Reynolds preview stale
 
         axis_note = " (auto)" if info.flow_axis_auto else ""
         wrap_note = (
@@ -1785,17 +1953,33 @@ class CFDWorkspace(QWidget):
             self._current_stl = stl
             self._log(f"Geometry exported: {stl}")
             self._preview(stl)
+            # Reynolds is referenced to the body length, which is only known
+            # once geometry exists — recompute the conditions preview.
+            self._update_isa()
         except Exception as e:
             self._log(f"Export error: {e}")
 
-    def _preview(self, path: Path):
+    def _reset_camera(self):
+        """Reset Camera button. Needs its own repaint (auto_update=False)."""
         try:
+            self._plotter.reset_camera()
+            self._plotter.render()
+        except Exception:
+            pass
+
+    def _preview(self, path: Path, keep_camera: bool = False):
+        try:
+            cam = self._plotter.camera_position if keep_camera else None
             self._plotter.clear()
             mesh = pv.read(str(path))
             self._plotter.add_mesh(mesh, color="#b0b8c8", opacity=0.9,
                                    show_edges=True, edge_color=theme.LINE, line_width=0.5)
             self._plotter.add_axes()
-            self._plotter.reset_camera()
+            if keep_camera:
+                self._plotter.camera_position = cam
+            else:
+                self._plotter.reset_camera()
+            self._plotter.render()
             self._status_lbl.setText(
                 f"Geometry: {path.name}  |  {mesh.n_cells:,} triangles"
             )
@@ -1971,8 +2155,7 @@ class CFDWorkspace(QWidget):
             altitude_m=self._sp_alt.value(),
             angle_of_attack_deg=self._sp_aoa.value(),
             mesh_refinement=ref_map.get(ref_idx, "medium"),
-            # boundary_layer_layers/growth left at their defaults — the mesher is
-            # tet-only and ignores them.
+            bl_prisms=self._chk_bl_prisms.isChecked(),
             max_iterations=self._sp_iter.value(),
             n_cores=self._sp_cores.value(),
             turbulence_model=self._get_turb_key(),
@@ -1992,6 +2175,31 @@ class CFDWorkspace(QWidget):
             ref_length_override=ref_len_ov,
         )
 
+        # Hybrid Euler + analytic friction. Applied to BOTH run modes — the
+        # solver applies it in parse_results, so there is one code path.
+        if self._chk_euler_fric.isChecked():
+            cfg.turbulence_model = "Euler"
+            cfg.euler_analytic_friction = True
+            if cfg.external_cad and cfg.cad_info:
+                self._log(
+                    "Euler+friction mode: friction built up from the CAD wetted "
+                    "area with a body-of-revolution form factor — an engineering "
+                    "estimate, coarser than the rocket component breakdown."
+                )
+            elif cfg.geometry_dict is None:
+                self._log(
+                    "Euler+friction mode: no exact geometry available (STL "
+                    "source) — the friction build-up will be skipped and Cd will "
+                    "be inviscid-only, i.e. missing its friction component."
+                )
+        elif cfg.turbulence_model != "Euler" and not cfg.bl_prisms:
+            self._log(
+                "Running RANS on a tet-only mesh (no prism boundary layer). The "
+                "wall is unresolved, so skin friction and wall heat transfer "
+                "from this run are not physical and total Cd is a lower bound. "
+                "Enable 'Euler + flat-plate friction' or 'Prism boundary layer'."
+            )
+
         # ── Sweep mode branches off here (uses cfg as the base condition) ──
         if self._rb_sweep.isChecked():
             self._start_sweep(cfg)
@@ -1999,7 +2207,8 @@ class CFDWorkspace(QWidget):
 
         # Nothing from the last solve may outlive this click: if the new run
         # fails, stale coefficients must not sit there looking like its output.
-        self._clear_results()
+        # The geometry stays on screen — it is what this run is solving.
+        self._clear_results(keep_geometry=True)
         self._btn_run.setEnabled(False)
         self._btn_stop.setEnabled(True)
         self._set_params_locked(True)
@@ -2082,25 +2291,14 @@ class CFDWorkspace(QWidget):
         # criterion added to the SU2 template does the real stopping work.
         self._sweep_max_iter = max(self._sp_iter.value(), 800)
         base_cfg.max_iterations = self._sweep_max_iter
-        # Hybrid Euler + analytic-friction polar (see checkbox tooltip).
+        # The hybrid mode is already applied to base_cfg by _run_cfd, which
+        # does it for both run modes; recorded here only for the polar labels.
         self._sweep_euler_fric = self._chk_euler_fric.isChecked()
         if self._sweep_euler_fric:
-            base_cfg.turbulence_model = "Euler"
-            base_cfg.euler_analytic_friction = True
-            if base_cfg.external_cad and base_cfg.cad_info:
-                self._log(
-                    "Euler+friction mode: friction built up from the CAD wetted "
-                    "area with a body-of-revolution form factor — an engineering "
-                    "estimate, coarser than the rocket component breakdown."
-                )
-            elif base_cfg.geometry_dict is None:
-                self._log(
-                    "Euler+friction mode: no exact geometry available (STL source) — "
-                    "friction build-up will be skipped, Cd will be inviscid-only."
-                )
             self._log(
                 "Polar fidelity: Euler (inviscid) + flat-plate friction build-up. "
-                "Uncheck the sweep option to use the selected turbulence model."
+                "Uncheck it in the Fidelity group to use the selected "
+                "turbulence model instead."
             )
         self._btn_run.setEnabled(False)
         self._btn_stop.setEnabled(True)
@@ -2354,7 +2552,8 @@ class CFDWorkspace(QWidget):
             self._solver_thread.terminate()
             self._solver_thread.wait(2000)  # wait up to 2s for cleanup
             self._log("Solver stopped by user.")
-            self._clear_results("Partial run discarded — no results to show.")
+            self._clear_results("Partial run discarded — no results to show.",
+                                keep_geometry=True)
         self._btn_run.setEnabled(True)
         self._btn_stop.setEnabled(False)
         self._progress.setVisible(False)
@@ -2467,6 +2666,24 @@ class CFDWorkspace(QWidget):
         self._lbl_conv.setStyleSheet(
             theme.value_qss(theme.OK if result.converged else theme.ERR)
         )
+        _note = getattr(result, "convergence_note", "") or ""
+        _drop = getattr(result, "residual_drop_decades", 0.0)
+        if _drop:
+            _note = f"rms[Rho] fell {_drop:.1f} decades. " + _note
+        self._lbl_conv_why.setText(_note)
+
+        # Trustworthiness of the wall-dependent quantities. The solver decides
+        # this (it is the only thing that knows the mesh spacing and the flow),
+        # and the panel simply states it next to the coefficients rather than
+        # leaving it in a log.
+        _wall_ok = getattr(result, "wall_resolved", True)
+        _wall_msg = getattr(result, "wall_warning", "") or ""
+        self._lbl_trust.setVisible(not _wall_ok and bool(_wall_msg))
+        if not _wall_ok and _wall_msg:
+            self._lbl_trust.setText("⚠ " + _wall_msg)
+            self._lbl_trust.setStyleSheet(
+                f"color:{theme.WARN}; font-size:10px; font-weight:600;")
+            self._log("WARNING: " + _wall_msg)
         self._btn_inject.setEnabled(result.converged)
         self._btn_export_vtk.setEnabled(bool(result.volume_vtk or result.surface_vtk))
         self._btn_export_struct.setEnabled(bool(result.surface_vtk))
@@ -2520,19 +2737,45 @@ class CFDWorkspace(QWidget):
         else:
             self._log("Warning: Volume mesh could not be loaded.")
 
-        # Mesh statistics — direct counts only (no heavy compute_cell_quality)
+        # Mesh statistics — measured, not asserted.
+        #
+        # This panel used to hardcode setText("Good") in green and show "—" for
+        # the aspect ratio, so it reported a quality it had never computed, on
+        # every mesh. compute_mesh_statistics was never called from here at all.
         try:
+            from cfd.post_processing import compute_mesh_statistics
             if vol_mesh is not None:
                 self._lbl_cells.setText(f"{vol_mesh.n_cells:,}")
                 self._lbl_nodes.setText(f"{vol_mesh.n_points:,}")
-                self._lbl_mq.setText("Good")
-                self._lbl_mq.setStyleSheet(theme.value_qss(theme.OK))
-                self._lbl_ar.setText("—")
-            if surf_mesh is not None and "Y_Plus" in surf_mesh.array_names:
-                yp    = surf_mesh["Y_Plus"]
-                valid = yp[yp > 0]
-                if len(valid) > 0:
-                    self._lbl_yp_r.setText(f"{valid.min():.1f} – {valid.max():.1f}")
+            stats = compute_mesh_statistics(vol_mesh, surf_mesh)
+            rating = stats.get("quality_rating", "Unknown")
+            self._lbl_mq.setText(rating)
+            self._lbl_mq.setStyleSheet(
+                theme.value_qss({"Good": theme.OK, "Fair": theme.WARN}
+                                .get(rating, theme.ERR)
+                                if rating != "Unknown" else theme.TEXT_DIM))
+            _ar, _mar = (stats.get("mean_aspect_ratio", 0.0),
+                         stats.get("max_aspect_ratio", 0.0))
+            self._lbl_ar.setText(f"{_ar:.2f} mean, {_mar:.1f} max"
+                                 if _ar > 0 else "—")
+            _g99, _gmx = stats.get("growth_p99", 0.0), stats.get("growth_max", 0.0)
+            if _g99 > 0:
+                self._lbl_growth.setText(f"{_g99:.2f} p99, {_gmx:.1f} max")
+                self._lbl_growth.setStyleSheet(theme.value_qss(
+                    theme.OK if _g99 <= 1.5 else
+                    theme.WARN if _g99 <= 2.5 else theme.ERR))
+            else:
+                self._lbl_growth.setText("—")
+            _ypm = stats.get("yplus_mean", 0.0)
+            if _ypm > 0:
+                self._lbl_yp_r.setText(
+                    f"{_ypm:.0f} med  ({stats.get('yplus_min', 0):.1f} – "
+                    f"{stats.get('yplus_max', 0):.0f})")
+                self._lbl_yp_r.setStyleSheet(theme.value_qss(
+                    theme.OK if _ypm < 5 else
+                    theme.WARN if _ypm < 30 else theme.ERR))
+            else:
+                self._lbl_yp_r.setText("— (inviscid)")
         except Exception as e:
             self._log(f"Mesh stats error: {e}")
 
@@ -2553,8 +2796,24 @@ class CFDWorkspace(QWidget):
                     freestream_pressure=_p_inf,
                     dynamic_pressure=_q,
                 )
+                # At incidence the circumferential mean is the wrong curve to
+                # show on its own: the windward and leeward sides carry equal
+                # and opposite loading, so averaging them reports a body with
+                # no normal force on it. Plot both.
+                _extra = []
+                if abs(getattr(result, "angle_of_attack_deg", 0.0)) > 0.5:
+                    for _side, _col in (("windward", theme.ERR),
+                                        ("leeward", theme.OK)):
+                        _x, _c = extract_cp_distribution(
+                            self._surface_mesh, side=_side,
+                            freestream_pressure=_p_inf, dynamic_pressure=_q)
+                        if len(_x) == len(x_n):
+                            _extra.append((_side.capitalize(), _c, _col))
                 if len(x_n) > 0 and hasattr(self._cp_plot, "update_cp"):
-                    self._cp_plot.update_cp(x_n, cp_v)
+                    try:
+                        self._cp_plot.update_cp(x_n, cp_v, extra=_extra)
+                    except TypeError:
+                        self._cp_plot.update_cp(x_n, cp_v)
         except Exception as e:
             self._log(f"Cp plot error: {e}")
 
@@ -2569,7 +2828,7 @@ class CFDWorkspace(QWidget):
 
         self._refresh_vis()
 
-    def _clear_results(self, reason: str = ""):
+    def _clear_results(self, reason: str = "", keep_geometry: bool = False):
         """Drop every artefact of the previous solve.
 
         Without this a failed or stopped run left the last successful result on
@@ -2595,10 +2854,24 @@ class CFDWorkspace(QWidget):
             if w is not None:
                 w.setEnabled(False)
         # Blank the 3D view too — a stale flow field is the most convincing
-        # wrong answer of the lot.
+        # wrong answer of the lot. The geometry is not stale though: when the
+        # caller is starting or failing a run the body is still the current
+        # body, so put it straight back rather than leaving an empty scene.
+        # Camera is preserved so the view does not jump on every Run click.
         try:
             self._plotter.clear()
             self._last_vis_idx = -1
+            # getattr: _current_stl is only bound once geometry has been
+            # exported or a CAD file loaded, and a bare attribute access here
+            # would be swallowed by the except below — taking the render with
+            # it, which is the very thing this block exists to guarantee.
+            stl = getattr(self, "_current_stl", None)
+            if keep_geometry and stl and Path(stl).is_file():
+                self._preview(stl, keep_camera=True)
+            # auto_update=False means nothing repaints on its own: without this
+            # the cleared actors stay on screen until the user clicks in the
+            # view, and the body appears to vanish on that click.
+            self._plotter.render()
         except Exception:
             pass
         if reason:
@@ -2610,7 +2883,8 @@ class CFDWorkspace(QWidget):
             if line.strip():
                 self._log(f"ERROR: {line}")
         self._clear_results(
-            "Previous results cleared — this run produced none."
+            "Previous results cleared — this run produced none.",
+            keep_geometry=True,
         )
         self._btn_run.setEnabled(True)
         self._btn_stop.setEnabled(False)
@@ -2866,6 +3140,24 @@ class CFDWorkspace(QWidget):
         self._refresh_timer.start()  # restart the 300ms countdown
 
     def _refresh_vis(self):
+        """Rebuild the 3D scene, then force one repaint.
+
+        The interactor is created with auto_update=False, so pyvistaqt never
+        starts its periodic render timer and VTK keeps presenting the last
+        drawn frame until the user happens to click in the view. Every scene
+        change therefore has to end in an explicit render(), or the picture on
+        screen belongs to the previous state. _refresh_vis_impl has a dozen
+        early returns, so the render lives here in a finally.
+        """
+        try:
+            self._refresh_vis_impl()
+        finally:
+            try:
+                self._plotter.render()
+            except Exception:
+                pass
+
+    def _refresh_vis_impl(self):
         idx = self._vis_combo.currentIndex()
         self._plotter.clear()
         # Screen-space ambient occlusion is a depth-buffer pass: it darkens
@@ -3986,6 +4278,16 @@ class CFDWorkspace(QWidget):
                 w.writerow(["force_normal_N", r.force_normal])
                 w.writerow(["turbulence_model", r.turbulence_model])
                 w.writerow(["converged", r.converged])
+                # A number leaving the app has to carry what it is worth with
+                # it. A CSV of coefficients with no provenance is exactly how a
+                # lower-bound drag ends up in someone else's spreadsheet as a
+                # drag.
+                w.writerow(["convergence_note",
+                            getattr(r, "convergence_note", "")])
+                w.writerow(["residual_drop_decades",
+                            f"{getattr(r, 'residual_drop_decades', 0.0):.2f}"])
+                w.writerow(["wall_resolved", getattr(r, "wall_resolved", True)])
+                w.writerow(["wall_warning", getattr(r, "wall_warning", "")])
                 w.writerow([])
                 w.writerow(["iteration", "residual"])
                 for it, res in (getattr(r, "residual_history", None) or []):
@@ -4235,10 +4537,11 @@ class CFDWorkspace(QWidget):
                 except Exception:
                     pass
             self._plotter.add_axes()
+            self._plotter.render()
         else:
             # Turn off and revert to normal view
             self._plotter.clear_plane_widgets()
-            self._refresh_vis()
+            self._refresh_vis()   # renders
 
     def reset_workspace(self):
         """Blank CFD results + plots/3D view (called on New Project)."""
@@ -4369,6 +4672,7 @@ class CFDWorkspace(QWidget):
         else:
             try:
                 self._plotter.disable_picking()
+                self._plotter.render()   # else the last picked marker lingers
             except Exception:
                 pass
             self._status_lbl.setText("Probe mode OFF")

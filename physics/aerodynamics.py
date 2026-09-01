@@ -183,6 +183,94 @@ def compute_transition_cp(length: float, fore_diam: float, aft_diam: float,
 #  FIN SET CN_alpha (Sub/Trans/Supersonic — OpenRocket FinSetCalc)
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Transonic CNa1 interpolation, ported from OpenRocket's PolyInterpolator as it
+# is configured in FinSetCalc:
+#
+#     private static final PolyInterpolator cnaInterpolator = new PolyInterpolator(
+#             new double[] { CNA_SUBSONIC, CNA_SUPERSONIC },
+#             new double[] { CNA_SUBSONIC, CNA_SUPERSONIC },
+#             new double[] { CNA_SUBSONIC });
+#     ...
+#     return cnaInterpolator.interpolate(mach, subV, superV, subD, superD, 0);
+#
+# The first array is where function values are constrained, the second where
+# first derivatives are, the third where second derivatives are — so five
+# constraints, hence a quartic:
+#
+#     p(0.9) = subV      p'(0.9) = subD      p''(0.9) = 0
+#     p(1.5) = superV    p'(1.5) = superD
+#
+# The matrix depends only on the two Mach endpoints, so it is inverted once.
+CNA_SUPERSONIC_B = (CNA_SUPERSONIC_MACH ** 2 - 1) ** 1.5
+
+def _build_cna_transonic_matrix():
+    x1, x2 = CNA_SUBSONIC_MACH, CNA_SUPERSONIC_MACH
+    rows = [
+        [1, x1, x1**2, x1**3, x1**4],               # p(x1)
+        [1, x2, x2**2, x2**3, x2**4],               # p(x2)
+        [0, 1, 2*x1, 3*x1**2, 4*x1**3],             # p'(x1)
+        [0, 1, 2*x2, 3*x2**2, 4*x2**3],             # p'(x2)
+        [0, 0, 2, 6*x1, 12*x1**2],                  # p''(x1)
+    ]
+    return np.linalg.inv(np.array(rows, dtype=float))
+
+
+_CNA_TRANSONIC_INV = _build_cna_transonic_matrix()
+
+
+def _cna_transonic(mach: float, sub_v: float, sup_v: float,
+                   sub_d: float, sup_d: float, sub_dd: float = 0.0) -> float:
+    """Quartic through both endpoints with matched slopes. See above.
+
+    Every argument is referenced the same way (here: not yet divided by the
+    reference area), and the interpolation is linear in all of them, so the
+    caller's later normalisation carries through unchanged.
+    """
+    coeffs = _CNA_TRANSONIC_INV @ np.array(
+        [sub_v, sup_v, sub_d, sup_d, sub_dd], dtype=float)
+    return float(coeffs[0] + mach * (coeffs[1] + mach * (
+        coeffs[2] + mach * (coeffs[3] + mach * coeffs[4]))))
+
+
+def body_fin_interference_factor(tau: float, mach: float) -> float:
+    """Combined fin-in-body and body-in-fin normal-force multiplier.
+
+    Port of OpenRocket's ``FinSetCalc.calculateBodyFinInterferenceFactor``:
+
+        double finInBodyFactor = 1 + tau;
+        if (mach <= CNA_SUBSONIC) {
+            return pow2(finInBodyFactor);
+        }
+        if (mach >= CNA_SUPERSONIC) {
+            return finInBodyFactor;
+        }
+        double bodyInFinFactor = tau * finInBodyFactor;
+        double bodyContributionWeight =
+                (CNA_SUPERSONIC - mach) / (CNA_SUPERSONIC - CNA_SUBSONIC);
+        return finInBodyFactor + bodyContributionWeight * bodyInFinFactor;
+
+    Equations 14 and 21 of NACA Report 1307 combine to ``(1 + tau)^2`` for a
+    slender configuration; the body-carryover half is blended out supersonically
+    because the Mach-cone geometry it needs is not modelled.
+
+    K2's port had only Barrowman's ``1 + tau`` — the fin-in-body half — which
+    left the analytic lift-curve slope 20.9-22.3% BELOW the AGARD-B wind-tunnel
+    measurement at every Mach from 0.2 to 0.9. A flat one-sided bias like that
+    is a missing term, not scatter; with the carryover restored it is 1.5-4.9%.
+
+    :param tau: body radius / fin semispan measured from the rocket axis
+    """
+    fin_in_body = 1.0 + tau
+    if mach <= CNA_SUBSONIC_MACH:
+        return fin_in_body ** 2
+    if mach >= CNA_SUPERSONIC_MACH:
+        return fin_in_body
+    body_in_fin = tau * fin_in_body
+    weight = ((CNA_SUPERSONIC_MACH - mach)
+              / (CNA_SUPERSONIC_MACH - CNA_SUBSONIC_MACH))
+    return fin_in_body + weight * body_in_fin
+
+
 def compute_fin_cn_alpha(fin_count: int, fin_span: float, fin_root_chord: float,
                           fin_tip_chord: float, body_radius: float,
                           sweep_angle: float = 0.0, mach: float = 0.0,
@@ -228,26 +316,54 @@ def compute_fin_cn_alpha(fin_count: int, fin_span: float, fin_root_chord: float,
         cna1 = fin_area * (k1 + k2 * eff_alpha + k3 * eff_alpha**2)
     # --- Transonic interpolation ---
     else:
-        # Subsonic endpoint
+        # Both endpoint VALUES and their SLOPES, matched into one quartic — the
+        # curve leaves the subsonic branch and arrives at the supersonic branch
+        # tangentially instead of cornering at each end. A straight line between
+        # the endpoints (what this was) is continuous but not smooth, so CNa had
+        # a slope discontinuity at M=0.9 and again at M=1.5.
         beta_sq_sub = max(0.0, 1 - CNA_SUBSONIC_MACH**2)
         sq = math.sqrt(1 + beta_sq_sub * (s**2 / (fin_area * cos_gamma))**2)
         sub_v = 2 * math.pi * s**2 / (1 + sq)
-        # Supersonic endpoint
+        sub_d = (2 * CNA_SUBSONIC_MACH * math.pi * s**6
+                 / ((fin_area * cos_gamma)**2 * sq * (1 + sq)**2))
+
         k1s = FIN_K1.get_value(CNA_SUPERSONIC_MACH)
         k2s = FIN_K2.get_value(CNA_SUPERSONIC_MACH)
         k3s = FIN_K3.get_value(CNA_SUPERSONIC_MACH)
         sup_v = fin_area * (k1s + k2s * eff_alpha + k3s * eff_alpha**2)
-        # Linear blend
-        t = (mach - CNA_SUBSONIC_MACH) / (CNA_SUPERSONIC_MACH - CNA_SUBSONIC_MACH)
-        cna1 = sub_v * (1 - t) + sup_v * t
+        sup_d = -fin_area * 2 * CNA_SUPERSONIC_MACH / CNA_SUPERSONIC_B
+
+        cna1 = _cna_transonic(mach, sub_v, sup_v, sub_d, sup_d)
 
     # Normalize to reference area
     if ref_area_unit > 0:
         cna1 /= ref_area_unit
 
-    # Interference factor (Barrowman)
+    # Only the fins that present their surface to the cross-flow carry normal
+    # force. `cna1` above is the FULL panel lift (it is CL_alpha * A_panel for
+    # the mirrored wing of aspect ratio 2s^2/A), so the set contributes
+    #
+    #     sum_i cos^2(phi_i)
+    #
+    # panels, where phi_i is each fin's roll angle away from the pitch plane.
+    # For N equally-spaced fins with one of them in that plane:
+    #
+    #     N = 1  ->  1.0        N = 3  ->  1.5      N = 6  ->  3.0
+    #     N = 2  ->  2.0        N = 4  ->  2.0      N = 8  ->  4.0
+    #
+    # i.e. N/2 from three fins up, and the sum is independent of how the set is
+    # rolled, as it must be. A cruciform set is two lifting fins plus two fins
+    # edge-on to the cross-flow, not four lifting fins.
+    #
+    # Multiplying by the raw fin_count instead put the canonical 4-fin rocket at
+    # CN_alpha = 29.5/rad against SU2's 18.7 (+58%) and about 80% above the
+    # classic Barrowman fin term, while the 2-panel AGARD-B wing -- where every
+    # panel does lift, so the two rules agree -- sat 21% BELOW wind-tunnel
+    # measurement. One sign error in each direction, from this line.
+    lifting_panels = fin_count / 2.0 if fin_count >= 3 else float(fin_count)
+
     tau = body_radius / s_total
-    cna = cna1 * fin_count * (1 + tau)
+    cna = cna1 * lifting_panels * body_fin_interference_factor(tau, mach)
 
     # Fin-fin interference for > 4 fins
     if fin_count == 5:

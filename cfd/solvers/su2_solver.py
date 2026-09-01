@@ -81,6 +81,14 @@ _MPI_BUILD_OK: Optional[bool] = None
 
 
 # ── SU2 Configuration Template ───────────────────────────────────────────────
+# Minimum fall in the density residual, in decades, for a run to count as
+# converged on the residual alone. Relative because the residual is
+# dimensional -- see CFDResult.residual_drop_decades. Three decades is the low
+# end of accepted steady-RANS practice and is corroborated in parse_results by
+# a stationarity test on the drag coefficient itself, which is the quantity the
+# polars actually report.
+_MIN_RESIDUAL_DECADES = 3.0
+
 _TURB_MODEL_MAP = {
     "Euler":   {"solver": "EULER",          "turb": None,  "turb_line": ""},
     "Laminar": {"solver": "NAVIER_STOKES",  "turb": None,  "turb_line": ""},
@@ -133,9 +141,36 @@ MARKER_PLOTTING= ( rocket_wall )
 MARKER_MONITORING= ( rocket_wall )
 
 % ── Numerical schemes ─────────────────────────────────────
+% GREEN_GAUSS. This was switched to WEIGHTED_LEAST_SQUARES on the textbook
+% argument -- Green-Gauss assumes a regular cell and is not first-order
+% consistent on irregular tets, which is all this mesher produces -- and the
+% argument did not survive measurement. A/B on both benchmarks, everything else
+% held fixed:
+%
+%                        WLS       GREEN_GAUSS
+%   ONERA M6  CL        0.2618      0.2624
+%   M6 c_n y/b=0.65      3.3%        2.2%
+%   M6 c_n y/b=0.80      1.5%        0.4%
+%   cone Cp vs exact     8.89%       4.84%
+%
+% Equal or better everywhere, and decisively better on the shock case. Least
+% squares is the more accurate reconstruction on a smooth field but the less
+% monotone one across a discontinuity, and both of these cases are
+% shock-dominated. Do not switch it back without re-running both.
 NUM_METHOD_GRAD= GREEN_GAUSS
 CONV_NUM_METHOD_FLOW= ROE
-ENTROPY_FIX_COEFF= 0.2
+% Roe entropy fix, as a fraction of (|u| + c) below which an eigenvalue is
+% floored. This was 0.2 -- two HUNDRED times SU2's own default of 0.001 -- which
+% means every acoustic and entropy wave in the domain was given at least 20% of
+% (|u| + c) worth of numerical dissipation whether it needed it or not.
+%
+% 0.01 keeps an order of magnitude over SU2's default, so a strong bow shock is
+% still protected from the carbuncle instability, without dissipating the whole
+% domain. Measured on the M=2 cone it is NEUTRAL, not an improvement: 8.89% at
+% 0.01 against 9.06% at 0.2, which is noise. It is kept because 0.2 has no
+% evidence behind it and adds dissipation everywhere, not because it was shown
+% to buy accuracy. Re-run the cone if you change it.
+ENTROPY_FIX_COEFF= 0.01
 % 2nd-order MUSCL reconstruction — required to resolve transonic/supersonic
 % shocks (and thus wave drag). 1st-order smears shocks and kills drag rise.
 % Venkatakrishnan-Wang limiter keeps it monotone near discontinuities.
@@ -365,14 +400,110 @@ def _integrate_surface_forces(
                 f_friction = (cf * q_inf * area[:, None]).sum(axis=0)
                 out["cd_friction"] = float(f_friction @ drag_dir) / (q_inf * ref_area)
         if "Y_Plus" in cell.array_names:
+            # Area-weighted, not a plain mean. Wall cell areas span 3.3e4 : 1 on
+            # a measured mesh with the slivers on the nose tip, so an unweighted
+            # mean describes the tip: measured 241 unweighted against an
+            # area-weighted median of 338 on the same surface. y+ is used to
+            # decide whether the boundary layer is resolved, so reading it low
+            # is the dangerous direction.
             yp = np.asarray(cell["Y_Plus"], dtype=float)
-            yp = yp[np.isfinite(yp) & (yp > 0)]
-            if yp.size:
-                out["yplus_mean"] = float(yp.mean())
+            good = np.isfinite(yp) & (yp > 0) & np.isfinite(area) & (area > 0)
+            if good.any():
+                out["yplus_mean"] = float(
+                    np.sum(yp[good] * area[good]) / np.sum(area[good]))
         return out
     except Exception as e:
         logger.warning(f"Surface force integration failed: {e}")
         return None
+
+
+def resolve_reference_values(
+    *,
+    external_cad=None,
+    cad_info: Optional[dict] = None,
+    geometry_dict: Optional[dict] = None,
+    geometry_stl: Optional[Path] = None,
+    ref_area_override: Optional[float] = None,
+    ref_length_override: Optional[float] = None,
+    quiet: bool = False,
+) -> tuple[float, float]:
+    """Return ``(ref_area_m2, ref_length_m)`` for the force coefficients.
+
+    Anything that needs these before the solve — mesh sizing, the pre-run y+
+    prediction, the conditions-panel Reynolds preview — must read them from
+    here rather than recomputing its own, or the two drift by the ratio
+    between them. The UI preview did exactly that: it hardcoded L=1 m and
+    advertised a Reynolds number the run never used, off by the body length.
+
+    Takes loose values rather than a CFDConfig so the UI can call it from live
+    widget state without building a whole config on every keystroke.
+
+    :param quiet: suppress info logging. The UI calls this on every spinbox
+        tick; only the solve itself should narrate its reference values.
+    """
+    def _info(msg):
+        if not quiet:
+            logger.info(msg)
+
+    ref_length = 1.0
+    ref_area = 0.1
+
+    # Priority 0: external CAD — measured projected frontal area and
+    # flow-wise bbox extent. An arbitrary body has no "body diameter" to
+    # infer a reference from, so it is measured off the tessellation.
+    if external_cad and cad_info:
+        _fa = float(cad_info.get("frontal_area", 0.0) or 0.0)
+        if _fa > 0:
+            ref_area = _fa
+        elif not quiet:
+            logger.warning("CAD frontal area is zero — keeping the default "
+                           "reference area; coefficients will be off.")
+        ref_length = float(cad_info.get("length", 1.0) or 1.0)
+        _info(f"Reference values from imported CAD: "
+              f"A={ref_area:.6f} m² (projected frontal)  "
+              f"L={ref_length:.4f} m (flow-axis extent)")
+    # Priority 1: Use exact geometry dict parameters (avoids fin span bug)
+    elif geometry_dict and "max_diameter" in geometry_dict:
+        max_d = geometry_dict["max_diameter"]
+        ref_area = math.pi * (max_d / 2.0) ** 2
+        ref_length = geometry_dict.get("length", 1.0)
+        _info(f"Using exact max diameter ({max_d*1000:.1f} mm) for reference area.")
+    # Priority 2: Fallback to STL bounding box (may include fins)
+    elif geometry_stl and Path(geometry_stl).is_file():
+        try:
+            import pyvista as pv
+            m = pv.read(str(geometry_stl))
+            bounds = m.bounds   # (xmin, xmax, ymin, ymax, zmin, zmax)
+            # K2 STL: Z-axis is the rocket longitudinal axis
+            # Use Z-span as ref_length (not max of all dims, which
+            # would include fin span and overestimate)
+            z_span = abs(bounds[5] - bounds[4])
+            x_span = abs(bounds[1] - bounds[0])
+            y_span = abs(bounds[3] - bounds[2])
+            ref_length = max(z_span, x_span, y_span)  # longest = rocket axis
+            # Cross-section radius: use the SMALLER of X/Y spans
+            # (fins make the larger span unreliable for body diameter)
+            cross_spans = sorted([x_span, y_span, z_span])
+            body_diam = cross_spans[0]  # smallest span = body diameter
+            ref_area = math.pi * (body_diam / 2) ** 2
+            _info(f"STL bounding box: X={x_span:.4f} Y={y_span:.4f} "
+                  f"Z={z_span:.4f} → ref_L={ref_length:.4f} m, "
+                  f"ref_A={ref_area:.6f} m² (body_d={body_diam:.4f} m)")
+        except Exception as e:
+            if not quiet:
+                logger.warning(f"Could not read STL bounds: {e}. Using defaults.")
+
+    # Explicit user overrides win over every automatic source above. Applied
+    # last (and independently) so setting only one of the two keeps the
+    # measured value for the other.
+    if ref_area_override and ref_area_override > 0:
+        ref_area = float(ref_area_override)
+        _info(f"Reference area overridden by user: {ref_area:.6f} m²")
+    if ref_length_override and ref_length_override > 0:
+        ref_length = float(ref_length_override)
+        _info(f"Reference length overridden by user: {ref_length:.4f} m")
+
+    return ref_area, ref_length
 
 
 class SU2Solver(CFDSolver):
@@ -412,8 +543,12 @@ class SU2Solver(CFDSolver):
             refinement=cfg.mesh_refinement,
             domain_length_scale=cfg.domain_length_scale,
             domain_radius_scale=cfg.domain_radius_scale,
+            bl_prisms=cfg.bl_prisms,
             bl_layers=cfg.boundary_layer_layers,
             bl_growth=cfg.boundary_layer_growth,
+            bl_first_height=cfg.bl_first_height,
+            bl_tessellation=cfg.bl_tessellation,
+            bl_max_apex_radius=cfg.bl_max_apex_radius,
             geometry_dict=cfg.geometry_dict,   # exact dims if available
             custom_wall_size=cfg.custom_wall_size,
             target_element_count=cfg.target_element_count,
@@ -435,71 +570,18 @@ class SU2Solver(CFDSolver):
     def _reference_values(self) -> tuple[float, float]:
         """Return ``(ref_area_m2, ref_length_m)`` for the force coefficients.
 
-        Extracted from generate_case() so anything that needs the reference
-        length before the solve — mesh sizing, the pre-run y+ prediction —
-        reads the same value the coefficients are normalised by, rather than
-        recomputing its own and drifting by the ratio of the two.
+        Thin wrapper over the module-level :func:`resolve_reference_values`,
+        which the UI's Reynolds preview also calls so the two cannot drift.
         """
         cfg = self.config
-        ref_length = 1.0
-        ref_area = 0.1
-
-        # Priority 0: external CAD — measured projected frontal area and
-        # flow-wise bbox extent. An arbitrary body has no "body diameter" to
-        # infer a reference from, so it is measured off the tessellation.
-        if cfg.external_cad and cfg.cad_info:
-            _ci = cfg.cad_info
-            _fa = float(_ci.get("frontal_area", 0.0) or 0.0)
-            if _fa > 0:
-                ref_area = _fa
-            else:
-                logger.warning("CAD frontal area is zero — keeping the default "
-                               "reference area; coefficients will be off.")
-            ref_length = float(_ci.get("length", 1.0) or 1.0)
-            logger.info(f"Reference values from imported CAD: "
-                        f"A={ref_area:.6f} m² (projected frontal)  "
-                        f"L={ref_length:.4f} m (flow-axis extent)")
-        # Priority 1: Use exact geometry dict parameters (avoids fin span bug)
-        elif cfg.geometry_dict and "max_diameter" in cfg.geometry_dict:
-            max_d = cfg.geometry_dict["max_diameter"]
-            ref_area = math.pi * (max_d / 2.0) ** 2
-            ref_length = cfg.geometry_dict.get("length", 1.0)
-            logger.info(f"Using exact max diameter ({max_d*1000:.1f} mm) for reference area.")
-        # Priority 2: Fallback to STL bounding box (may include fins)
-        elif cfg.geometry_stl and cfg.geometry_stl.is_file():
-            try:
-                import pyvista as pv
-                m = pv.read(str(cfg.geometry_stl))
-                bounds = m.bounds   # (xmin, xmax, ymin, ymax, zmin, zmax)
-                # K2 STL: Z-axis is the rocket longitudinal axis
-                # Use Z-span as ref_length (not max of all dims, which
-                # would include fin span and overestimate)
-                z_span = abs(bounds[5] - bounds[4])
-                x_span = abs(bounds[1] - bounds[0])
-                y_span = abs(bounds[3] - bounds[2])
-                ref_length = max(z_span, x_span, y_span)  # longest = rocket axis
-                # Cross-section radius: use the SMALLER of X/Y spans
-                # (fins make the larger span unreliable for body diameter)
-                cross_spans = sorted([x_span, y_span, z_span])
-                body_diam = cross_spans[0]  # smallest span = body diameter
-                ref_area = math.pi * (body_diam / 2) ** 2
-                logger.info(f"STL bounding box: X={x_span:.4f} Y={y_span:.4f} "
-                            f"Z={z_span:.4f} → ref_L={ref_length:.4f} m, "
-                            f"ref_A={ref_area:.6f} m² (body_d={body_diam:.4f} m)")
-            except Exception as e:
-                logger.warning(f"Could not read STL bounds: {e}. Using defaults.")
-
-        # Explicit user overrides win over every automatic source above. Applied
-        # last (and independently) so setting only one of the two keeps the
-        # measured value for the other.
-        if cfg.ref_area_override and cfg.ref_area_override > 0:
-            ref_area = float(cfg.ref_area_override)
-            logger.info(f"Reference area overridden by user: {ref_area:.6f} m²")
-        if cfg.ref_length_override and cfg.ref_length_override > 0:
-            ref_length = float(cfg.ref_length_override)
-            logger.info(f"Reference length overridden by user: {ref_length:.4f} m")
-
-        return ref_area, ref_length
+        return resolve_reference_values(
+            external_cad=cfg.external_cad,
+            cad_info=cfg.cad_info,
+            geometry_dict=cfg.geometry_dict,
+            geometry_stl=cfg.geometry_stl,
+            ref_area_override=cfg.ref_area_override,
+            ref_length_override=cfg.ref_length_override,
+        )
 
     def generate_case(self) -> Path:
         """Write the SU2 .cfg file with correct ISA conditions."""
@@ -603,6 +685,12 @@ class SU2Solver(CFDSolver):
         # low-Re turbulence model, but nothing downstream says so: the Y+ view
         # renders a smooth field and the polars report a confident Cd whether
         # or not the boundary layer was resolved. Say it up front instead.
+        # Verdict recorded on the solver, not just logged: parse_results puts it
+        # on the CFDResult so the UI, the PDF export and the CSV all state it
+        # without having to re-derive it. An inviscid run has no skin friction
+        # by construction and is not "unresolved" -- it is answered by the
+        # analytic build-up instead, so it starts clean.
+        self._wall_verdict = (True, "")
         if is_viscous and self._mesh_path and Path(self._mesh_path).is_file():
             spacing = _wall_spacing_from_su2_mesh(Path(self._mesh_path))
             if spacing:
@@ -620,21 +708,38 @@ class SU2Solver(CFDSolver):
                     f"y+ = 1 would need {yp['spacing_for_yplus_1']*1e6:.2f} µm."
                 )
                 if yp["y_plus"] > 30:
-                    logger.warning(
-                        msg + " Skin friction, wall shear and wall heat transfer "
-                        "from this run are NOT trustworthy — the boundary layer "
-                        "is unresolved and there is no wall model. Pressure drag "
-                        "and Cp are still usable; for total drag prefer the "
-                        "hybrid Euler + analytic-friction mode."
+                    _w = (
+                        f"Boundary layer UNRESOLVED (predicted wall y+ "
+                        f"{yp['y_plus']:.0f}, needs y+ < 5 with no wall model "
+                        f"available). Skin friction and wall heat transfer from "
+                        f"this run are not physical — a measured SST solution "
+                        f"on this mesh family returned Cf 3.2e-6 against a "
+                        f"flat-plate 1.9e-3, i.e. ~600x low, so total drag is "
+                        f"missing essentially all of its friction component. "
+                        f"Pressure drag, Cp, lift and CP are still usable. For "
+                        f"total drag use Euler + flat-plate friction."
                     )
+                    self._wall_verdict = (False, _w)
+                    logger.warning(msg + " " + _w)
                 elif 5 <= yp["y_plus"] <= 30:
-                    logger.warning(
-                        msg + " That is the buffer layer, where neither wall "
-                        "resolution nor a wall function is valid. Re-mesh with a "
-                        "smaller target y+ before trusting the skin friction."
+                    _w = (
+                        f"Wall in the BUFFER LAYER (predicted y+ "
+                        f"{yp['y_plus']:.1f}), where neither wall resolution "
+                        f"nor a wall function is valid. Skin friction from this "
+                        f"run is not trustworthy."
                     )
+                    self._wall_verdict = (False, _w)
+                    logger.warning(msg + " " + _w)
                 else:
                     logger.info(msg)
+            else:
+                self._wall_verdict = (
+                    False,
+                    "Wall spacing could not be measured from the mesh, so the "
+                    "boundary-layer resolution is unknown. Treat skin friction "
+                    "as unverified."
+                )
+                logger.warning(self._wall_verdict[1])
 
         config_text = _SU2_CONFIG_TEMPLATE.format(
             solver_type=turb_cfg["solver"],
@@ -927,7 +1032,17 @@ class SU2Solver(CFDSolver):
             # so the AoA-induced normal force is along Z and its moment is
             # about Y. CMz is the (near-zero) yaw component — do not use it.
             cd_mean, cd_min, cd_max = _get_tail("CD")
-            result.cd = abs(cd_mean)
+            # Signed, not abs(). A negative total drag is not a sign error to be
+            # tidied away -- it means the surface solution or the wall normals
+            # are wrong, and abs() turned that into a plausible-looking number.
+            # cd_pressure was de-abs'd for this reason already; cd was missed.
+            result.cd = cd_mean
+            if cd_mean < 0:
+                logger.error(
+                    f"Integrated total drag is NEGATIVE (Cd={cd_mean:.5f}). "
+                    f"The solution is non-physical -- check convergence and the "
+                    f"wall normals. Reported as-is rather than as its magnitude."
+                )
             result.cl = _get_tail("CL")[0]
             result.cm = _get_tail("CMy")[0]
             result.iterations = len(rows)
@@ -1073,6 +1188,69 @@ class SU2Solver(CFDSolver):
             result.turbulence_model = turb_key
             result.solver_name = "SU2"
 
+            # ── Hybrid Euler + flat-plate friction ───────────────────────────
+            # Applied HERE, not in the sweep, because it belongs to a solved
+            # point rather than to the act of sweeping. It used to live only in
+            # cfd/sweep.py, which meant the mode the UI calls "recommended" --
+            # and which exists precisely because wall-unresolved RANS on this
+            # mesh reports essentially no skin friction -- was unreachable from
+            # the single-run button. A single run therefore defaulted to SST and
+            # returned a drag missing its entire friction component.
+            #
+            # Pressure/wave drag, lift, moments and CP keep their integrated
+            # (inviscid) values untouched; only Cd gains the build-up.
+            if getattr(self.config, "euler_analytic_friction", False):
+                from cfd.sweep import analytic_friction_cd, analytic_friction_cd_cad
+                if self.config.external_cad and self.config.cad_info:
+                    cd_f = analytic_friction_cd_cad(
+                        self.config.cad_info, result.reynolds, result.mach,
+                        result.reference_area_m2)
+                else:
+                    cd_f = analytic_friction_cd(
+                        self.config.geometry_dict, result.reynolds, result.mach,
+                        result.reference_area_m2)
+                if cd_f is not None:
+                    result.cd += cd_f
+                    result.cd_friction = cd_f
+                    result.force_axial = (result.cd * result.dynamic_pressure
+                                          * result.reference_area_m2)
+                    result.solver_name = "SU2 Euler + flat-plate friction"
+                    logger.info(f"Analytic friction added: Cd_f={cd_f:.5f} "
+                                f"-> Cd={result.cd:.5f}")
+                else:
+                    logger.warning(
+                        "Euler+friction mode: geometry or Reynolds number "
+                        "unavailable — Cd is inviscid-only for this point and "
+                        "is missing its friction component entirely."
+                    )
+
+            # ── Base drag on an inviscid solve ───────────────────────────────
+            # Kept as a warning rather than a correction, because there is no
+            # honest correction to make. Inviscid flow has no separated base
+            # recirculation: the pressure recovers over the aft face instead of
+            # sitting below ambient, so the integrated cd_base is a lower bound
+            # and the real base drag (30-50% of subsonic rocket Cd) is partly
+            # missing. The flat-plate build-up above supplies friction, not this.
+            if turb_key == "Euler" and result.cd_base < 0.02:
+                logger.warning(
+                    f"Cd_base={result.cd_base:.5f} comes from an INVISCID solve, "
+                    f"which has no base recirculation — the aft face recovers "
+                    f"pressure instead of sitting below ambient. Treat it as a "
+                    f"lower bound; on a blunt-based rocket the real base drag is "
+                    f"a large fraction of the total."
+                )
+
+            # Wall-resolution verdict from generate_case (see _wall_verdict).
+            result.wall_resolved, result.wall_warning = getattr(
+                self, "_wall_verdict", (True, ""))
+            if not result.wall_resolved:
+                logger.warning(
+                    f"Cd_friction={result.cd_friction:.6f} comes from a wall "
+                    f"the mesh does not resolve — see the wall warning on this "
+                    f"result. Total Cd={result.cd:.5f} is therefore a LOWER "
+                    f"BOUND."
+                )
+
             # CP location — recovered per point from the integrated surface forces.
             # SU2's LIFT/MOMENT_Y are the integrated pressure+shear loads, so the CP
             # derived from them IS a pressure-integration CP (not a fitted curve).
@@ -1101,7 +1279,17 @@ class SU2Solver(CFDSolver):
             # Body-frame normal force (what the airframe actually bends under) —
             # more correct than the wind-frame CL set above, especially >5° AoA.
             result.force_normal = abs(_CN) * _q * _A
-            if abs(_CN) > 0.003:  # meaningful normal force present
+            # Two conditions, not one. The CN threshold alone was 0.003, which
+            # a symmetric body at EXACTLY zero angle of attack can exceed on
+            # residual asymmetry alone: measured CN = -0.0065 at alpha = 0,
+            # which produced "CP raw x_cp = -0.819 m from nose outside body,
+            # clamped" -- a clamp firing on a quantity that has no value to
+            # clamp. CP is the ratio of two numbers that both go to zero with
+            # incidence, so it is undefined at alpha = 0 no matter how well the
+            # forces converged, and the honest answer is to say so.
+            _has_incidence = (abs(self.config.angle_of_attack_deg) > 0.05
+                              or abs(self.config.sideslip_angle_deg) > 0.05)
+            if abs(_CN) > 0.003 and _has_incidence:
                 _xcp_nose = -(result.cm / _CN) * result.ref_length
                 # Clamp to the physical body range [0, true_length]; warn (don't
                 # silently saturate) if the raw value lands outside so a flat-line
@@ -1149,6 +1337,19 @@ class SU2Solver(CFDSolver):
                 conv_floor = math.log10(self.config.convergence_tolerance)  # e.g. -6
                 stopped_early = len(rows) < self.config.max_iterations
                 result.final_residual = last_rho
+                # Decades fallen from the FIRST iteration. The absolute floor
+                # cannot mean anything on its own here: residuals are
+                # dimensional, so where a case starts is set by the flow scale.
+                # A run beginning at rms[Rho] = -3 clears a -6 floor after three
+                # decades; one beginning at +2 needs eight for the same flag.
+                try:
+                    first_rho = float(rows[0].get("rms[Rho]", "nan"))
+                except (TypeError, ValueError):
+                    first_rho = float("nan")
+                drop = (first_rho - last_rho
+                        if math.isfinite(first_rho) and math.isfinite(last_rho)
+                        else 0.0)
+                result.residual_drop_decades = drop
 
                 # ── Convergence, with the failure cases actually excluded ─────
                 # "Stopped before the iteration cap" used to be sufficient on its
@@ -1180,37 +1381,56 @@ class SU2Solver(CFDSolver):
                 diverging = bool(_rhos) and (last_rho > best_rho + 2.0)  # 100x
 
                 hit_floor = finite and last_rho <= conv_floor
+                # A genuine convergence signal is now REQUIRED, and "SU2 stopped
+                # before the iteration cap" is no longer one on its own. It used
+                # to be, which meant a case whose dimensional residual started
+                # just above the floor cleared it in three decades and was
+                # flagged converged with the forces still moving. Either the
+                # residual has fallen _MIN_RESIDUAL_DECADES from where it began,
+                # or the reported forces are stationary. The early stop is kept
+                # only as corroboration.
+                deep_enough = finite and drop >= _MIN_RESIDUAL_DECADES
                 result.converged = bool(
                     finite and not diverging
-                    and (hit_floor or forces_stationary or stopped_early)
+                    and (hit_floor or deep_enough or forces_stationary)
                 )
 
                 if not result.converged:
                     if not finite:
-                        logger.warning(
-                            f"Not converged: non-finite results "
-                            f"(Cd={result.cd}, Cl={result.cl}, Cm={result.cm}, "
-                            f"rms[Rho]={last_rho}). The solve went non-physical."
-                        )
+                        result.convergence_note = (
+                            f"Non-finite results (Cd={result.cd}, Cl={result.cl}, "
+                            f"Cm={result.cm}, rms[Rho]={last_rho}) — the solve "
+                            f"went non-physical.")
                     elif diverging:
-                        logger.warning(
-                            f"Not converged: residual diverged — rms[Rho] ended "
-                            f"at {last_rho:.3f} against a best of {best_rho:.3f} "
-                            f"({last_rho - best_rho:.1f} decades worse)."
-                        )
+                        result.convergence_note = (
+                            f"Residual diverged: rms[Rho] ended at {last_rho:.2f} "
+                            f"against a best of {best_rho:.2f} "
+                            f"({last_rho - best_rho:.1f} decades worse).")
                     else:
-                        logger.warning(
-                            f"Not converged: rms[Rho]={last_rho:.3f} above the "
-                            f"{conv_floor:.0f} floor, forces not stationary, and "
-                            f"the run used all {self.config.max_iterations} "
-                            f"iterations."
-                        )
-                elif stopped_early and not (hit_floor or forces_stationary):
-                    logger.info(
-                        f"Converged on early stop: SU2 ended at iteration "
-                        f"{len(rows)} of {self.config.max_iterations} with "
-                        f"rms[Rho]={last_rho:.3f} (a Cauchy criterion fired)."
-                    )
+                        result.convergence_note = (
+                            f"rms[Rho] fell only {drop:.1f} decades (need "
+                            f"{_MIN_RESIDUAL_DECADES:g}), the absolute floor "
+                            f"{conv_floor:.0f} was not reached, and the drag "
+                            f"coefficient is still moving "
+                            f"{(cd_max - cd_min) / max(abs(cd_mean), 1e-9) * 100:.2f}% "
+                            f"over the last {tail_n} iterations.")
+                    logger.warning("Not converged: " + result.convergence_note)
+                else:
+                    _why = []
+                    if hit_floor:
+                        _why.append(f"rms[Rho]={last_rho:.2f} at or below the "
+                                    f"{conv_floor:.0f} floor")
+                    if deep_enough:
+                        _why.append(f"residual fell {drop:.1f} decades")
+                    if forces_stationary:
+                        _why.append(f"Cd stationary to "
+                                    f"{(cd_max - cd_min) / max(abs(cd_mean), 1e-9) * 100:.2f}% "
+                                    f"over {tail_n} iterations")
+                    if stopped_early:
+                        _why.append(f"SU2 stopped at iteration {len(rows)} of "
+                                    f"{self.config.max_iterations}")
+                    result.convergence_note = "; ".join(_why)
+                    logger.info("Converged: " + result.convergence_note)
             except Exception as e:
                 logger.warning(f"Convergence check failed ({e}) — "
                                f"reporting not converged.")

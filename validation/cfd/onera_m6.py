@@ -146,8 +146,56 @@ def planform_area(mirrored: bool = True) -> float:
     return 2.0 * semi if mirrored else semi
 
 
-def build_m6_stl(out_path: Path, n_span: int = 60, mirror: bool = True) -> Path:
+def _resample_airfoil(foil: list, ds: float) -> list:
+    """Resample one airfoil surface by arc length at spacing ``ds`` (in chords).
+
+    The published ONERA D table clusters hard at the nose -- consecutive
+    stations 1e-5 chord apart -- which is right for defining a shape and wrong
+    for tessellating one. Combined with a spanwise spacing three orders of
+    magnitude larger it produces knife-edge triangles: measured on the shipped
+    STL, aspect ratio p95 = 42 and max = 609, with a median of 19.5 on the
+    leading-edge band alone.
+
+    Those slivers are not a cosmetic problem here. The wall mesh IS this
+    tessellation (see build_m6_stl), so the solver inherits them exactly, and
+    they sit on the one part of the wing where the suction peak that carries
+    the lift is formed.
+
+    Arc-length spacing keeps the nose curvature (points follow the contour, so
+    a tight radius still gets more of them per unit chord) while bounding how
+    short an edge can be relative to the span station spacing. The exact
+    leading- and trailing-edge points are preserved as endpoints.
+    """
+    import numpy as np
+    p = np.asarray(foil, dtype=float)
+    seg = np.hypot(np.diff(p[:, 0]), np.diff(p[:, 1]))
+    s = np.concatenate([[0.0], np.cumsum(seg)])
+    total = float(s[-1])
+    if total <= 0 or ds <= 0:
+        return foil
+    n = max(int(np.ceil(total / ds)) + 1, 24)
+    s_new = np.linspace(0.0, total, n)
+    return [(float(x), float(z)) for x, z in
+            zip(np.interp(s_new, s, p[:, 0]), np.interp(s_new, s, p[:, 1]))]
+
+
+def build_m6_stl(out_path: Path, n_span: int = 60, mirror: bool = True,
+                 target_edge: float | None = None) -> Path:
     """Write a closed STL of the M6 wing.
+
+    ``target_edge`` sets the spanwise station spacing so the tessellation is at
+    least as fine as the wall size the solve will ask for. It has to, because
+    the wall mesh here IS this tessellation: the mirrored wing is 33,796
+    triangles, above the limit at which gmsh can reparametrise a discrete
+    surface (it was measured still inside classifySurfaces after 14 minutes of
+    CPU), so the surface cannot be remeshed and ``custom_wall_size`` controls
+    the volume mesh only.
+
+    That is not a hypothetical. The two-level refinement study in this file
+    solved the case at a 20 mm and a 10 mm wall size and got BYTE-IDENTICAL
+    surface meshes — 16,900 points and 33,796 cells with the same median cell
+    area — against volume meshes of 238,544 and 1,474,444 tets. Its "Cp RMSE
+    improves with refinement" rows were measuring the volume mesh.
 
     Chord along +x, span along +y, thickness along z — so the CFD flow axis is
     x, which must be passed to ``analyze_cad`` explicitly: auto-detection picks
@@ -167,12 +215,18 @@ def build_m6_stl(out_path: Path, n_span: int = 60, mirror: bool = True) -> Path:
     import pyvista as pv
 
     foil = load_airfoil()
+    if target_edge and target_edge > 0:
+        foil = _resample_airfoil(foil, target_edge / root_chord())
     # Full section loop: upper surface LE->TE, then lower surface TE->LE.
     upper = [(x, z) for x, z in foil]
     lower = [(x, -z) for x, z in reversed(foil[1:-1])]
     loop = upper + lower
     n_loop = len(loop)
 
+    if target_edge and target_edge > 0:
+        # Spanwise stations at the requested spacing. The chordwise resolution
+        # comes from the airfoil table and is already ~1% of chord at the nose.
+        n_span = max(n_span, int(math.ceil(SEMI_SPAN / target_edge)) + 1)
     if mirror:
         half = np.linspace(0.0, SEMI_SPAN, n_span)
         ys = np.concatenate([-half[:0:-1], half])   # -b/2 .. +b/2, root once
@@ -297,21 +351,71 @@ def surface_cp_at_section(surface_vtk, y_over_b: float, upper: bool,
         raise RuntimeError(f"no surface points near y/b={y_over_b} "
                            f"(y={y_target:.4f} m, root={y_root:.4f}, tip={y_tip:.4f})")
 
-    xs, zs, cps = pts[sel, 0], pts[sel, 2], cp[sel]
-    x_le, x_te = float(xs.min()), float(xs.max())
-    c = x_te - x_le
-    if c <= 0.0:
-        raise RuntimeError(f"degenerate chord at y/b={y_over_b}")
-    xc = (xs - x_le) / c
-    side = zs > 0.0 if upper else zs < 0.0
-    xc, cps = xc[side], cps[side]
-    if xc.size < 3:
+    # ── Normalise within thin SUB-BANDS, not across the whole band ───────────
+    #
+    # The band has to be finite to catch points on an unstructured surface, but
+    # the wing is swept, so x_le and x_te both move across it. Taking
+    # ``xs.min()`` and ``xs.max()`` over the whole band therefore mixes the
+    # inboard edge's leading edge with the outboard edge's trailing edge: at
+    # y/b=0.9 the leading edge moves 14 mm across a 24 mm band (30 deg sweep)
+    # and the trailing edge 7 mm the other way, so the "chord" came out ~4%
+    # long and every x/c was shifted. That lands hardest in the first few
+    # percent of chord — exactly where the suction peak is and exactly where
+    # the comparison was failing.
+    #
+    # Splitting into sub-bands an eighth as wide cuts the smear to ~0.5% of
+    # chord, and each sub-band is normalised by its own leading and trailing
+    # edge, which is what the experimentalists normalised by.
+    n_sub = 8
+    ys = pts[sel, 1]
+    xs_all, zs_all, cps_all = pts[sel, 0], pts[sel, 2], cp[sel]
+    edges = np.linspace(ys.min(), ys.max(), n_sub + 1)
+    xc_parts, cp_parts = [], []
+    for i in range(n_sub):
+        m = (ys >= edges[i]) & (ys <= edges[i + 1])
+        if m.sum() < 4:
+            continue
+        xs, zs, cps = xs_all[m], zs_all[m], cps_all[m]
+        x_le, x_te = float(xs.min()), float(xs.max())
+        c = x_te - x_le
+        if c <= 0.0:
+            continue
+        # Split by the section's own mid-line rather than by z = 0. The CAD
+        # import recentres what it is given, so the mid-line is not guaranteed
+        # to sit at the origin; the previous absolute test quietly assigned
+        # points to the wrong surface wherever the section is thin.
+        z_mid = 0.5 * (zs[np.argmin(xs)] + zs[np.argmax(xs)])
+        side = (zs > z_mid) if upper else (zs < z_mid)
+        if side.sum() < 3:
+            continue
+        xc_parts.append((xs[side] - x_le) / c)
+        cp_parts.append(cps[side])
+
+    if not xc_parts:
         raise RuntimeError(f"too few {'upper' if upper else 'lower'} points "
                            f"at y/b={y_over_b}")
+    xc = np.concatenate(xc_parts)
+    cps = np.concatenate(cp_parts)
 
+    # ── Aggregate before interpolating ───────────────────────────────────────
+    # np.interp needs a monotone abscissa. Sorting alone does not give one here:
+    # the sub-bands contribute many points at nearly the same x/c, and interp
+    # then picks whichever of the near-duplicates the sort happened to order
+    # last rather than averaging them. Bin and average first, so each x/c
+    # carries the mean of everything measured there.
     order = np.argsort(xc)
     xc, cps = xc[order], cps[order]
-    return [float(np.interp(x, xc, cps)) for x in x_over_c]
+    nb = 200
+    idx = np.clip((xc * nb).astype(int), 0, nb - 1)
+    cnt = np.bincount(idx, minlength=nb)
+    sx = np.bincount(idx, weights=xc, minlength=nb)
+    sc = np.bincount(idx, weights=cps, minlength=nb)
+    keep = cnt > 0
+    xc_b, cp_b = sx[keep] / cnt[keep], sc[keep] / cnt[keep]
+    if xc_b.size < 3:
+        raise RuntimeError(f"too few binned {'upper' if upper else 'lower'} "
+                           f"stations at y/b={y_over_b}")
+    return [float(np.interp(x, xc_b, cp_b)) for x in x_over_c]
 
 
 def _integrate_cp(rows) -> float:
@@ -398,7 +502,10 @@ def run_su2(work_dir: Path, refinement: str = "fine",
 
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
-    stl = build_m6_stl(work_dir / "onera_m6.stl", mirror=mirror)
+    # Tessellate at the wall size being studied, or the "refinement" only
+    # refines the volume — see build_m6_stl.
+    stl = build_m6_stl(work_dir / "onera_m6.stl", mirror=mirror,
+                       target_edge=wall_size)
 
     # flow_axis must be forced: the span is the longest extent, so "auto" would
     # point the freestream along the wing.
@@ -464,7 +571,7 @@ def run_su2(work_dir: Path, refinement: str = "fine",
     return solver.parse_results()
 
 
-def _case_key(stl: Path, mirror: bool, wall_size, refinement: str) -> str:
+def _case_key(stl: Path, mirror: bool, wall_size, refinement: str) -> str:  # noqa: E302
     """Hash of the geometry and the mesh settings a solved level belongs to.
 
     The mesher's own revision is part of it: a change to the size fields makes a
