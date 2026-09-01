@@ -417,6 +417,95 @@ def _integrate_surface_forces(
         return None
 
 
+def resolve_reference_values(
+    *,
+    external_cad=None,
+    cad_info: Optional[dict] = None,
+    geometry_dict: Optional[dict] = None,
+    geometry_stl: Optional[Path] = None,
+    ref_area_override: Optional[float] = None,
+    ref_length_override: Optional[float] = None,
+    quiet: bool = False,
+) -> tuple[float, float]:
+    """Return ``(ref_area_m2, ref_length_m)`` for the force coefficients.
+
+    Anything that needs these before the solve — mesh sizing, the pre-run y+
+    prediction, the conditions-panel Reynolds preview — must read them from
+    here rather than recomputing its own, or the two drift by the ratio
+    between them. The UI preview did exactly that: it hardcoded L=1 m and
+    advertised a Reynolds number the run never used, off by the body length.
+
+    Takes loose values rather than a CFDConfig so the UI can call it from live
+    widget state without building a whole config on every keystroke.
+
+    :param quiet: suppress info logging. The UI calls this on every spinbox
+        tick; only the solve itself should narrate its reference values.
+    """
+    def _info(msg):
+        if not quiet:
+            logger.info(msg)
+
+    ref_length = 1.0
+    ref_area = 0.1
+
+    # Priority 0: external CAD — measured projected frontal area and
+    # flow-wise bbox extent. An arbitrary body has no "body diameter" to
+    # infer a reference from, so it is measured off the tessellation.
+    if external_cad and cad_info:
+        _fa = float(cad_info.get("frontal_area", 0.0) or 0.0)
+        if _fa > 0:
+            ref_area = _fa
+        elif not quiet:
+            logger.warning("CAD frontal area is zero — keeping the default "
+                           "reference area; coefficients will be off.")
+        ref_length = float(cad_info.get("length", 1.0) or 1.0)
+        _info(f"Reference values from imported CAD: "
+              f"A={ref_area:.6f} m² (projected frontal)  "
+              f"L={ref_length:.4f} m (flow-axis extent)")
+    # Priority 1: Use exact geometry dict parameters (avoids fin span bug)
+    elif geometry_dict and "max_diameter" in geometry_dict:
+        max_d = geometry_dict["max_diameter"]
+        ref_area = math.pi * (max_d / 2.0) ** 2
+        ref_length = geometry_dict.get("length", 1.0)
+        _info(f"Using exact max diameter ({max_d*1000:.1f} mm) for reference area.")
+    # Priority 2: Fallback to STL bounding box (may include fins)
+    elif geometry_stl and Path(geometry_stl).is_file():
+        try:
+            import pyvista as pv
+            m = pv.read(str(geometry_stl))
+            bounds = m.bounds   # (xmin, xmax, ymin, ymax, zmin, zmax)
+            # K2 STL: Z-axis is the rocket longitudinal axis
+            # Use Z-span as ref_length (not max of all dims, which
+            # would include fin span and overestimate)
+            z_span = abs(bounds[5] - bounds[4])
+            x_span = abs(bounds[1] - bounds[0])
+            y_span = abs(bounds[3] - bounds[2])
+            ref_length = max(z_span, x_span, y_span)  # longest = rocket axis
+            # Cross-section radius: use the SMALLER of X/Y spans
+            # (fins make the larger span unreliable for body diameter)
+            cross_spans = sorted([x_span, y_span, z_span])
+            body_diam = cross_spans[0]  # smallest span = body diameter
+            ref_area = math.pi * (body_diam / 2) ** 2
+            _info(f"STL bounding box: X={x_span:.4f} Y={y_span:.4f} "
+                  f"Z={z_span:.4f} → ref_L={ref_length:.4f} m, "
+                  f"ref_A={ref_area:.6f} m² (body_d={body_diam:.4f} m)")
+        except Exception as e:
+            if not quiet:
+                logger.warning(f"Could not read STL bounds: {e}. Using defaults.")
+
+    # Explicit user overrides win over every automatic source above. Applied
+    # last (and independently) so setting only one of the two keeps the
+    # measured value for the other.
+    if ref_area_override and ref_area_override > 0:
+        ref_area = float(ref_area_override)
+        _info(f"Reference area overridden by user: {ref_area:.6f} m²")
+    if ref_length_override and ref_length_override > 0:
+        ref_length = float(ref_length_override)
+        _info(f"Reference length overridden by user: {ref_length:.4f} m")
+
+    return ref_area, ref_length
+
+
 class SU2Solver(CFDSolver):
     """SU2 CFD solver backend for K2 AeroSim."""
 
@@ -481,71 +570,18 @@ class SU2Solver(CFDSolver):
     def _reference_values(self) -> tuple[float, float]:
         """Return ``(ref_area_m2, ref_length_m)`` for the force coefficients.
 
-        Extracted from generate_case() so anything that needs the reference
-        length before the solve — mesh sizing, the pre-run y+ prediction —
-        reads the same value the coefficients are normalised by, rather than
-        recomputing its own and drifting by the ratio of the two.
+        Thin wrapper over the module-level :func:`resolve_reference_values`,
+        which the UI's Reynolds preview also calls so the two cannot drift.
         """
         cfg = self.config
-        ref_length = 1.0
-        ref_area = 0.1
-
-        # Priority 0: external CAD — measured projected frontal area and
-        # flow-wise bbox extent. An arbitrary body has no "body diameter" to
-        # infer a reference from, so it is measured off the tessellation.
-        if cfg.external_cad and cfg.cad_info:
-            _ci = cfg.cad_info
-            _fa = float(_ci.get("frontal_area", 0.0) or 0.0)
-            if _fa > 0:
-                ref_area = _fa
-            else:
-                logger.warning("CAD frontal area is zero — keeping the default "
-                               "reference area; coefficients will be off.")
-            ref_length = float(_ci.get("length", 1.0) or 1.0)
-            logger.info(f"Reference values from imported CAD: "
-                        f"A={ref_area:.6f} m² (projected frontal)  "
-                        f"L={ref_length:.4f} m (flow-axis extent)")
-        # Priority 1: Use exact geometry dict parameters (avoids fin span bug)
-        elif cfg.geometry_dict and "max_diameter" in cfg.geometry_dict:
-            max_d = cfg.geometry_dict["max_diameter"]
-            ref_area = math.pi * (max_d / 2.0) ** 2
-            ref_length = cfg.geometry_dict.get("length", 1.0)
-            logger.info(f"Using exact max diameter ({max_d*1000:.1f} mm) for reference area.")
-        # Priority 2: Fallback to STL bounding box (may include fins)
-        elif cfg.geometry_stl and cfg.geometry_stl.is_file():
-            try:
-                import pyvista as pv
-                m = pv.read(str(cfg.geometry_stl))
-                bounds = m.bounds   # (xmin, xmax, ymin, ymax, zmin, zmax)
-                # K2 STL: Z-axis is the rocket longitudinal axis
-                # Use Z-span as ref_length (not max of all dims, which
-                # would include fin span and overestimate)
-                z_span = abs(bounds[5] - bounds[4])
-                x_span = abs(bounds[1] - bounds[0])
-                y_span = abs(bounds[3] - bounds[2])
-                ref_length = max(z_span, x_span, y_span)  # longest = rocket axis
-                # Cross-section radius: use the SMALLER of X/Y spans
-                # (fins make the larger span unreliable for body diameter)
-                cross_spans = sorted([x_span, y_span, z_span])
-                body_diam = cross_spans[0]  # smallest span = body diameter
-                ref_area = math.pi * (body_diam / 2) ** 2
-                logger.info(f"STL bounding box: X={x_span:.4f} Y={y_span:.4f} "
-                            f"Z={z_span:.4f} → ref_L={ref_length:.4f} m, "
-                            f"ref_A={ref_area:.6f} m² (body_d={body_diam:.4f} m)")
-            except Exception as e:
-                logger.warning(f"Could not read STL bounds: {e}. Using defaults.")
-
-        # Explicit user overrides win over every automatic source above. Applied
-        # last (and independently) so setting only one of the two keeps the
-        # measured value for the other.
-        if cfg.ref_area_override and cfg.ref_area_override > 0:
-            ref_area = float(cfg.ref_area_override)
-            logger.info(f"Reference area overridden by user: {ref_area:.6f} m²")
-        if cfg.ref_length_override and cfg.ref_length_override > 0:
-            ref_length = float(cfg.ref_length_override)
-            logger.info(f"Reference length overridden by user: {ref_length:.4f} m")
-
-        return ref_area, ref_length
+        return resolve_reference_values(
+            external_cad=cfg.external_cad,
+            cad_info=cfg.cad_info,
+            geometry_dict=cfg.geometry_dict,
+            geometry_stl=cfg.geometry_stl,
+            ref_area_override=cfg.ref_area_override,
+            ref_length_override=cfg.ref_length_override,
+        )
 
     def generate_case(self) -> Path:
         """Write the SU2 .cfg file with correct ISA conditions."""

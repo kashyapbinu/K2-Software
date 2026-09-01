@@ -809,6 +809,8 @@ class CFDWorkspace(QWidget):
             "Reference length for Cm and Reynolds. 0 = the bounding-box extent "
             "along the flow axis. Set it to a mean chord for wing-type bodies."
         )
+        # Re is linear in this, so the conditions preview has to follow it.
+        self._sp_ref_len.valueChanged.connect(self._update_isa)
 
         cad_form.addRow("Units:", self._cb_cad_units)
         cad_form.addRow("Repair:", self._chk_wrap)
@@ -867,7 +869,7 @@ class CFDWorkspace(QWidget):
         self._lbl_T   = _make_val_label(); al.addRow("Temperature:",    self._lbl_T)
         self._lbl_rho = _make_val_label(); al.addRow("Density:",        self._lbl_rho)
         self._lbl_a   = _make_val_label(); al.addRow("Speed of Sound:", self._lbl_a)
-        self._lbl_Re  = _make_val_label(); al.addRow("Reynolds:",       self._lbl_Re)
+        self._lbl_Re  = _make_val_label(); al.addRow("Reynolds (pending):", self._lbl_Re)
         self._lbl_q   = _make_val_label(); al.addRow("Dyn. Pressure:",  self._lbl_q)
         lay.addWidget(atm_grp)
 
@@ -1532,7 +1534,7 @@ class CFDWorkspace(QWidget):
         sf.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         self._lbl_solver = _make_val_label(); sf.addRow("Solver:",    self._lbl_solver)
         self._lbl_turb_r = _make_val_label(); sf.addRow("Model:",     self._lbl_turb_r)
-        self._lbl_re_r   = _make_val_label(); sf.addRow("Reynolds:",  self._lbl_re_r)
+        self._lbl_re_r   = _make_val_label(); sf.addRow("Reynolds (this run):",  self._lbl_re_r)
         self._lbl_q_r    = _make_val_label(); sf.addRow("Dyn. Press:", self._lbl_q_r)
         lay.addWidget(solver_grp)
 
@@ -1630,6 +1632,42 @@ class CFDWorkspace(QWidget):
         return scroll
 
     # ── Logic ─────────────────────────────────────────────────────────────────
+    def _preview_reference_length(self) -> float:
+        """Reference length the solve WILL normalise by, from live UI state.
+
+        Resolved through the same helper the solver uses, so the Reynolds
+        preview cannot disagree with the run. Assembly mode has no
+        geometry_dict until Run builds one, so the length is taken straight
+        off the assembly \u2014 it is the same value extract_cfd_geometry() puts
+        in that dict.
+        """
+        from cfd.solvers.su2_solver import resolve_reference_values
+        geo = None
+        cad = None
+        ext = None
+        # getattr: neither _cad_info nor _current_stl is bound in __init__, and
+        # this runs from the first _update_isa() during construction.
+        info = getattr(self, "_cad_info", None)
+        if self._rb_cad.isChecked() and info:
+            cad = info
+            ext = info.get("source")
+        elif self.assembly_provider:
+            try:
+                asm = self.assembly_provider()
+                if asm is not None:
+                    geo = {"max_diameter": 0.0, "length": float(asm.total_length())}
+            except Exception:
+                geo = None
+        _area, length = resolve_reference_values(
+            external_cad=ext,
+            cad_info=cad,
+            geometry_dict=geo,
+            geometry_stl=getattr(self, "_current_stl", None),
+            ref_length_override=self._sp_ref_len.value() or None,
+            quiet=True,          # runs on every spinbox tick
+        )
+        return length
+
     def _update_isa(self):
         from cfd.solvers.base import isa_conditions
         try:
@@ -1637,13 +1675,20 @@ class CFDWorkspace(QWidget):
             a = math.sqrt(1.4 * 287.05 * T)
             V = self._sp_mach.value() * a
             mu = 1.716e-5 * (T / 273.15) ** 1.5 * (273.15 + 110.4) / (T + 110.4)
-            Re = rho * V * 1.0 / mu  # assume L=1m, updated after geometry
+            # Re scales linearly with the reference length, so hardcoding L=1 m
+            # here (as this did) understated it by the body length \u2014 1.68x for
+            # the canonical rocket \u2014 and silently ignored the Ref. length box
+            # whose own tooltip says it sets Reynolds.
+            L_ref = self._preview_reference_length()
+            Re = rho * V * L_ref / mu
             q = 0.5 * rho * V ** 2
             self._lbl_P.setText(f"{P/1000:.2f} kPa")
             self._lbl_T.setText(f"{T:.1f} K  ({T-273.15:.1f} \u00b0C)")
             self._lbl_rho.setText(f"{rho:.4f} kg/m\u00b3")
             self._lbl_a.setText(f"{a:.1f} m/s")
-            self._lbl_Re.setText(f"{Re:.2e}")
+            # Name the length, so a Reynolds that looks off can be traced to
+            # the reference it was built on rather than doubted.
+            self._lbl_Re.setText(f"{Re:.2e}   (L_ref = {L_ref:.3f} m)")
             self._lbl_q.setText(f"{q/1000:.2f} kPa")
         except Exception:
             pass
@@ -1852,6 +1897,7 @@ class CFDWorkspace(QWidget):
         # preview shows, what the discrete mesher consumes, and the fallback
         # the solver reads bounds from.
         self._current_stl = Path(info.preview_stl)
+        self._update_isa()   # ref length just changed -> Reynolds preview stale
 
         axis_note = " (auto)" if info.flow_axis_auto else ""
         wrap_note = (
@@ -1907,6 +1953,9 @@ class CFDWorkspace(QWidget):
             self._current_stl = stl
             self._log(f"Geometry exported: {stl}")
             self._preview(stl)
+            # Reynolds is referenced to the body length, which is only known
+            # once geometry exists — recompute the conditions preview.
+            self._update_isa()
         except Exception as e:
             self._log(f"Export error: {e}")
 
