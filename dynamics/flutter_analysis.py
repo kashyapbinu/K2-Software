@@ -163,10 +163,18 @@ def _torsion_fundamental_freq(G: float, J: float,
                               I_alpha: float, L: float) -> float:
     """First torsional frequency of a cantilever with free end.
 
-    f_t = (1 / 2π) √(GJ / (I_α · L))
+    f_t = (1 / 4L) · √(GJ / I_α)
 
-    For a cantilever with one end free the first torsional mode shape is
-    a quarter-wave; the effective stiffness is GJ/L.
+    The first torsional mode of a fixed-free shaft is a quarter-wave, so
+    ω₁ = (π / 2L)·√(GJ / I_α) and f₁ = ω₁/2π = (1/4L)·√(GJ / I_α).
+
+    This was ``(1/2π)·√(GJ / (I_α·L))``, which is dimensionally inconsistent:
+    with I_α per unit span (kg·m, as _fin_section_properties returns it),
+    GJ/(I_α·L) is N·m²/(kg·m²) = m/s², so the square root is not a frequency.
+    The error is a factor of (2/π)·√L — not a constant — and it made the
+    torsion frequency ~5x too low for a 0.1 m fin, putting it BELOW first
+    bending. Bending-torsion flutter is the coalescence of a lower bending
+    branch with a higher torsion branch, so that ordering was inverted.
 
     Parameters
     ----------
@@ -182,10 +190,11 @@ def _torsion_fundamental_freq(G: float, J: float,
     References
     ----------
     Bisplinghoff, Ashley, Halfman, "Aeroelasticity", §3-3.
+    Blevins, "Formulas for Natural Frequency and Mode Shape", Table 8-15.
     """
     if L <= 0 or I_alpha <= 0 or G <= 0 or J <= 0:
         return 2.0  # safe fallback above bending
-    return (1.0 / (2.0 * math.pi)) * math.sqrt(G * J / (I_alpha * L))
+    return (1.0 / (4.0 * L)) * math.sqrt(G * J / I_alpha)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -122,3 +122,52 @@ def test_a_realistic_aluminium_fin_flutters_well_above_flight_speed():
     """Order-of-magnitude sanity: a 3 mm alu fin is not marginal at Mach 1."""
     v = flutter_speed(**FIN, altitude_m=3000.0)
     assert 500.0 < v < 5000.0, v
+
+
+# ── structural modal frequencies feeding the p-k solver ──────────────────────
+
+def _props(span=0.10, root=0.15, tip=0.075, thick=0.003, dens=2700.0):
+    from dynamics.flutter_analysis import _fin_section_properties
+    return _fin_section_properties(root, tip, thick, span, dens)
+
+
+def test_torsion_frequency_is_dimensionally_a_frequency():
+    """f_t must scale as 1/L with GJ/I_alpha held fixed.
+
+    The old form was (1/2pi)*sqrt(GJ/(I_alpha*L)). With I_alpha per unit span
+    (kg*m, which is what _fin_section_properties returns) that radicand is
+    N*m^2/(kg*m^2) = m/s^2, so its square root is not a frequency at all. The
+    resulting error was a factor of (2/pi)*sqrt(L) — span-dependent, so not
+    even a constant calibration offset.
+    """
+    from dynamics.flutter_analysis import _torsion_fundamental_freq
+    f1 = _torsion_fundamental_freq(26e9, 1e-9, 1e-3, 0.10)
+    f4 = _torsion_fundamental_freq(26e9, 1e-9, 1e-3, 0.40)
+    assert f1 / f4 == pytest.approx(4.0, rel=1e-12)
+
+
+def test_torsion_frequency_matches_the_quarter_wave_closed_form():
+    from dynamics.flutter_analysis import _torsion_fundamental_freq
+    G, J, I_a, L = 26e9, 1.0125e-9, 9.61084e-4, 0.10
+    expected = (1.0 / (4.0 * L)) * math.sqrt(G * J / I_a)
+    assert _torsion_fundamental_freq(G, J, I_a, L) == pytest.approx(expected, rel=1e-12)
+
+
+def test_torsion_sits_above_first_bending():
+    """Bending-torsion flutter is a lower bending branch coalescing with a
+    higher torsion branch. The old formula inverted that ordering."""
+    from dynamics.flutter_analysis import (_cantilever_bending_freq,
+                                           _torsion_fundamental_freq)
+    p = _props()
+    f_b = _cantilever_bending_freq(70e9, p["I_bend"], p["m_bar"], 0.10)
+    f_t = _torsion_fundamental_freq(26e9, p["J"], p["I_alpha"], 0.10)
+    assert f_t > f_b, f"torsion {f_t:.1f} Hz must exceed bending {f_b:.1f} Hz"
+
+
+def test_theodorsen_hits_its_known_limits():
+    """C(0)=1 (quasi-steady), C(inf)=0.5, and the lag term is negative."""
+    from dynamics.flutter_analysis import theodorsen_C
+    assert theodorsen_C(0.0) == complex(1.0, 0.0)
+    assert abs(theodorsen_C(1e-8) - 1.0) < 1e-3
+    assert theodorsen_C(1e6).real == pytest.approx(0.5, abs=1e-6)
+    assert theodorsen_C(0.5).imag < 0.0
