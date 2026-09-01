@@ -112,7 +112,7 @@ logger = logging.getLogger("K2.CFD.Meshing")
 # cache key, so an old mesh is never silently reused across a mesher change —
 # which is how an entire AGARD-B sweep once "re-ran" and reproduced the previous
 # numbers to six digits after the size fields had been rewritten.
-MESHER_REVISION = "2026-08-19-prism-bl-optin"
+MESHER_REVISION = "2026-08-30-farfield-and-growth"
 
 # Refinement levels: mesh size near rocket = fraction of body radius
 _REFINEMENT_FACTORS = {
@@ -122,6 +122,143 @@ _REFINEMENT_FACTORS = {
     "very_fine":  {"wall_frac": 0.10,  "far_frac": 20.0},
     "ultra_fine": {"wall_frac": 0.05,  "far_frac": 30.0},
 }
+
+# -- Domain extent and cell grading -------------------------------------------
+#
+# Both of these were measured wrong on the shipped mesher and both distorted the
+# forces, so the numbers below are the load-bearing part of this module.
+#
+# FARFIELD PLACEMENT. The tunnel radius used to be ``body_r * 20`` alone. On the
+# canonical 2 m rocket that is 1.02 m -- HALF a body length from the axis, and
+# 6x the fin semi-span. A boundary that close is a tunnel wall, not free air:
+# the blockage it imposes shows up directly in the coefficients, and it was
+# measured doing so -- a symmetric body at M=0.8 and EXACTLY zero angle of
+# attack reported CL = -0.0406, which at a lift slope of ~0.05/deg is 0.8
+# degrees of angle the vehicle does not have. External aerodynamics wants the
+# boundary 15-50 reference lengths out; the floors below are the low end of
+# that, applied as a FLOOR on top of the caller's own scale so no existing
+# configuration ever gets a smaller domain than it asked for.
+_FARFIELD_REF_LENGTHS  = 15.0   # lateral half-width
+_UPSTREAM_REF_LENGTHS  = 15.0   # ahead of the nose
+_WAKE_REF_LENGTHS      = 25.0   # behind the tail -- longer, the wake convects
+#
+# CELL GRADING. For a gmsh Threshold field the size varies linearly with wall
+# distance, s(d) = SizeMin + alpha*d, and the ratio between neighbouring cells
+# is then exactly 1 + alpha -- constant everywhere in the band. The shipped
+# settings (SizeMin=lc_wall at 0.1*body_r, SizeMax=lc_far at 5*body_r) gave
+# alpha = 3.0 on the "fine" preset, i.e. every cell FOUR TIMES its neighbour,
+# with the whole wall-to-farfield transition crossed in 1.5 cells.
+#
+# Measured on a shipped 231k-cell solution mesh, cell size by radius:
+#     r=[0.00,0.50)  n=222,945  h_med=0.018 m
+#     r=[0.50,0.80)  n=  3,444  h_med=0.032 m
+#     r=[0.80,1.10)  n=    525  h_med=0.846 m   <- 47x in one band
+# i.e. 97% of the cells inside a third of the radius and essentially nothing
+# outside it. A Roe/MUSCL flux across a 47x size jump produces spurious entropy
+# and reflects disturbances back onto the body, and Green-Gauss gradients are
+# not even first-order consistent there.
+#
+# 1.2 is the standard external-aero ceiling. Everything downstream -- DistMax on
+# the wall field, the Thickness on each box field -- is DERIVED from it rather
+# than set independently, so the grading cannot be broken by tuning one field.
+_MAX_GROWTH_RATIO = 1.2
+#
+# Fraction of the tunnel radius over which the growth is allowed to run before
+# the size saturates at lc_far. Kept below 1 so the outer domain is uniform
+# (cheap) rather than still growing when it reaches the boundary.
+_GROWTH_SPAN_FRAC = 0.35
+
+
+def _growth_alpha() -> float:
+    """Size gradient d(size)/d(distance) that yields ``_MAX_GROWTH_RATIO``."""
+    return _MAX_GROWTH_RATIO - 1.0
+
+
+def _graded_far_size(lc_wall: float, tun_radius: float, lc_far_preset: float) -> float:
+    """Far-field cell size consistent with the growth ratio and the domain.
+
+    The preset far size is a *floor*: honouring it literally on a domain 15
+    reference lengths across would mean 0.77 m cells filling a 30 m radius --
+    hundreds of thousands of cells describing undisturbed air. The size the
+    grading actually reaches after ``_GROWTH_SPAN_FRAC`` of the radius is used
+    when that is coarser, which is what keeps the count tractable once the
+    domain is the size external aerodynamics needs.
+    """
+    reach = lc_wall + _growth_alpha() * tun_radius * _GROWTH_SPAN_FRAC
+    return max(lc_far_preset, reach)
+
+
+def _graded_dist_max(lc_wall: float, lc_far: float) -> float:
+    """Distance at which a Threshold band reaches ``lc_far`` at the growth cap."""
+    return max((lc_far - lc_wall) / _growth_alpha(), lc_wall * 4.0)
+
+
+def _box_thickness(lc_in: float, lc_far: float) -> float:
+    """Transition thickness that lets a Box field relax out at the growth cap.
+
+    A gmsh Box field without ``Thickness`` is a step: VIn inside, VOut outside,
+    nothing between. That is where the 47x jump measured above came from -- the
+    fin box held 0.7*lc_wall over a +/-1.5 fin-span cube and then fell straight
+    to the far-field size at its face. Giving every box the same relaxation the
+    wall field uses removes the discontinuity by construction.
+    """
+    return max((lc_far - lc_in) / _growth_alpha(), lc_in * 4.0)
+
+
+def _count_from_wall_size(
+    lc_wall: float, body_r: float, total_L: float, tun_radius: float,
+) -> float:
+    """Predicted tet count for a wall size, under the graded field above.
+
+    Integrates the shell-by-shell cell count outward from the body,
+
+        N = integral over d of  A(d) / s(d)^3
+
+    with ``s(d) = lc_wall + alpha*d`` saturating at ``lc_far``, and ``A(d)`` the
+    area of the surface offset ``d`` from a cylinder of radius ``body_r`` and
+    length ``total_L``. Crude about the body's real shape and exact about the
+    grading, which is the right way round: the count is dominated by the first
+    few centimetres, where every body looks like its own offset surface.
+
+    Replaces a domain-volume estimate (``N = V_domain / (lc^3/6)``) that could
+    not survive this module's real domain. Spread over a tunnel 15 reference
+    lengths across, that formula answers "coarser than the medium preset" for
+    any target a user would type -- on the ONERA M6 wing it asked for a coarser
+    wall at 900,000 elements than at the default, and got clamped back.
+    """
+    alpha = _growth_alpha()
+    lc_far = _graded_far_size(lc_wall, tun_radius, 0.0)
+    d_sat = _graded_dist_max(lc_wall, lc_far)
+    n = 0.0
+    steps = 400
+    d_prev = 0.0
+    for i in range(1, steps + 1):
+        # Cubic spacing: the integrand falls off fast and the first millimetre
+        # carries as much of the count as the last ten metres.
+        d = tun_radius * ((i / steps) ** 3)
+        dd = d - d_prev
+        dm = 0.5 * (d + d_prev)
+        s = lc_far if dm >= d_sat else min(lc_wall + alpha * dm, lc_far)
+        area = (2.0 * math.pi * (body_r + dm) * total_L
+                + 4.0 * math.pi * (body_r + dm) ** 2)
+        n += area * dd / (s ** 3)
+        d_prev = d
+    return n
+
+
+def _body_ref_length(rocket: dict) -> float:
+    """Reference length the farfield floors are measured in.
+
+    The larger of the body's flow-wise length and its full cross-stream span.
+    A rocket is set by its length; a stubby or wide body (a capsule, a finned
+    stage whose fins span more than it is long) is set by its span, and using
+    the length alone there would place the boundary closer than it looks.
+    """
+    prof = [p for p in (rocket.get("profile") or []) if len(p) >= 2]
+    r_env = max([float(rocket.get("body_radius", 0.0))]
+                + [float(p[1]) for p in prof])
+    span = 2.0 * (r_env + float(rocket.get("fin_height", 0.0) or 0.0))
+    return max(float(rocket.get("length", 0.0)), span, 1e-6)
 
 
 def _estimate_sizes_from_count(
@@ -134,22 +271,27 @@ def _estimate_sizes_from_count(
     """
     Estimate (wall_size, far_size) from a target element count.
 
-    Uses the heuristic: average tet volume ≈ lc³/6,
-    so N ≈ V_domain / (lc³/6)  →  lc ≈ (6·V/N)^(1/3).
-    Wall size is scaled down and far-field size scaled up from lc_avg.
+    Bisects :func:`_count_from_wall_size` -- the same graded field the mesher
+    will actually build -- instead of dividing a domain volume by an average
+    cell. ``tun_len`` is accepted for call compatibility and unused: the count
+    is set by the near field, which the tunnel length does not touch.
     """
-    domain_volume = tun_len * (2 * tun_radius) ** 2  # box approximation
-    lc_avg = (6.0 * domain_volume / max(target_count, 1000)) ** (1.0 / 3.0)
-    lc_wall = lc_avg * 0.15
-    lc_far = lc_avg * 3.0
-    # Clamp to reasonable bounds
-    lc_wall = max(lc_wall, body_r * 0.005)   # floor: 0.5% of body radius
-    lc_wall = min(lc_wall, body_r * 0.5)     # ceiling: 50% of body radius
-    lc_far = max(lc_far, body_r * 2.0)
-    lc_far = min(lc_far, total_L * 10.0)
+    lo, hi = body_r * 0.002, body_r * 0.60
+    target = float(max(target_count, 1000))
+    # Monotone decreasing in lc_wall, so a plain bisection converges.
+    for _ in range(60):
+        mid = math.sqrt(lo * hi)
+        if _count_from_wall_size(mid, body_r, total_L, tun_radius) > target:
+            lo = mid
+        else:
+            hi = mid
+    lc_wall = math.sqrt(lo * hi)
+    lc_wall = min(max(lc_wall, body_r * 0.005), body_r * 0.5)
+    lc_far = _graded_far_size(lc_wall, tun_radius, body_r * 2.0)
+    predicted = _count_from_wall_size(lc_wall, body_r, total_L, tun_radius)
     logger.info(
-        f"Size from target count {target_count:,}: "
-        f"lc_avg={lc_avg:.5f}  wall={lc_wall:.5f}  far={lc_far:.4f}"
+        f"Size from target count {target_count:,}: wall={lc_wall:.5f} m  "
+        f"far={lc_far:.4f} m  (predicted {predicted:,.0f} tets)"
     )
     return lc_wall, lc_far
 
@@ -274,7 +416,17 @@ def build_wind_tunnel_mesh(
         lc_far    = body_r * ref_f["far_frac"]
 
     tun_len    = rocket["length"] * domain_length_scale
-    tun_radius = body_r * max(domain_radius_scale, 20.0)
+    # Farfield radius: the caller's own scale, floored at _FARFIELD_REF_LENGTHS
+    # reference lengths. max(), never min() -- a caller asking for a wider
+    # domain still gets it, and one asking for the old body_r*20 gets the floor
+    # that makes the result free-air rather than a wind tunnel with walls.
+    _ref_L = _body_ref_length(rocket)
+    tun_radius = max(body_r * max(domain_radius_scale, 20.0),
+                     _FARFIELD_REF_LENGTHS * _ref_L)
+    logger.info(
+        f"Farfield radius {tun_radius:.2f} m "
+        f"({tun_radius / _ref_L:.1f} reference lengths of {_ref_L:.3f} m)"
+    )
 
     # Safety: clear any stale Gmsh session. Guard with isInitialized() — calling
     # finalize() on a fresh session makes Gmsh's C++ logger print
@@ -293,17 +445,60 @@ def build_wind_tunnel_mesh(
 
     try:
         if bl_prisms:
-            # Opt-in. The tet-only path stays the default until the AGARD-B,
-            # ONERA M6 and cone benchmarks have been re-run on prism meshes;
-            # bl_layers/bl_growth are honoured here and ignored by the other.
-            _build_bl_mesh(
-                gmsh, rocket, tun_len, tun_radius,
-                lc_far, lc_rocket, output_path,
-                bl_layers, bl_growth,
-                bl_first_height=bl_first_height,
-                bl_tessellation=bl_tessellation,
-                bl_max_apex_radius=bl_max_apex_radius,
+            # UNSUPPORTED. One deterministic attempt, and an honest refusal if
+            # it does not work. Read _BL_PRISM_STATUS before changing this.
+            #
+            # There was a five-rung ladder here that retried at 1.0, 1.4, 0.7,
+            # 2.0 and 0.5 x lc_rocket until one happened not to crash. It was
+            # removed on measurement, not on taste:
+            #
+            #   * It is a lottery. The workable carrier resolution is not a
+            #     property anything computes, so the ladder is a search with no
+            #     model behind it and no guarantee for the next geometry.
+            #   * What it wins does not solve. On the canonical rocket rung 2
+            #     produced a structurally VALID mesh -- 5,317,942 cells,
+            #     141,024 prisms, wall manifold, zero inverted -- and SU2 then
+            #     stalled on it: rms[Rho] started at -3.559, best -3.791, and
+            #     sat at -3.227 after 98 iterations, i.e. it fell nothing at
+            #     all, while CD read 0.898 against 0.343 from the supported
+            #     path. Seven minutes of retrying buys a mesh that cannot be
+            #     solved.
+            #
+            # Failing in ~30 s with a reason is strictly better than that.
+            logger.warning(
+                "Prism boundary layer is UNSUPPORTED (see _BL_PRISM_STATUS in "
+                "cfd/meshing.py). One attempt; no retries. If it fails, the "
+                "supported path for trustworthy drag is Euler + flat-plate "
+                "friction on the tet-only mesh."
             )
+            try:
+                _build_bl_mesh(
+                    gmsh, rocket, tun_len, tun_radius,
+                    lc_far, lc_rocket, output_path,
+                    bl_layers, bl_growth,
+                    bl_first_height=bl_first_height,
+                    bl_tessellation=bl_tessellation,
+                    bl_max_apex_radius=bl_max_apex_radius,
+                )
+            except Exception as e:                       # noqa: BLE001
+                raise RuntimeError(
+                    f"Prism boundary-layer meshing failed: {e}\n\n"
+                    f"This is a limitation of the mesher, not of these "
+                    f"settings. gmsh's extrudeBoundaryLayer has no corner "
+                    f"treatment, so where advancing fronts converge -- at a "
+                    f"sharp nose tip, a fin root or a thin trailing edge -- the "
+                    f"stack self-intersects and the tet pass rejects it. The "
+                    f"binding feature is usually the NOSE TIP, not the fins: "
+                    f"the opposing-wall distance there was measured at 0.665 mm "
+                    f"on a coarse carrier and 0.292 mm on a fine one, against "
+                    f"1.528 mm at the fins.\n\n"
+                    f"There is deliberately no retry and no silent fallback to "
+                    f"the tet-only mesh: a tet-only wall sits at y+ in the "
+                    f"hundreds with no wall model, and nothing downstream would "
+                    f"say so. Turn the prism layer off and use Euler + "
+                    f"flat-plate friction, which is the supported path and "
+                    f"reports itself under its own name."
+                ) from e
         else:
             _build_mesh(
                 gmsh, rocket, tun_len, tun_radius,
@@ -311,7 +506,10 @@ def build_wind_tunnel_mesh(
                 bl_layers, bl_growth,
             )
     finally:
-        gmsh.finalize()
+        try:
+            gmsh.finalize()
+        except Exception:
+            pass
 
     su2_path = output_path.with_suffix(".su2")
     size_mb = su2_path.stat().st_size / 1e6
@@ -430,8 +628,12 @@ def _build_mesh(
     rocket_solid, profile = _build_rocket_solid(gmsh, rocket, lc_rocket)
 
     # ── 2. Wind tunnel domain ─────────────────────────────────────────────────
-    upstream_x     = -5.0 * total_L
-    downstream_x   = total_L + 15.0 * total_L
+    # Floored at _UPSTREAM_REF_LENGTHS / _WAKE_REF_LENGTHS reference lengths.
+    # min()/max() so this can only ever enlarge the domain a caller asked for.
+    ref_L          = _body_ref_length(rocket)
+    upstream_x     = min(-5.0 * total_L, -_UPSTREAM_REF_LENGTHS * ref_L)
+    downstream_x   = max(total_L + 15.0 * total_L,
+                         total_L + _WAKE_REF_LENGTHS * ref_L)
     domain_len     = downstream_x - upstream_x
 
     tunnel_tag = occ.addBox(
@@ -559,20 +761,39 @@ def _build_mesh(
     fin_span = fin_h + r_body_max
 
     # ── 5a. Distance-based near-wall refinement ───────────────────────────────
+    #
+    # SizeMax/DistMax are DERIVED from _MAX_GROWTH_RATIO, not chosen. A gmsh
+    # Threshold band is linear in wall distance, so the ratio between adjacent
+    # cells is exactly 1 + (SizeMax-SizeMin)/(DistMax-DistMin) everywhere in the
+    # band; the shipped DistMax of 5*body_r made that ratio 4.0 and crossed the
+    # entire wall-to-farfield transition in 1.5 cells. See the module constants.
+    #
+    # DistMin is 0, not 0.1*body_r: a flat first band is a place where the mesh
+    # does not grade at all, which on a body this size is most of the near
+    # field. The growth starts at the wall.
+    lc_far = _graded_far_size(lc_rocket, tun_radius, lc_far)
+    dist_max = _graded_dist_max(lc_rocket, lc_far)
+
     f_dist = gmsh.model.mesh.field.add("Distance")
     gmsh.model.mesh.field.setNumbers(
         f_dist, "SurfacesList",
         rocket_wall_surfs if rocket_wall_surfs else [s[1] for s in all_surfs[:5]]
     )
+    gmsh.model.mesh.field.setNumber(f_dist, "Sampling", 40)
 
     f_thr = gmsh.model.mesh.field.add("Threshold")
     gmsh.model.mesh.field.setNumber(f_thr, "InField",  f_dist)
     gmsh.model.mesh.field.setNumber(f_thr, "SizeMin",  lc_rocket)
     gmsh.model.mesh.field.setNumber(f_thr, "SizeMax",  lc_far)
-    gmsh.model.mesh.field.setNumber(f_thr, "DistMin",  body_r * 0.1)
-    gmsh.model.mesh.field.setNumber(f_thr, "DistMax",  body_r * 5.0)
+    gmsh.model.mesh.field.setNumber(f_thr, "DistMin",  0.0)
+    gmsh.model.mesh.field.setNumber(f_thr, "DistMax",  dist_max)
 
     # ── 5b. Nose tip refinement ───────────────────────────────────────────────
+    # Every Box below carries a Thickness. Without one a Box field is a step
+    # function -- VIn inside the faces, VOut immediately outside -- and since
+    # the background field is the minimum over all fields, that step IS a cell
+    # size discontinuity wherever the box is finer than the wall band. It is
+    # where the measured 47x jump came from.
     lc_nose = lc_rocket * 0.6
     f_nose = gmsh.model.mesh.field.add("Box")
     gmsh.model.mesh.field.setNumber(f_nose, "XMin",  -body_r)
@@ -583,22 +804,33 @@ def _build_mesh(
     gmsh.model.mesh.field.setNumber(f_nose, "ZMax",   body_r * 2)
     gmsh.model.mesh.field.setNumber(f_nose, "VIn",    lc_nose)
     gmsh.model.mesh.field.setNumber(f_nose, "VOut",   lc_far)
+    gmsh.model.mesh.field.setNumber(f_nose, "Thickness",
+                                    _box_thickness(lc_nose, lc_far))
 
     # ── 5c. Fin-region refinement ─────────────────────────────────────────────
     # Centre the box on the actual fin axial station (fins sit at
     # x_TE = total_L - fin_z_base_k2 in the CFD frame; 0 = tail-mounted).
+    #
+    # The lateral half-width is 1.15 fin spans, not 1.5. At 1.5 this box held a
+    # uniform 0.7*lc_wall over a cube reaching well past the fin tips, and on
+    # the measured mesh that single field owned 222,945 of 230,946 cells -- 97%
+    # of the mesh spent on a block of air the fins do not touch. 1.15 still
+    # covers every fin with a margin, and the Thickness below carries the size
+    # outward at the growth cap instead of holding it flat and then dropping it.
     fin_x_te = total_L - rocket.get("fin_z_base_k2", 0.0)
     fin_x_te = min(total_L, max(fin_Cr, fin_x_te))
     lc_fin = lc_rocket * 0.7
     f_fin = gmsh.model.mesh.field.add("Box")
     gmsh.model.mesh.field.setNumber(f_fin, "XMin",  fin_x_te - fin_Cr * 1.2)
     gmsh.model.mesh.field.setNumber(f_fin, "XMax",  fin_x_te + body_r)
-    gmsh.model.mesh.field.setNumber(f_fin, "YMin", -fin_span * 1.5)
-    gmsh.model.mesh.field.setNumber(f_fin, "YMax",  fin_span * 1.5)
-    gmsh.model.mesh.field.setNumber(f_fin, "ZMin", -fin_span * 1.5)
-    gmsh.model.mesh.field.setNumber(f_fin, "ZMax",  fin_span * 1.5)
+    gmsh.model.mesh.field.setNumber(f_fin, "YMin", -fin_span * 1.15)
+    gmsh.model.mesh.field.setNumber(f_fin, "YMax",  fin_span * 1.15)
+    gmsh.model.mesh.field.setNumber(f_fin, "ZMin", -fin_span * 1.15)
+    gmsh.model.mesh.field.setNumber(f_fin, "ZMax",  fin_span * 1.15)
     gmsh.model.mesh.field.setNumber(f_fin, "VIn",   lc_fin)
     gmsh.model.mesh.field.setNumber(f_fin, "VOut",  lc_far)
+    gmsh.model.mesh.field.setNumber(f_fin, "Thickness",
+                                    _box_thickness(lc_fin, lc_far))
 
     # ── 5d. Wake refinement ───────────────────────────────────────────────────
     lc_wake = body_r * 2.0
@@ -611,6 +843,8 @@ def _build_mesh(
     gmsh.model.mesh.field.setNumber(f_wake, "ZMax",  body_r * 3.0)
     gmsh.model.mesh.field.setNumber(f_wake, "VIn",   lc_wake)
     gmsh.model.mesh.field.setNumber(f_wake, "VOut",  lc_far)
+    gmsh.model.mesh.field.setNumber(f_wake, "Thickness",
+                                    _box_thickness(lc_wake, lc_far))
 
     # ── 5e. Curvature-driven edge refinement ──────────────────────────────────
     # The boxes above are blunt instruments: f_fin asks for 0.7·lc_rocket
@@ -683,7 +917,14 @@ def _build_mesh(
     _lc_min = lc_rocket * 0.05
     gmsh.option.setNumber("Mesh.MeshSizeMin", _lc_min)
     gmsh.option.setNumber("Mesh.CharacteristicLengthMin", _lc_min)
-    logger.info(f"Surface size floor: {_lc_min:.3e} m (5% of lc_rocket={lc_rocket:.5f})")
+    # Ceiling as well as floor. gmsh defaults MeshSizeMax to 1e22, so before
+    # this the only thing bounding a cell was whichever field happened to be
+    # smallest -- and the domain is now large enough that "whichever field"
+    # is not a bound anyone should rely on.
+    gmsh.option.setNumber("Mesh.MeshSizeMax", lc_far)
+    gmsh.option.setNumber("Mesh.CharacteristicLengthMax", lc_far)
+    logger.info(f"Surface size floor: {_lc_min:.3e} m (5% of lc_rocket={lc_rocket:.5f})"
+                f"  ceiling: {lc_far:.4g} m")
 
     gmsh.model.mesh.generate(2)
     logger.info("2D surface mesh generated")
@@ -761,7 +1002,17 @@ def _build_mesh(
         except Exception:                                # noqa: BLE001
             return 0
 
+    def _optimize():
+        """Smooth and untangle distorted elements. Never fatal on its own."""
+        for _label, _opt in (("Gmsh default", ""), ("Netgen", "Netgen")):
+            try:
+                gmsh.model.mesh.optimize(_opt, force=True)
+                logger.info(f"Mesh optimization ({_label}) complete")
+            except Exception as e:                       # noqa: BLE001, PERF203
+                logger.warning(f"Mesh optimization ({_label}) failed: {e}")
+
     meshed = False
+    problems: list = []
     for i, (label, a2d, a3d, scale, floor_frac) in enumerate(ladder):
         try:
             if i > 0:
@@ -772,17 +1023,38 @@ def _build_mesh(
             gmsh.option.setNumber("Mesh.MeshSizeMin", _floor)
             gmsh.option.setNumber("Mesh.CharacteristicLengthMin", _floor)
             if scale != 1.0:
-                gmsh.model.mesh.field.setNumber(f_thr, "SizeMin", lc_rocket * scale)
+                # DistMax has to move with SizeMin or the growth ratio changes:
+                # the band is linear, so the neighbour ratio is
+                # 1 + (SizeMax-SizeMin)/DistMax and shrinking only SizeMin
+                # steepens it. Both come from the same helper for that reason.
+                _sm = lc_rocket * scale
+                gmsh.model.mesh.field.setNumber(f_thr, "SizeMin", _sm)
+                gmsh.model.mesh.field.setNumber(
+                    f_thr, "DistMax", _graded_dist_max(_sm, lc_far))
                 gmsh.model.mesh.field.setAsBackgroundMesh(f_min)
             if i > 0:
                 gmsh.model.mesh.generate(2)
             gmsh.model.mesh.generate(3)
             n = _n_tets()
             if n > 0:
-                logger.info(f"3D mesh built with {label}: {n:,} elements"
-                            + ("" if i == 0 else f" (attempt {i + 1})"))
-                meshed = True
-                break
+                # Optimise and audit INSIDE the rung, so "this strategy worked"
+                # means the mesh it produced is usable — not merely non-empty.
+                # Both passes used to run once after the loop and the audit only
+                # logged, so a rung that produced an inverted or non-manifold
+                # mesh ended the search and that mesh was exported.
+                _optimize()
+                problems = _check_mesh_quality(
+                    gmsh, body_r, n_prisms, wall_surfs=rocket_wall_surfs)
+                if not problems:
+                    logger.info(f"3D mesh built with {label}: {n:,} elements"
+                                + ("" if i == 0 else f" (attempt {i + 1})"))
+                    meshed = True
+                    break
+                logger.warning(
+                    f"{label} produced {n:,} elements but the mesh is invalid "
+                    f"({'; '.join(problems)}) — trying the next strategy."
+                )
+                continue
             _t2, _g2, _ = gmsh.model.mesh.getElements(2)
             logger.warning(f"{label} completed but produced no elements — "
                            f"trying the next strategy. "
@@ -790,24 +1062,19 @@ def _build_mesh(
         except Exception as e:                           # noqa: BLE001, PERF203
             logger.warning(f"{label} failed: {e}")
 
+    if not meshed and problems:
+        # Every strategy produced elements and every one of them was invalid.
+        # Refusing is the only honest outcome: SU2 loads such a mesh, reports
+        # healthy metrics and returns numbers that look like an answer.
+        raise RuntimeError(
+            "Mesh generation produced an INVALID mesh at every refinement "
+            "strategy: " + "; ".join(problems) + ". Do not trust any result "
+            "from this geometry until it meshes cleanly — try a coarser "
+            "refinement level, or check the body for self-intersections and "
+            "features thinner than the element size."
+        )
     if not meshed:
         logger.error("Every meshing strategy failed to produce elements.")
-
-    # ── 8b. Post-generation mesh optimization ─────────────────────────────────
-    # Smooth and untangle distorted elements (especially BL prisms at junctions)
-    try:
-        gmsh.model.mesh.optimize("", force=True)
-        logger.info("Mesh optimization pass 1 (Gmsh default) complete")
-    except Exception as e:
-        logger.warning(f"Mesh optimization pass 1 failed: {e}")
-    try:
-        gmsh.model.mesh.optimize("Netgen", force=True)
-        logger.info("Mesh optimization pass 2 (Netgen) complete")
-    except Exception as e:
-        logger.warning(f"Mesh optimization pass 2 (Netgen) failed: {e}")
-
-    # ── 9. Quality checks ─────────────────────────────────────────────────────
-    _check_mesh_quality(gmsh, body_r, n_prisms, wall_surfs=rocket_wall_surfs)
 
     # ── 10. Export ────────────────────────────────────────────────────────────
     # Update physical groups to include any new BL volumes
@@ -882,6 +1149,61 @@ def _geo_box(gmsh, x0, y0, z0, x1, y1, z1) -> tuple[list, int]:
 
 # ── Prism boundary-layer meshing ──────────────────────────────────────────────
 
+# ── Prism boundary layer: measured status ────────────────────────────────────
+#
+# UNSUPPORTED as of 2026-08-30. It is reachable (CFDConfig.bl_prisms, and a
+# checkbox in the CFD workspace) because it works on some geometries, but it is
+# not a capability you can rely on, and the reason is not a missing setting.
+#
+# What works: on the canonical rocket the mesh BUILDS and is structurally
+# sound -- 5,317,942 cells of which 141,024 are prisms, wall manifold, zero
+# inverted elements, neighbour size ratio p99 1.39.
+#
+# What does not: SU2 will not solve it. SST on that mesh went
+#     rms[Rho]  start -3.559   best -3.791   iter 98 -3.227
+# i.e. zero decades of convergence, with CD at 0.898 against 0.343 from the
+# supported Euler + flat-plate-friction path. Suspects are the 5,062
+# near-degenerate cells (SICN < 0.01) and a first-layer aspect ratio near
+# 1400:1 against numerics tuned for isotropic tets. Not yet diagnosed.
+#
+# Why a global stack cap cannot fix the meshing half, measured rather than
+# argued. The correct general collision criterion is the OPPOSING-WALL
+# DISTANCE: for wall node p marching along +n_p, the nearest wall q that lies
+# ahead of p and faces back at it. Two fronts then meet at |q-p|/2. (Plain
+# nearest-non-neighbour LFS is wrong here -- the 2*pi revolve seam puts
+# coincident, topologically distant nodes together and it reports 0.02 mm on a
+# smooth cylinder.) On the canonical rocket:
+#
+#     carrier 14.28 mm : min 0.665 mm, at the NOSE TIP; fins 1.528 mm
+#     carrier  5.00 mm : min 0.292 mm, at the NOSE TIP
+#
+# Two consequences. The binding feature is the tip, not the fins -- so a
+# fin-thickness cap was never measuring the right thing. And the value HALVES
+# when the carrier is refined, because the tip is a singularity where the true
+# distance goes to zero: a cap derived from it is a function of tessellation,
+# not of geometry. That is why the code below caps on fins and blunts the apex
+# instead; it is a workaround, but a rational one given that
+# extrudeBoundaryLayer accepts only ONE global height list.
+#
+# The permanent fix is per-node layer termination -- thin the stack only where
+# it must thin, from the opposing-wall distance at that node -- which is what
+# every production BL mesher does.
+#
+# Whether gmsh can express that is OPEN, not settled. extrudeBoundaryLayer takes
+# a trailing `viewIndex`, and a scalar view is documented to scale the extrusion
+# normals, which is exactly the per-node thickness field this needs. Two earlier
+# probes reported "no effect" and BOTH were broken (one never called generate(3)
+# so no layer was ever built; the other reparametrised its test sphere down to
+# ~18 triangles and built 144 prisms). So the mechanism is untested, not
+# disproven -- try it before writing an extruder of our own. Either way the
+# solver half is separate work: a valid prism mesh here still stalls.
+#
+# Until then the supported path for trustworthy drag is Euler + flat-plate
+# friction on the tet-only mesh, which reports itself by name and carries a
+# wall_resolved verdict on every result.
+_BL_PRISM_STATUS = "unsupported: mesh builds, solver stalls (2026-08-30)"
+
+
 # 25 degrees, NOT the 40 that cfd/external_geometry.py uses for CAD import.
 #
 # Measured on the parametric rocket: at 40 deg, classifySurfaces produces one
@@ -927,7 +1249,17 @@ def _bl_thickness_cap(rocket, profile) -> float:
     just enough instead.
     """
     limits = []
-    fin_t = float(rocket.get("fin_thickness") or 0.0)
+    # "fin_thick", not "fin_thickness". The geometry dict is built by
+    # cfd.geometry_exporter.extract_cfd_geometry and every other reader in the
+    # codebase uses "fin_thick"; this one asked for a key that has never
+    # existed, so .get() returned None, fin_t came out 0.0, `limits` stayed
+    # empty and the cap was inf. The one guard against the exact failure it
+    # documents was switched off by the name.
+    #
+    # Measured on the canonical rocket (4.0 mm fins, so a 0.8 mm cap): the
+    # stack ran at 1.029 mm and every tessellation in the ladder died on
+    # "PLC Error: A segment and a facet intersect".
+    fin_t = float(rocket.get("fin_thick") or rocket.get("fin_thickness") or 0.0)
     if fin_t > 0.0 and int(rocket.get("fin_count") or 0) > 0:
         limits.append(0.4 * fin_t / 2.0)
     return min(limits) if limits else float("inf")
@@ -1297,7 +1629,15 @@ def _build_bl_mesh(
             "thickness. Flip the sign of the layer heights."
         )
 
-    _check_mesh_quality(gmsh, body_r, n_prisms, wall_surfs=wall_surfs)
+    _bl_problems = _check_mesh_quality(gmsh, body_r, n_prisms,
+                                       wall_surfs=wall_surfs)
+    if _bl_problems:
+        raise RuntimeError(
+            "Prism BL mesh is invalid: " + "; ".join(_bl_problems) + ". This "
+            "is the overlap failure the module docstring describes - the tets "
+            "filled the boundary-layer region as well as the prisms - and SU2 "
+            "will accept the file and then fail to converge on it."
+        )
 
     # Inverted cells are a hard stop on this path, not a warning.
     #
@@ -1413,8 +1753,19 @@ def _curvature_feature_field(gmsh, surface_stl, lc_wall: float, lc_far: float,
     # the shell hangs the volume mesher — measured: gmsh ran past a 9-minute
     # timeout with the seeds on the surface and meshes in ~2 minutes with them
     # offset. The field only needs to be near the edge, not on it.
+    #
+    # DistMin below MUST then cover the offset, and used to not. With seeds
+    # 1.5*target off the wall and DistMin=target, a point ON the wall sat at
+    # d=1.5*target — already past the flat band — so the field returned
+    # target + (lc_far-target)/6 there. With a farfield size of order 1 m that
+    # is ~170 mm against a wall size of ~10 mm, and since the background field
+    # is the MINIMUM over all fields, this one never won at the surface. The
+    # refinement existed only in a shell hanging just off the skin, which is
+    # not where the leading edge is.
+    offset = 0.0
     if normals is not None and len(normals) == len(pts):
-        pts = pts + normals * (1.5 * target)
+        offset = 1.5 * target
+        pts = pts + normals * offset
     kernel = gmsh.model.occ if is_brep else gmsh.model.geo
     tags = []
     for x, y, z in pts:
@@ -1443,8 +1794,12 @@ def _curvature_feature_field(gmsh, surface_stl, lc_wall: float, lc_far: float,
     # every edge on the M6 wing and pushed the mesh past a million cells for
     # refinement nobody asked for; the suction peak lives within a chord percent
     # or two of the edge.
-    gmsh.model.mesh.field.setNumber(f_thr, "DistMin", target)
-    gmsh.model.mesh.field.setNumber(f_thr, "DistMax", target * 4.0)
+    #
+    # DistMin carries the seed offset so the flat SizeMin band reaches the wall
+    # itself — see the offset comment above.
+    dist_min = offset + target
+    gmsh.model.mesh.field.setNumber(f_thr, "DistMin", dist_min)
+    gmsh.model.mesh.field.setNumber(f_thr, "DistMax", dist_min + target * 4.0)
 
     logger.info(
         f"Curvature feature refinement: {n_sel:,} of {surf.n_points:,} surface "
@@ -1454,6 +1809,26 @@ def _curvature_feature_field(gmsh, surface_stl, lc_wall: float, lc_far: float,
         f"{float(np.median(radii)):.4g} m)."
     )
     return f_thr
+
+
+def _surface_mesh_resolution(stl_path) -> Optional[float]:
+    """Median triangle edge length of a tessellation, or None."""
+    try:
+        import numpy as np
+        import pyvista as pv
+        m = pv.read(str(stl_path)).extract_surface().triangulate()
+        f = m.faces.reshape(-1, 4)[:, 1:]
+        p = np.asarray(m.points)
+        e = np.concatenate([
+            np.linalg.norm(p[f[:, 1]] - p[f[:, 0]], axis=1),
+            np.linalg.norm(p[f[:, 2]] - p[f[:, 1]], axis=1),
+            np.linalg.norm(p[f[:, 0]] - p[f[:, 2]], axis=1),
+        ])
+        e = e[np.isfinite(e) & (e > 0)]
+        return float(np.median(e)) if e.size else None
+    except Exception as e:                                    # noqa: BLE001
+        logger.debug(f"Could not measure surface resolution of {stl_path}: {e}")
+        return None
 
 
 def build_external_cad_mesh(
@@ -1554,10 +1929,20 @@ def build_external_cad_mesh(
     # hardcodes the same 5/15 for its box and only uses the scale to pre-estimate
     # element sizes, and here the true extent is passed to that estimate instead.
     # Kept in the signature so the two mesh entry points stay call-compatible.
-    up_x   = -5.0 * L
-    down_x = L + 15.0 * L
+    # Same reference-length floors the rocket path uses (see the module
+    # constants): the caller's own scale, but never closer than
+    # _FARFIELD_REF_LENGTHS reference lengths, where "reference length" is the
+    # largest extent the body actually has. min()/max() only ever enlarge.
+    _ref_L = max(L, info.cross_width, info.cross_height, 1e-6)
+    up_x   = min(-5.0 * L, -_UPSTREAM_REF_LENGTHS * _ref_L)
+    down_x = max(L + 15.0 * L, L + _WAKE_REF_LENGTHS * _ref_L)
     rad    = max(domain_radius_scale, 10.0) * cross_r
     rad    = max(rad, 6.0 * max(info.cross_width, info.cross_height, char))
+    rad    = max(rad, _FARFIELD_REF_LENGTHS * _ref_L)
+    logger.info(
+        f"Farfield radius {rad:.2f} m ({rad / _ref_L:.1f} reference lengths of "
+        f"{_ref_L:.3f} m); domain x[{up_x:.1f}, {down_x:.1f}] m"
+    )
 
     if target_element_count is not None and target_element_count > 0:
         lc_wall, lc_far = _estimate_sizes_from_count(
@@ -1663,6 +2048,38 @@ def build_external_cad_mesh(
                 allow_reparametrization=not info.wrapped,
             )
             wall_surfs = [s[1] for s in gmsh.model.getEntities(2)]
+            if not reparametrised:
+                # The wall mesh IS the imported triangulation from here on:
+                # without a parametrisation gmsh cannot remesh those surfaces,
+                # so generate(2) keeps them exactly as supplied and the size
+                # field controls the VOLUME only.
+                #
+                # This was silent, and it invalidated the thing it was silent
+                # about: the ONERA M6 benchmark solved the same case at a 20 mm
+                # and a 10 mm "wall size" and got byte-identical surface meshes
+                # (16,900 points / 33,796 cells, same median cell area) with a
+                # 238k vs 1.47M volume. Its refinement study was measuring the
+                # volume mesh and reporting it as surface convergence.
+                _res = _surface_mesh_resolution(info.preview_stl)
+                _msg = (
+                    "Imported tessellation is too dense to reparametrise, so "
+                    "the WALL MESH IS THE IMPORTED TRIANGULATION and cannot be "
+                    "refined. The wall size setting controls the volume mesh "
+                    "only."
+                )
+                if _res:
+                    _msg += (f" Effective wall resolution is the file's own "
+                             f"median edge, {_res * 1000:.2f} mm")
+                    if _res > lc_wall * 1.25:
+                        _msg += (f" — {_res / lc_wall:.1f}x COARSER than the "
+                                 f"{lc_wall * 1000:.2f} mm requested. Surface "
+                                 f"quantities (Cp, suction peaks, sectional "
+                                 f"loads) are limited by the import, not by "
+                                 f"this setting; supply a finer tessellation "
+                                 f"or a STEP/IGES file to refine them.")
+                    else:
+                        _msg += (f", against {lc_wall * 1000:.2f} mm requested.")
+                logger.warning(_msg)
             far_surfs, box_loop = _geo_box(gmsh, up_x, -rad, -rad, down_x, rad, rad)
             # Every body shell is a hole in the domain volume.
             fluid_tags = [gmsh.model.geo.addVolume([box_loop] + list(shell_loops))]
@@ -1732,20 +2149,49 @@ def build_external_cad_mesh(
             gmsh, info.preview_stl, lc_wall, lc_far, is_brep=info.is_brep,
         )
 
+        # ── Edge refinement ───────────────────────────────────────────────────
+        # The curvature field seeds at most a few hundred discrete points and
+        # relaxes back over four feature widths, so on a long edge its bands are
+        # islands: on the M6 wing the seeds land ~12 mm apart along a 2.4 m
+        # leading edge while each band is ~4 mm wide, leaving most of the edge at
+        # the wall size. The curves bounding the wall patches ARE those edges —
+        # exact on a B-Rep, and on the discrete route classifySurfaces splits the
+        # shell at exactly the feature angle — so the rocket path's continuous
+        # band applies here unchanged. It is what took AGARD-B from a 10-18% lift
+        # deficit to inside tolerance.
+        # No `reparametrised` guard. classifySurfaces splits the shell at the
+        # feature angle on BOTH routes, so the discrete route has real bounding
+        # curves too; the guard was excluding exactly the case that needed it
+        # most (an STL over the reparametrisation limit, which is where the wall
+        # mesh is frozen and every bit of volume refinement at the edge counts).
+        # _edge_refinement_field returns None when a body genuinely has no
+        # curves, so the worst case here is the previous behaviour.
+        f_edge = _edge_refinement_field(gmsh, wall_surfs, lc_wall, lc_far)
+
         # ── Size fields ───────────────────────────────────────────────────────
         f_dist = gmsh.model.mesh.field.add("Distance")
         gmsh.model.mesh.field.setNumbers(f_dist, "SurfacesList", wall_surfs)
         gmsh.model.mesh.field.setNumber(f_dist, "Sampling", 100)
 
+        # SizeMax/DistMax derived from _MAX_GROWTH_RATIO, exactly as on the
+        # rocket path — char*8.0 was an independent guess and on a body whose
+        # frontal radius is small next to its span (a wing) it relaxed to the
+        # farfield size within a fraction of a chord.
+        lc_far = _graded_far_size(lc_wall, rad, lc_far)
+        _dist_max = _graded_dist_max(lc_wall, lc_far)
+
         f_thr = gmsh.model.mesh.field.add("Threshold")
         gmsh.model.mesh.field.setNumber(f_thr, "InField", f_dist)
         gmsh.model.mesh.field.setNumber(f_thr, "SizeMin", lc_wall)
         gmsh.model.mesh.field.setNumber(f_thr, "SizeMax", lc_far)
-        gmsh.model.mesh.field.setNumber(f_thr, "DistMin", char * 0.1)
-        gmsh.model.mesh.field.setNumber(f_thr, "DistMax", char * 8.0)
+        gmsh.model.mesh.field.setNumber(f_thr, "DistMin", 0.0)
+        gmsh.model.mesh.field.setNumber(f_thr, "DistMax", _dist_max)
 
         # Keep the whole body envelope fine even where the distance field has
         # already relaxed (concave pockets, gaps between separate solids).
+        # Thickness on every box, for the reason given on the rocket path: a
+        # gmsh Box field without one is a step, and the background field is the
+        # minimum over all fields, so the step is a size discontinuity.
         hw = max(info.cross_width * 0.75, char)
         hh = max(info.cross_height * 0.75, char)
         f_body = gmsh.model.mesh.field.add("Box")
@@ -1757,6 +2203,8 @@ def build_external_cad_mesh(
         gmsh.model.mesh.field.setNumber(f_body, "ZMax",  hh)
         gmsh.model.mesh.field.setNumber(f_body, "VIn",   lc_wall * 2.0)
         gmsh.model.mesh.field.setNumber(f_body, "VOut",  lc_far)
+        gmsh.model.mesh.field.setNumber(f_body, "Thickness",
+                                        _box_thickness(lc_wall * 2.0, lc_far))
 
         f_wake = gmsh.model.mesh.field.add("Box")
         gmsh.model.mesh.field.setNumber(f_wake, "XMin",  L)
@@ -1767,10 +2215,13 @@ def build_external_cad_mesh(
         gmsh.model.mesh.field.setNumber(f_wake, "ZMax",  2.0 * hh)
         gmsh.model.mesh.field.setNumber(f_wake, "VIn",   char * 2.0)
         gmsh.model.mesh.field.setNumber(f_wake, "VOut",  lc_far)
+        gmsh.model.mesh.field.setNumber(f_wake, "Thickness",
+                                        _box_thickness(char * 2.0, lc_far))
 
         _fields = [f_thr, f_body, f_wake]
-        if f_feature is not None:
-            _fields.append(f_feature)
+        for _f in (f_feature, f_edge):
+            if _f is not None:
+                _fields.append(_f)
         f_min = gmsh.model.mesh.field.add("Min")
         gmsh.model.mesh.field.setNumbers(f_min, "FieldsList", _fields)
         gmsh.model.mesh.field.setAsBackgroundMesh(f_min)
@@ -1849,7 +2300,16 @@ def build_external_cad_mesh(
             except Exception:
                 return 0
 
+        def _optimize():
+            for _label, _opt in (("Gmsh default", ""), ("Netgen", "Netgen")):
+                try:
+                    gmsh.model.mesh.optimize(_opt, force=True)
+                    logger.info(f"Mesh optimization ({_label}) complete")
+                except Exception as e:
+                    logger.warning(f"Mesh optimization ({_label}) failed: {e}")
+
         meshed = False
+        problems: list = []
         for i, (label, a2d, a3d, scale, floor_frac) in enumerate(ladder):
             try:
                 if i > 0:
@@ -1861,16 +2321,35 @@ def build_external_cad_mesh(
                 gmsh.option.setNumber("Mesh.CharacteristicLengthMin",
                                       lc_wall * scale * floor_frac)
                 if scale != 1.0:
-                    gmsh.model.mesh.field.setNumber(f_thr, "SizeMin", lc_wall * scale)
+                    # See the rocket path: DistMax moves with SizeMin so the
+                    # growth ratio stays at the cap on the fallback rungs too.
+                    _sm = lc_wall * scale
+                    gmsh.model.mesh.field.setNumber(f_thr, "SizeMin", _sm)
+                    gmsh.model.mesh.field.setNumber(
+                        f_thr, "DistMax", _graded_dist_max(_sm, lc_far))
                     gmsh.model.mesh.field.setAsBackgroundMesh(f_min)
                 gmsh.model.mesh.generate(2)
                 gmsh.model.mesh.generate(3)
                 n = _n_tets()
                 if n > 0:
-                    logger.info(f"3D mesh built with {label}: {n:,} elements"
-                                + ("" if i == 0 else f" (attempt {i + 1})"))
-                    meshed = True
-                    break
+                    # Audit inside the rung — see the rocket path. wall_surfs is
+                    # passed here now; it never was, so the manifoldness check
+                    # (the one that catches two regions of mesh occupying the
+                    # same space) simply did not run on imported CAD at all.
+                    _optimize()
+                    problems = _check_mesh_quality(gmsh, char, 0,
+                                                   wall_surfs=wall_surfs)
+                    if not problems:
+                        logger.info(f"3D mesh built with {label}: {n:,} elements"
+                                    + ("" if i == 0 else f" (attempt {i + 1})"))
+                        meshed = True
+                        break
+                    logger.warning(
+                        f"{label} produced {n:,} elements but the mesh is "
+                        f"invalid ({'; '.join(problems)}) — trying the next "
+                        f"strategy."
+                    )
+                    continue
                 logger.warning(f"{label} completed but produced no elements — "
                                f"trying the next strategy.")
             except Exception as e:
@@ -1890,14 +2369,17 @@ def build_external_cad_mesh(
             logger.error("Every meshing strategy failed to produce elements.")
 
         if not fall_back_to_discrete:
-            for label, opt in (("Gmsh default", ""), ("Netgen", "Netgen")):
-                try:
-                    gmsh.model.mesh.optimize(opt, force=True)
-                    logger.info(f"Mesh optimization ({label}) complete")
-                except Exception as e:
-                    logger.warning(f"Mesh optimization ({label}) failed: {e}")
-
-            _check_mesh_quality(gmsh, char, 0)
+            # Optimisation and the quality audit already ran inside the winning
+            # ladder rung. Refuse an invalid mesh rather than export it.
+            if not meshed and problems:
+                raise RuntimeError(
+                    "Mesh generation produced an INVALID mesh at every "
+                    "refinement strategy: " + "; ".join(problems) + ". Do not "
+                    "trust any result from this geometry until it meshes "
+                    "cleanly — try a coarser refinement level, or repair the "
+                    "CAD (self-intersecting faces, features thinner than the "
+                    "element size)."
+                )
 
             # An empty volume mesh is a FAILURE, not a result. The ladder above
             # can exhaust itself without raising — on a jet-engine STEP every
@@ -2187,11 +2669,85 @@ def _audit_wall_is_manifold(gmsh, wall_surfs) -> Optional[int]:
         return None
 
 
-def _check_mesh_quality(gmsh, body_r: float, n_bl_entities: int, wall_surfs=None):
+def _audit_growth_ratio(gmsh) -> Optional[dict]:
+    """Size ratio between face-adjacent 3D cells — the real grading metric.
+
+    Returns percentiles of max(h_a/h_b, h_b/h_a) over every interior face, or
+    None if it could not run.
+
+    Reported because nothing else in the pipeline could see it. The UI's mesh
+    "quality rating" is built from mean aspect ratio and max skew, and a mesh
+    whose cell size collapses over one band scores "Good" on both: they measure
+    the shape of individual cells, not how a cell relates to its neighbour. A
+    Roe/MUSCL flux and a Green-Gauss gradient are both evaluated ACROSS the
+    face, so the neighbour ratio is what bounds their accuracy.
+    """
+    try:
+        import numpy as np
+        node_tags, coords, _ = gmsh.model.mesh.getNodes()
+        idx = {int(t): i for i, t in enumerate(node_tags)}
+        pts = np.asarray(coords, dtype=float).reshape(-1, 3)
+
+        tets = []
+        for _, vol in gmsh.model.getEntities(3):
+            types, _, nodes = gmsh.model.mesh.getElements(3, vol)
+            for et, nd in zip(types, nodes):
+                _, _, _, nn, _, _ = gmsh.model.mesh.getElementProperties(et)
+                if nn != 4:
+                    continue
+                arr = np.fromiter((idx.get(int(v), -1) for v in nd),
+                                  dtype=np.int64, count=len(nd))
+                tets.append(arr.reshape(-1, 4))
+        if not tets:
+            return None
+        tets = np.concatenate(tets)
+        tets = tets[(tets >= 0).all(axis=1)]
+        if len(tets) < 100:
+            return None
+
+        vol6 = np.abs(np.einsum(
+            "ij,ij->i",
+            pts[tets[:, 1]] - pts[tets[:, 0]],
+            np.cross(pts[tets[:, 2]] - pts[tets[:, 0]],
+                     pts[tets[:, 3]] - pts[tets[:, 0]])))
+        h = np.maximum(vol6, 1e-30) ** (1.0 / 3.0)
+
+        combos = ((0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3))
+        faces = np.concatenate([np.sort(tets[:, c], axis=1) for c in combos])
+        owner = np.tile(np.arange(len(tets)), 4)
+        order = np.lexsort((faces[:, 2], faces[:, 1], faces[:, 0]))
+        faces, owner = faces[order], owner[order]
+        same = np.all(faces[1:] == faces[:-1], axis=1)
+        a, b = owner[:-1][same], owner[1:][same]
+        if a.size == 0:
+            return None
+        ratio = np.maximum(h[a] / h[b], h[b] / h[a])
+        return {
+            "p50": float(np.percentile(ratio, 50)),
+            "p99": float(np.percentile(ratio, 99)),
+            "max": float(ratio.max()),
+            "pct_over_2": float((ratio > 2.0).mean() * 100.0),
+            "n_faces": int(ratio.size),
+        }
+    except Exception as e:
+        logger.debug(f"Growth-ratio audit could not run: {e}")
+        return None
+
+
+def _check_mesh_quality(gmsh, body_r: float, n_bl_entities: int,
+                        wall_surfs=None) -> list:
     """
     Post-generation mesh quality validation.
-    Checks element types, counts, quality metrics and wall manifoldness.
+    Checks element types, counts, quality metrics, grading and wall
+    manifoldness.
+
+    Returns a list of FATAL problem descriptions — empty means the mesh is
+    usable. The caller is expected to act on a non-empty list (retry at another
+    setting, or refuse to export); this used to log the same findings and
+    return, which meant a mesh known to be invalid was written, loaded by SU2
+    and solved anyway. "MESH INVALID" in a log nobody reads is not a check.
     """
+    problems: list = []
     n_prisms = 0
     n_tets = 0
     n_pyramids = 0
@@ -2266,29 +2822,48 @@ def _check_mesh_quality(gmsh, body_r: float, n_bl_entities: int, wall_surfs=None
                     f"(sampled {len(sicn_data):,} of {len(tags_3d):,} 3D elements)"
                 )
                 if n_negative > 0:
-                    logger.warning(
-                        f"  {n_negative} elements have negative Jacobians — "
-                        f"SU2 may produce poor convergence"
+                    problems.append(
+                        f"{n_negative} of {len(sicn_data):,} sampled elements "
+                        f"have a negative Jacobian (inverted cells)"
                     )
         except Exception as e:
             # getElementQualities may not be available in all Gmsh builds
             logger.warning(f"Element quality check unavailable: {e}")
+
+    # ── Grading ───────────────────────────────────────────────────────────────
+    grow = _audit_growth_ratio(gmsh)
+    if grow:
+        logger.info(
+            f"  Neighbour size ratio: p50={grow['p50']:.2f}  "
+            f"p99={grow['p99']:.2f}  max={grow['max']:.2f}  "
+            f"({grow['pct_over_2']:.3f}% of {grow['n_faces']:,} interior faces "
+            f"above 2x)"
+        )
+        if grow["p99"] > 2.0:
+            logger.warning(
+                f"  Cell size changes by {grow['p99']:.1f}x between neighbours "
+                f"at the 99th percentile (target <= {_MAX_GROWTH_RATIO}). "
+                f"Gradients and fluxes are evaluated across those faces; "
+                f"expect elevated numerical entropy and a drag/lift error that "
+                f"refinement will not remove."
+            )
 
     # ── Wall manifoldness ─────────────────────────────────────────────────────
     buried = _audit_wall_is_manifold(gmsh, wall_surfs)
     if buried is None:
         pass
     elif buried:
-        logger.error(
-            f"MESH INVALID: {buried:,} wall triangles have a 3D element on both "
-            f"sides, so the rocket wall is not a boundary of the fluid. Two "
-            f"parts of the mesh occupy the same space and SU2 will not converge "
-            f"on it — the residual will not fall below its starting value. This "
-            f"is the failure mode prism extrusion produces (see the module "
-            f"docstring); do not trust any result from this mesh."
+        problems.append(
+            f"{buried:,} wall triangles have a 3D element on both sides, so the "
+            f"wall is not a boundary of the fluid (two parts of the mesh occupy "
+            f"the same space; SU2 cannot converge on it)"
         )
     else:
         logger.info("[OK] Wall is manifold: every wall face bounds exactly one cell")
+
+    for p in problems:
+        logger.error(f"MESH INVALID: {p}")
+    return problems
 
 
 # ── Fin geometry ──────────────────────────────────────────────────────────────

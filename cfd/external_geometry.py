@@ -788,7 +788,61 @@ def import_brep_into_occ(gmsh, cad_path: Path, flow_axis: str,
 #   "Tolerance too large - aborting partitioning"
 # in an unbounded loop. That never raises, so an exception handler cannot save
 # you; the only defence is not to call it.
-_MAX_REPARAM_TRIANGLES = 25_000
+# Whether a tessellation can be reparametrised is decided by SLIVER QUALITY,
+# not by triangle count. Measured on the same ONERA M6 wing, classifySurfaces
+# with forReparametrization=True followed by createGeometry:
+#
+#     tris      AR p95   AR max    time
+#    19,844       2.4       21      0.6 s
+#    79,048       2.4       41      2.8 s
+#   219,748       2.4       68      9.1 s
+#    33,796      43.0      609      >14 MINUTES of CPU, producing nothing (killed)
+#
+# 220k clean triangles take nine seconds; 34k sliver-ridden ones hang. The old
+# gate here was a flat 25,000-triangle ceiling, which had it backwards: it
+# rejected clean meshes that would have taken a few seconds and admitted
+# degenerate ones that hang. A tessellator that clusters points along one
+# parametric direction while leaving the other coarse (an airfoil table with
+# 1e-5-chord nose spacing against a 20 mm span step) makes knife triangles, and
+# the patch fitting chokes on those.
+#
+# So the gate is now aspect ratio, with a count ceiling kept only as a runtime
+# backstop -- set at the largest case actually measured, not extrapolated.
+#
+# Failing this gate is not fatal: the triangulation is used directly as the wall
+# mesh, which means no refinement setting can change the wall from then on.
+# That cost is REPORTED, not silent -- see _surface_mesh_resolution in
+# cfd/meshing.py. The productive fix for a rejected import is to re-tessellate
+# the source isotropically, not to export it coarser.
+_MAX_REPARAM_TRIANGLES = 250_000
+_MAX_REPARAM_ASPECT_P95 = 10.0
+
+
+def _triangle_aspect_p95(stl_path) -> "float | None":
+    """95th-percentile triangle aspect ratio of a tessellation, or None.
+
+    The predictor for whether ``classifySurfaces(forReparametrization=True)``
+    completes — see the table above ``_MAX_REPARAM_TRIANGLES``. p95 rather than
+    max, because a handful of bad triangles is survivable and the max is set by
+    whichever single facet is worst.
+    """
+    try:
+        import numpy as np
+        import pyvista as pv
+        m = pv.read(str(stl_path)).extract_surface().triangulate()
+        f = m.faces.reshape(-1, 4)[:, 1:]
+        p = np.asarray(m.points)
+        e = np.stack([
+            np.linalg.norm(p[f[:, 1]] - p[f[:, 0]], axis=1),
+            np.linalg.norm(p[f[:, 2]] - p[f[:, 1]], axis=1),
+            np.linalg.norm(p[f[:, 0]] - p[f[:, 2]], axis=1),
+        ], axis=1)
+        ar = e.max(axis=1) / np.maximum(e.min(axis=1), 1e-12)
+        ar = ar[np.isfinite(ar)]
+        return float(np.percentile(ar, 95)) if ar.size else None
+    except Exception as e:                                    # noqa: BLE001
+        logger.debug(f"Aspect-ratio probe failed on {stl_path}: {e}")
+        return None
 
 
 def import_stl_into_geo(gmsh, stl_path: Path,
@@ -840,10 +894,22 @@ def import_stl_into_geo(gmsh, stl_path: Path,
     if allow_reparametrization and _n_tris > _MAX_REPARAM_TRIANGLES:
         logger.info(
             f"{stl_path.name} has {_n_tris:,} triangles — skipping "
-            f"reparametrisation (above the {_MAX_REPARAM_TRIANGLES:,} limit) and "
-            f"using the triangulation directly as the wall mesh."
+            f"reparametrisation (above the {_MAX_REPARAM_TRIANGLES:,} runtime "
+            f"backstop) and using the triangulation directly as the wall mesh."
         )
         allow_reparametrization = False
+    if allow_reparametrization:
+        _ar = _triangle_aspect_p95(stl_path)
+        if _ar is not None and _ar > _MAX_REPARAM_ASPECT_P95:
+            logger.warning(
+                f"{stl_path.name} has sliver triangles (aspect ratio p95 "
+                f"{_ar:.1f}, limit {_MAX_REPARAM_ASPECT_P95:g}) — skipping "
+                f"reparametrisation, which would hang on them, and using the "
+                f"triangulation directly as the wall mesh. THE WALL CANNOT BE "
+                f"REFINED from here: re-export the geometry with a more "
+                f"isotropic tessellation, or supply a STEP/IGES file."
+            )
+            allow_reparametrization = False
 
     reparametrised = True
     if not allow_reparametrization:
