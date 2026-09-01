@@ -14,6 +14,8 @@ edits. ``motors.json`` was only used once to pick credible motor values.
 """
 from __future__ import annotations
 
+import math
+
 from core.rocket_state import RocketState
 
 WALL_T = 0.0025          # airframe wall thickness (m)
@@ -49,7 +51,14 @@ def canonical_state() -> RocketState:
         fin_height=0.12,
         fin_root_chord=0.20,
         fin_tip_chord=0.08,
-        fin_sweep_angle=30.0,
+        # RADIANS. RocketState and physics.aerodynamics store this angle in
+        # radians (compute_fin_cn_alpha does a bare math.tan on it), while
+        # core.components.TrapezoidalFinSet.sweep_angle — and therefore the
+        # assembly below and the CFD mesher — stores DEGREES. A literal 30.0
+        # here meant 30 radians: tan(30) = -6.405, i.e. the aero model saw a
+        # 0.12 m fin swept 0.77 m FORWARD of a 0.20 m root chord, while SU2
+        # meshed the same fin swept 30 degrees aft.
+        fin_sweep_angle=math.radians(30.0),
         fin_thickness=0.004,
         fin_position=1.70,        # nose tip → fin root LE
         surface_finish="Normal",
