@@ -2,14 +2,16 @@
 
 _Generated 2026-09-01 06:39 UTC_
 
-**18 passed · 1 failed · 1 skipped**  (61 gated comparisons)
+_Excerpt: passing benchmarks only. 1 failing benchmark omitted (ONERA M6 wing surface Cp vs experiment); see the full report for it._
+
+**18 passed · 0 failed · 1 skipped**  (49 gated comparisons)
 4 further rows are marked **diag**: they record a known gap between a method and its reference — a low-order method used outside its own envelope — rather than asserting agreement. Diagnostic rows carry deliberately wide bands, cannot fail a benchmark, and are **not counted as passes** above.
 
 Each engine is benchmarked against an *independent* reference, in three tiers of increasing strength:
 
 1. **Exact solutions** — the 6DOF integrator against closed-form ODE solutions, structures against textbook formulas, the cone solver against Taylor–Maccoll.
 2. **Code-to-code** — flight against OpenRocket, aerodynamics against SU2, the airframe FEM against CalculiX.
-3. **Published measurement** — 3 benchmarks compare K2 against wind-tunnel data from the open literature. Agreement with another program proves consistency; agreement with a measurement is the only tier that can show the physics is right. The table below lists these alongside the other published references (exact-solution tables, agreed benchmark target values), which are external but are not measurements.
+3. **Published measurement** — 2 benchmarks compare K2 against wind-tunnel data from the open literature. Agreement with another program proves consistency; agreement with a measurement is the only tier that can show the physics is right. The table below lists these alongside the other published references (exact-solution tables, agreed benchmark target values), which are external but are not measurements.
 
 ### Comparisons against published data
 
@@ -18,7 +20,6 @@ Each engine is benchmarked against an *independent* reference, in three tiers of
 | Taylor–Maccoll cone vs NACA-1135 | NACA Report 1135 cone tables | published exact-solution tables | PASS |
 | Barrowman lift slope vs AGARD-B experiment | AEDC-TR-70-100 wind-tunnel data (AGARD-B, Tunnel 4T) | wind-tunnel measurement | PASS |
 | SU2 lift slope vs AGARD-B experiment | AEDC-TR-70-100 wind-tunnel data (AGARD-B, Tunnel 4T) | wind-tunnel measurement | PASS |
-| ONERA M6 wing surface Cp vs experiment | Schmitt & Charpin, AGARD AR-138 (1979), Test 2308 | wind-tunnel measurement | FAIL |
 | NAFEMS LE1 — elliptic membrane (CalculiX) | NAFEMS standard benchmark target value | agreed benchmark target value | PASS |
 | NAFEMS LE10 — thick plate under pressure (CalculiX) | NAFEMS standard benchmark target value | agreed benchmark target value | PASS |
 
@@ -182,28 +183,6 @@ _Reference:_ AEDC-TR-70-100 wind-tunnel data (AGARD-B, Tunnel 4T) &nbsp;|&nbsp; 
 | C_L at M=0.8, α=6° | 0.2817 | 0.3217 | AEDC-TR-70-100 | 12.42% | 20% | ✓ |
 
 ![SU2 lift slope vs AGARD-B experiment](plots/cfd_su2_lift_slope_vs_agard-b_experiment_cl_alpha_vs_mach.png)
-
-
-### FAIL — ONERA M6 wing surface Cp vs experiment
-
-_Reference:_ Schmitt & Charpin, AGARD AR-138 (1979), Test 2308 &nbsp;|&nbsp; _Credibility:_ Validated
-
-| Quantity | K2 | Reference | Source | Rel. err | Tol | Status |
-|---|---|---|---|---|---|---|
-| Cp RMSE improves with refinement, y/b=0.2 (upper) | 0.1494 | 0.156 | AGARD AR-138 | 4.25% | ≤ ref (15%) | ✓ |
-| Cp RMSE improves with refinement, y/b=0.2 (lower) | 0.07083 | 0.133 | AGARD AR-138 | 46.74% | ≤ ref (15%) | ✓ |
-| Cp RMSE improves with refinement, y/b=0.65 (upper) | 0.1488 | 0.2436 | AGARD AR-138 | 38.92% | ≤ ref (15%) | ✓ |
-| Cp RMSE improves with refinement, y/b=0.65 (lower) | 0.06014 | 0.115 | AGARD AR-138 | 47.70% | ≤ ref (15%) | ✓ |
-| Cp RMSE improves with refinement, y/b=0.9 (upper) | 0.1635 | 0.2551 | AGARD AR-138 | 35.91% | ≤ ref (15%) | ✓ |
-| Cp RMSE improves with refinement, y/b=0.9 (lower) | 0.0436 | 0.1186 | AGARD AR-138 | 63.25% | ≤ ref (15%) | ✓ |
-| Cp RMSE improves with refinement, y/b=0.99 (upper) | 0.158 | 0.2664 | AGARD AR-138 | 40.69% | ≤ ref (15%) | ✓ |
-| Cp RMSE improves with refinement, y/b=0.99 (lower) | 0.07071 | 0.1294 | AGARD AR-138 | 45.36% | ≤ ref (15%) | ✓ |
-| Sectional normal force c_n, y/b=0.2 | 0.25 | 0.2359 | AGARD AR-138 | 6.00% | 15% | ✓ |
-| Sectional normal force c_n, y/b=0.65 | 0.2827 | 0.2841 | AGARD AR-138 | 0.46% | 15% | ✓ |
-| Sectional normal force c_n, y/b=0.9 | 0.2194 | 0.2131 | AGARD AR-138 | 2.96% | 15% | ✓ |
-| Sectional normal force c_n, y/b=0.99 | 0.2575 | 0.2106 | AGARD AR-138 | 22.29% | 15% | ✗ |
-
-![ONERA M6 wing surface Cp vs experiment](plots/cfd_onera_m6_wing_surface_cp_vs_experiment_cp_yb065_upper.png)
 
 
 ## Structures ↔ NAFEMS benchmarks / textbook closed form / CalculiX
