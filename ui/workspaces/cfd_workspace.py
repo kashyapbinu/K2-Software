@@ -33,6 +33,22 @@ def _make_val_label(text="—"):
     return lbl
 
 
+def _utf8_env():
+    """Environment for a mesh subprocess whose stdout the parent reads as UTF-8.
+
+    On Windows the child otherwise picks the locale codec (cp1252) for its
+    pipe, which breaks the mesh log both ways: characters outside cp1252
+    ('→') raise UnicodeEncodeError inside logging, and characters that do
+    encode ('±') produce bytes the UTF-8 parent cannot decode. Set at the
+    interpreter level so it also covers the frozen build, where the script's
+    own sys.stdout.reconfigure() may run too late.
+    """
+    import os
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8:replace"
+    return env
+
+
 # ── Worker thread — runs mesh gen (subprocess) + SU2 solver ──────────────────
 # Gmsh calls signal.signal() during initialize(), which ONLY works in the
 # main thread of the main interpreter. So we run mesh generation in a
@@ -128,6 +144,19 @@ class SolverThread(QThread):
         script_file = cfg.work_dir / "_run_mesh.py"
         script_file.write_text(
             "import sys, json, logging\n"
+            # The parent decodes this pipe as UTF-8, but the child would
+            # otherwise encode it with the Windows locale codec (cp1252).
+            # Mesh logs contain '→' and '±': the former is not in
+            # cp1252 at all, so logging raised UnicodeEncodeError, dropped the
+            # message and dumped a handler traceback into the CFD console on
+            # every mesh build; the latter encoded to a byte that is not valid
+            # UTF-8, so the parent replaced it with a mojibake marker.
+            # Reconfigure before basicConfig so the handler binds the UTF-8
+            # stream, not the one it replaced.
+            "try:\n"
+            "    sys.stdout.reconfigure(encoding='utf-8', errors='replace')\n"
+            "except Exception:\n"
+            "    pass\n"
             "logging.basicConfig(level=logging.INFO, "
             "format='%(name)s: %(message)s', stream=sys.stdout)\n"
             f"sys.path.insert(0, {repr(k2_root)})\n"
@@ -178,6 +207,7 @@ class SolverThread(QThread):
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=_utf8_env(),
             creationflags=(0x08000000 if sys.platform == "win32" else 0),
         )
         proc = self._mesh_proc
@@ -510,6 +540,19 @@ class SweepThread(QThread):
         script_file = cfg.work_dir / "_run_mesh.py"
         script_file.write_text(
             "import sys, json, logging\n"
+            # The parent decodes this pipe as UTF-8, but the child would
+            # otherwise encode it with the Windows locale codec (cp1252).
+            # Mesh logs contain '→' and '±': the former is not in
+            # cp1252 at all, so logging raised UnicodeEncodeError, dropped the
+            # message and dumped a handler traceback into the CFD console on
+            # every mesh build; the latter encoded to a byte that is not valid
+            # UTF-8, so the parent replaced it with a mojibake marker.
+            # Reconfigure before basicConfig so the handler binds the UTF-8
+            # stream, not the one it replaced.
+            "try:\n"
+            "    sys.stdout.reconfigure(encoding='utf-8', errors='replace')\n"
+            "except Exception:\n"
+            "    pass\n"
             "logging.basicConfig(level=logging.INFO, "
             "format='%(name)s: %(message)s', stream=sys.stdout)\n"
             f"sys.path.insert(0, {repr(k2_root)})\n"
@@ -554,6 +597,7 @@ class SweepThread(QThread):
             cmd,
             cwd=k2_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace",
+            env=_utf8_env(),
             creationflags=(0x08000000 if sys.platform == "win32" else 0),
         )
         proc = self._mesh_proc
