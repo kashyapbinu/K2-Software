@@ -66,6 +66,10 @@ class PlotWidget(QWidget):
         use it to say where the data came from."""
         color = color or theme.ACCENT
         self.ax.clear()
+        # ax.clear() detaches every artist, the scrub cursor included. Dropping
+        # the reference here is what keeps set_cursor from later calling
+        # .remove() on an artist that no longer belongs to an axes.
+        self.cursor_line = None
         self._style_axis(title, xlabel, ylabel)
         self.ax.plot(x, y, color=color, linewidth=1.5, linestyle=linestyle)
         if fill:
@@ -79,6 +83,7 @@ class PlotWidget(QWidget):
     def multi_plot(self, datasets, title="", xlabel="", ylabel=""):
         """datasets: list of (x, y, color, label) tuples"""
         self.ax.clear()
+        self.cursor_line = None          # see update_plot
         self._style_axis(title, xlabel, ylabel)
         for x, y, color, label in datasets:
             self.ax.plot(x, y, color=color, label=label, linewidth=1.5)
@@ -88,9 +93,35 @@ class PlotWidget(QWidget):
         self.canvas.draw()
 
     def set_cursor(self, x_val):
+        """Move the scrub cursor to ``x_val``; None hides it.
+
+        The removal is guarded because the cursor artist can be detached by
+        anything that clears the axes, and a Matplotlib artist that is no
+        longer attached raises rather than ignoring the call:
+
+            matplotlib/artist.py, in remove
+            NotImplementedError: cannot remove artist
+
+        That is what a replot used to leave behind. It mattered out of
+        proportion to its size: results_workspace._on_scrub sets the cursor on
+        eight plots in a row and then fills the readout fields, so the first
+        stale artist aborted the whole handler -- the other seven cursors never
+        moved and the readouts never updated. Scrubbing back through time
+        looked like "no data at this time" and logged 750 exceptions.
+
+        Both fixes are kept deliberately. Clearing the reference at every
+        ax.clear() is the correct one; this guard is what stops the next
+        clear-site that forgets from breaking the whole panel again.
+        """
         if self.cursor_line is not None:
-            self.cursor_line.remove()
+            try:
+                if self.cursor_line.axes is not None:
+                    self.cursor_line.remove()
+            except (NotImplementedError, ValueError, AttributeError):
+                pass
             self.cursor_line = None
         if x_val is not None:
-            self.cursor_line = self.ax.axvline(x=x_val, color=theme.ERR, linestyle="--", linewidth=1.2, alpha=0.8)
+            self.cursor_line = self.ax.axvline(
+                x=x_val, color=theme.ERR, linestyle="--", linewidth=1.2,
+                alpha=0.8)
         self.canvas.draw()

@@ -55,7 +55,8 @@ class CpPlotWidget(QWidget):
         # Aerospace convention: invert Y-axis (suction = negative Cp = top)
         ax.invert_yaxis()
 
-    def update_cp(self, x_norm, cp_values, nose_end=0.3, fin_start=0.75):
+    def update_cp(self, x_norm, cp_values, nose_end=0.3, fin_start=0.75,
+                  extra=None):
         """
         Plot Cp distribution with section highlighting.
 
@@ -91,10 +92,22 @@ class CpPlotWidget(QWidget):
                         alpha=0.6)
 
         # Main Cp curve
+        _main_label = "Circumferential mean" if extra else None
         self.ax.plot(self._x_data, self._y_data, color=theme.ACCENT,
-                     linewidth=1.8, zorder=5)
+                     linewidth=1.8, zorder=5, label=_main_label)
         self.ax.fill_between(self._x_data, self._y_data, 0, alpha=0.08,
                              color=theme.ACCENT)
+
+        # Optional side curves: [(label, values, colour), ...]. At incidence
+        # the windward and leeward distributions are the loading; their mean is
+        # not.
+        for _lbl, _vals, _col in (extra or []):
+            try:
+                self.ax.plot(self._x_data, np.asarray(_vals), color=_col,
+                             linewidth=1.2, linestyle="--", alpha=0.9,
+                             zorder=4, label=_lbl)
+            except Exception:
+                pass
 
         # Stagnation point marker
         if len(self._y_data) > 0:
