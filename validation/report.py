@@ -11,6 +11,9 @@ Usage:
     python -m validation.report              # fast benchmarks only
     python -m validation.report --full       # include slow SU2/CalculiX/OpenRocket
     python -m validation.report --from-cache # re-render from the last JSON cache
+    python -m validation.report --from-cache --passing-only
+                                             # a second report holding only the
+                                             # benchmarks that passed
 """
 from __future__ import annotations
 
@@ -101,9 +104,17 @@ def _bench_md(bm: Benchmark, plot_paths: list) -> str:
         if getattr(c, "one_sided", ""):
             arrow = "≤" if c.one_sided == "below" else "≥"
             tol = f"{arrow} ref ({tol})" if tol else f"{arrow} ref"
+        # A diagnostic row records a known gap; it is not an assertion of
+        # agreement and must not read as one. Rendering it with the same tick
+        # as a gated row is how three rows sitting 63% from the reference came
+        # to be counted in a "18 passed" headline.
+        if getattr(c, "diagnostic", False):
+            mark = "diag"
+        else:
+            mark = "✓" if c.passed else "✗"
         lines.append(
             f"| {c.label} | {c.k2:.4g} | {c.ref:.4g} | {c.source} | "
-            f"{c.rel_err:.2%} | {tol or '—'} | {'✓' if c.passed else '✗'} |")
+            f"{c.rel_err:.2%} | {tol or '—'} | {mark} |")
     lines.append("")
     for p in plot_paths:
         lines.append(f"![{bm.name}]({p})")
@@ -166,12 +177,27 @@ def render(benchmarks: list) -> str:
     n_pass = sum(b.passed and not b.skipped for b in benchmarks)
     n_skip = sum(b.skipped for b in benchmarks)
     n_fail = sum(not b.passed and not b.skipped for b in benchmarks)
+    n_diag = sum(len(getattr(b, "diagnostics", [])) for b in benchmarks)
+    n_gated = sum(len(getattr(b, "gated", b.comparisons))
+                  for b in benchmarks if not b.skipped)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     n_meas = sum(_is_measurement(b) for b in benchmarks)
+    _diag_line = ""
+    if n_diag:
+        _diag_line = (
+            f"\n{n_diag} further row{'' if n_diag == 1 else 's'} "
+            f"{'is' if n_diag == 1 else 'are'} marked **diag**: "
+            f"{'it records' if n_diag == 1 else 'they record'} a known gap "
+            f"between a method and its reference — a low-order method used "
+            f"outside its own envelope — rather than asserting agreement. "
+            f"Diagnostic rows carry deliberately wide bands, cannot fail a "
+            f"benchmark, and are **not counted as passes** above."
+        )
     md = ["# K2 Physics Validation Report", "",
           f"_Generated {ts}_", "",
-          f"**{n_pass} passed · {n_fail} failed · {n_skip} skipped**", "",
+          f"**{n_pass} passed · {n_fail} failed · {n_skip} skipped**  "
+          f"({n_gated} gated comparisons)" + _diag_line, "",
           "Each engine is benchmarked against an *independent* reference, in "
           "three tiers of increasing strength:", "",
           "1. **Exact solutions** — the 6DOF integrator against closed-form ODE "
@@ -202,12 +228,37 @@ def render(benchmarks: list) -> str:
 
 # ── entry ─────────────────────────────────────────────────────────────────────
 
+def drop_failed(benchmarks: list) -> list:
+    """Benchmarks minus the ones that failed; skips are kept and stay flagged.
+
+    This is a presentation filter for an excerpt of the report, not a way to
+    make a failure go away: the canonical REPORT.md/REPORT.pdf are always
+    written from the unfiltered set, and the excerpt says on its face how many
+    benchmarks it left out.
+    """
+    return [b for b in benchmarks if b.skipped or b.passed]
+
+
+def _excluded_note(kept: list, all_benchmarks: list) -> str:
+    """One line under the title of a filtered report naming what it omits."""
+    dropped = [b for b in all_benchmarks if b not in kept]
+    if not dropped:
+        return ""
+    names = ", ".join(b.name for b in dropped)
+    return (f"_Excerpt: passing benchmarks only. "
+            f"{len(dropped)} failing benchmark{'' if len(dropped) == 1 else 's'} "
+            f"omitted ({names}); see the full report for {'it' if len(dropped) == 1 else 'them'}._")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Generate the K2 validation report.")
     ap.add_argument("--full", action="store_true",
                     help="include slow SU2 / CalculiX / OpenRocket benchmarks")
     ap.add_argument("--from-cache", action="store_true",
                     help="re-render from the last benchmarks.json instead of re-running")
+    ap.add_argument("--passing-only", action="store_true",
+                    help="also write REPORT_passing.md holding only the benchmarks "
+                         "that passed (the full REPORT.md is still written)")
     args = ap.parse_args()
 
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -223,6 +274,20 @@ def main():
     out = REPORT_DIR / "REPORT.md"
     out.write_text(md, encoding="utf-8")
     print(f"Wrote {out}")
+
+    if args.passing_only:
+        kept = drop_failed(benchmarks)
+        excerpt = render(kept)
+        note = _excluded_note(kept, benchmarks)
+        if note:
+            # Slot the note in under the generated-on line, before the counts.
+            lines = excerpt.split("\n")
+            lines.insert(4, note)
+            lines.insert(5, "")
+            excerpt = "\n".join(lines)
+        out_pass = REPORT_DIR / "REPORT_passing.md"
+        out_pass.write_text(excerpt, encoding="utf-8")
+        print(f"Wrote {out_pass}")
     for b in benchmarks:
         print("  " + b.summary())
 
