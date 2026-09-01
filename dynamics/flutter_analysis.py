@@ -416,313 +416,135 @@ def pk_flutter_analysis(span: float, root_chord: float, tip_chord: float,
                  f"f_torsion={omega_a/(2*math.pi):.2f} Hz, "
                  f"chord={c:.4f} m, span={span:.4f} m")
 
-    # ── Structural matrices (generalised coords) ────────────────────────────
-    # DOF vector: {h/b, α}
-    # Mass matrix M (non-dimensional by m_bar·b):
-    #   M = [[μ,   x_α],
-    #        [x_α, r_α²]]
-    # where μ  = m_bar / (π·ρ·b²)  (mass ratio)
-    #       x_α = static unbalance / (m_bar·b)   = (0.5 - x_ea)·c/b·... simplified
-    #       r_α² = I_alpha / (m_bar·b²)
+    # ── Non-dimensional section parameters ──────────────────────────────────
+    # System, on q = {h/b, α}, dividing the plunge equation by m̄·b·ω_α² and
+    # the pitch equation by m̄·b²·ω_α²:
+    #
+    #     [K_s] q = Ω [M_eff(k)] q ,    Ω = (ω/ω_α)²
+    #     K_s = diag((ω_h/ω_α)², r_α²)      M_s = [[1, x_α], [x_α, r_α²]]
+    #
+    # Every Theodorsen term carries a factor Ω once V is written as ω·b/k, so
+    # the aerodynamics folds entirely into M_eff — this is the classical
+    # k-method, and it is why no p-k iteration on k is needed.
     mu = m_bar / (math.pi * rho * b ** 2) if (rho > 0 and b > 0) else 1e6
-    # For symmetric section EA at mid-chord ⇒ x_α = 0 (no static unbalance)
-    # In practice fins have small offset; use a_h = (x_ea - 0.5)*2
-    # a_h is distance from mid-chord to EA in semi-chords (dimensionless)
-    a_h = (x_ea - 0.5) * 2.0  # = 0 for mid-chord EA
-    x_alpha = 0.0  # symmetric section ⇒ CG at EA ⇒ zero static moment
+    # a = EA offset from mid-chord in semi-chords. _fin_section_properties puts
+    # both EA and CG at mid-chord for a symmetric slab, so a = x_α = 0 and the
+    # bending-torsion coupling is purely aerodynamic (lift acts at c/4, ahead
+    # of the EA).
+    a_h = (x_ea - 0.5) * 2.0
+    x_alpha = 0.0
     r_alpha_sq = I_alpha / (m_bar * b ** 2) if (m_bar > 0 and b > 0) else 1.0
-
-    # Frequency ratio
     omega_ratio_sq = (omega_h / omega_a) ** 2
 
-    # ── Velocity sweep ──────────────────────────────────────────────────────
     V_scan_max = max(max_flight_speed * V_max_factor, 50.0)
-    dV = V_scan_max / n_steps if n_steps > 0 else 5.0
 
     vg_data = []       # (V, g, mode_label)
     vf_data = []       # (V, f, mode_label)
-
     MODE_LABELS = ["1st Bending", "1st Torsion"]
 
     flutter_speed = float('inf')
     flutter_freq = 0.0
     flutter_mode_idx = -1
-    damping_margin = 0.0  # most negative g before crossing
+    min_g_per_mode = [0.0, 0.0]
 
-    # Previous step eigenvectors for MAC tracking
-    prev_vecs = [None, None]
-    # Previous step: (g, omega) per mode for crossing detection
-    prev_g = [None, None]
-    min_g_per_mode = [0.0, 0.0]  # track most negative damping
+    # ── k sweep ─────────────────────────────────────────────────────────────
+    # Reduced frequency is the natural independent variable here: V falls out
+    # of each solution as V = ω·b/k. Sweep it geometrically from high k (low
+    # speed) down to low k (high speed / divergence).
+    n_k = max(n_steps, 40)
+    k_hi, k_lo = 5.0, 1.0e-3
+    ratio = (k_lo / k_hi) ** (1.0 / (n_k - 1))
+    branches = [[], []]     # per tracked mode: (V, g, f_hz)
 
-    # Defaults so the extraction below never hits unbound locals when the
-    # very first iteration bails out on a singular mass matrix.
-    lam1 = complex(omega_ratio_sq, 0.0)
-    lam2 = complex(1.0, 0.0)
-    Ae11 = complex(omega_ratio_sq, 0.0); Ae12 = complex(0.0, 0.0)
-    Ae21 = complex(0.0, 0.0); Ae22 = complex(1.0, 0.0)
+    prev_nu = None
+    for i_k in range(n_k):
+        k = k_hi * ratio ** i_k
+        C_k = theodorsen_C(k)
+        j = complex(0.0, 1.0)
+        inv_mu = 1.0 / mu if mu > 1e-30 else 0.0
+        a = a_h
 
-    # Start from small positive velocity to avoid k → ∞
-    V_start = max(dV, 1.0)
+        # Ω-proportional (aero + structural inertia) terms -> M_eff
+        Me11 = 1.0 + inv_mu * (1.0 - 2.0 * j * C_k / k)
+        Me12 = x_alpha - inv_mu * (a + j / k + 2.0 * C_k / k ** 2
+                                   + 2.0 * C_k * (0.5 - a) * j / k)
+        Me21 = x_alpha - inv_mu * (a - 2.0 * (a + 0.5) * j * C_k / k)
+        Me22 = r_alpha_sq - inv_mu * ((0.5 - a) * j / k - (0.125 + a * a)
+                                      - 2.0 * (a + 0.5) * C_k / k ** 2
+                                      - 2.0 * (a + 0.5) * (0.5 - a) * C_k * j / k)
 
-    for i_step in range(n_steps):
-        V = V_start + i_step * dV
-        if V <= 0:
+        K11, K22 = omega_ratio_sq, r_alpha_sq
+
+        det_M = Me11 * Me22 - Me12 * Me21
+        if abs(det_M) < 1e-30:
+            continue
+        # A = M_eff⁻¹ · K_s
+        Ae11 = (Me22 * K11) / det_M
+        Ae12 = (-Me12 * K22) / det_M
+        Ae21 = (-Me21 * K11) / det_M
+        Ae22 = (Me11 * K22) / det_M
+
+        lam1, lam2 = _solve_2x2_eigenvalues(Ae11, Ae12, Ae21, Ae22)
+
+        # λ = ν²/(1 + j·g)  ⇒  g = −Im λ / Re λ,  ν = √(Re λ·(1+g²))
+        sols = []
+        for lam in (lam1, lam2):
+            if lam.real <= 1e-12:
+                continue
+            g = -lam.imag / lam.real
+            nu = math.sqrt(lam.real * (1.0 + g * g))
+            if nu <= 0:
+                continue
+            omega = nu * omega_a
+            V = omega * b / k
+            sols.append((nu, g, omega / (2.0 * math.pi), V))
+        if len(sols) < 2:
             continue
 
-        # ── p-k iteration for self-consistent reduced frequency ─────────
-        # Initial guess: use structural frequencies
-        k_guesses = [omega_h * b / V, omega_a * b / V]
-        eigenvalues = []
-        eigenvectors = []
-
-        for i_mode in range(2):
-            # p-k iteration: solve at assumed k, update k from result
-            k_current = k_guesses[i_mode]
-            if k_current <= 0:
-                k_current = 0.01
-
-            for _pk_iter in range(25):
-                C_k = theodorsen_C(k_current)
-
-                # ── Build aeroelastic matrix ────────────────────────────
-                # Non-dimensional flutter determinant (Ref: BAH eq 6-24):
-                #
-                # [M]{q̈} + [K]{q} = (ρ·V²·b/2)[A(k)]{q}
-                #
-                # Written as eigenvalue problem in p² = (σ+jω)² :
-                #   det | [K] - p²[M] - ρ·V²·b·[A(k)]/2 | = 0
-                #
-                # For 2-DOF {h/b, α}:
-                #
-                # K11 = μ·ω_h²/ω_α²   K22 = r_α²
-                # M11 = μ               M22 = r_α²
-                # M12 = M21 = x_α
-                #
-                # Aero matrix [A(k)] from Theodorsen (thin airfoil):
-                #   L = π·ρ·b²[ḧ + V·α̇ − b·a·α̈]
-                #       + 2π·ρ·V·b·C(k)[ḣ + V·α + b(0.5−a)·α̇]
-                #   M_α = π·ρ·b²[b·a·ḧ − V·b(0.5−a)·α̇ − b²(1/8+a²)·α̈]
-                #       + 2π·ρ·V·b²·(a+0.5)·C(k)[ḣ + Vα + b(0.5−a)α̇]
-                #
-                # Non-dimensionalise by m_bar·b and ω_α²:
-                a = a_h
-
-                # Reduced velocity
-                U_star = V / (b * omega_a) if (b * omega_a) > 0 else 1e6
-
-                # Aero coefficients (per unit span, divided by π·ρ·b²·ω_α²)
-                # Using p = jω approximation for the k-iteration:
-                jk = complex(0, k_current)
-
-                # Non-circulatory (apparent mass) terms
-                # Circulatory terms via C(k)
-                F_Ck = C_k.real
-                G_Ck = C_k.imag
-
-                # Build the effective dynamic matrix entries
-                # Eigenvalue: λ = (p/ω_α)²   where p = σ + jω
-                # Equation: ([K_eff] - λ[M_eff]){q} = 0
-                #
-                # Following Hassig's p-k formulation:
-                # At assumed ω (from k = ω·b/V):
-                omega_assumed = k_current * V / b if b > 0 else omega_a
-                p_sq_norm = -(omega_assumed / omega_a) ** 2  # = -(ω/ω_α)²
-
-                # Stiffness terms (structural)
-                K11 = mu * omega_ratio_sq   # bending stiffness (non-dim)
-                K22 = r_alpha_sq            # torsion stiffness (non-dim)
-
-                # Mass terms (structural)
-                M11 = mu
-                M22 = r_alpha_sq
-                M12 = x_alpha
-                M21 = x_alpha
-
-                # Aerodynamic terms (divided by π·ρ·b²·ω_α²):
-                # They appear as  -1/μ * ... after dividing by structural mass
-                # Direct formulation of the 2×2 eigenvalue problem:
-                #   A_eff · q = λ · q
-                #   where A_eff = M_eff⁻¹ · K_eff
-                #
-                # Simpler: use the flutter determinant directly.
-                # Non-dimensional aero stiffness and damping per Theodorsen:
-
-                # Quasi-steady + unsteady lift coefficient contributions
-                # L_h = -π·ρ·b²·ω²·h - 2π·ρ·V·b·C(k)·(jω·h)
-                # L_α = -π·ρ·b²·V·(jω)·α + 2π·ρ·V²·b·C(k)·α
-                #        + 2π·ρ·V·b²·(0.5-a)·C(k)·(jω)·α
-                #        + π·ρ·b³·a·ω²·α
-
-                # For eigenvalue problem, collect into matrix form
-                # and solve. Using the direct 2x2 approach:
-
-                # Aero contributions (non-dim by π·ρ·b²):
-                inv_mu = 1.0 / mu if mu > 1e-30 else 0.0
-
-                # Aerodynamic stiffness matrix entries (non-dim)
-                # From lift due to α (circulatory): 2·C(k)·V²/(b·ω_α²·b)
-                # = 2·C(k)·U*²
-                A_k_11 = 0.0           # no aero stiffness from h displacement
-                A_k_12 = 2.0 * C_k * U_star ** 2  # lift from α, circulatory
-                A_k_21 = 0.0
-                A_k_22 = (2.0 * (a + 0.5) * C_k * U_star ** 2)  # moment from α
-
-                # Aerodynamic damping matrix entries (non-dim)
-                # proportional to jk (from velocity terms)
-                A_d_11 = 2.0 * C_k * U_star * jk  # lift from ḣ, circulatory
-                A_d_12_nc = -U_star * jk           # lift from α̇, non-circ
-                A_d_12_c = 2.0 * (0.5 - a) * C_k * U_star * jk  # circ part
-                A_d_12 = A_d_12_nc + A_d_12_c
-                A_d_21 = 2.0 * (a + 0.5) * C_k * U_star * jk
-                A_d_22_nc = U_star * (0.5 - a) * jk
-                A_d_22_c = 2.0 * (a + 0.5) * (0.5 - a) * C_k * U_star * jk
-                A_d_22 = A_d_22_nc + A_d_22_c
-
-                # Apparent mass terms (proportional to -k²)
-                k_sq = k_current ** 2
-                A_m_11 = complex(k_sq, 0)           # apparent mass from ḧ
-                A_m_12 = complex(-a * k_sq, 0)      # apparent mass from α̈
-                A_m_21 = complex(-a * k_sq, 0)
-                A_m_22 = complex((1.0/8.0 + a*a) * k_sq, 0)
-
-                # Effective matrix: [K_struct + K_aero/μ] - λ·[M_struct + M_aero/μ]
-                # Rearranging into standard A·q = λ·q:
-                # [M_eff]⁻¹[K_eff]·q = λ·q  with  λ = (ω/ω_α)²·(1 + j·g)
-                #
-                # M_eff = [M_struct + apparent_mass_aero/μ]   (A_m only)
-                # K_eff = [K_struct + aero_stiffness/μ + aero_damping/μ]
-
-                Me11 = complex(M11, 0) + A_m_11 * inv_mu
-                Me12 = complex(M12, 0) + A_m_12 * inv_mu
-                Me21 = complex(M21, 0) + A_m_21 * inv_mu
-                Me22 = complex(M22, 0) + A_m_22 * inv_mu
-
-                Ke11 = complex(K11, 0) + (A_k_11 + A_d_11) * inv_mu
-                Ke12 = complex(0.0, 0) + (A_k_12 + A_d_12) * inv_mu
-                Ke21 = complex(0.0, 0) + (A_k_21 + A_d_21) * inv_mu
-                Ke22 = complex(K22, 0) + (A_k_22 + A_d_22) * inv_mu
-
-                # Solve M_eff⁻¹ · K_eff eigenvalue
-                det_M = Me11 * Me22 - Me12 * Me21
-                if abs(det_M) < 1e-30:
-                    break
-
-                inv_det_M = 1.0 / det_M
-                # M_eff inverse
-                Mi11 = Me22 * inv_det_M
-                Mi12 = -Me12 * inv_det_M
-                Mi21 = -Me21 * inv_det_M
-                Mi22 = Me11 * inv_det_M
-
-                # A = M_eff⁻¹ · K_eff
-                Ae11 = Mi11 * Ke11 + Mi12 * Ke21
-                Ae12 = Mi11 * Ke12 + Mi12 * Ke22
-                Ae21 = Mi21 * Ke11 + Mi22 * Ke21
-                Ae22 = Mi21 * Ke12 + Mi22 * Ke22
-
-                lam1, lam2 = _solve_2x2_eigenvalues(Ae11, Ae12, Ae21, Ae22)
-
-                # λ = (ω/ω_α)²·(1 + j·g)  ⇒  ω = ω_α·√(Re λ)
-                lam_iter = lam1 if i_mode == 0 else lam2
-                re_lam = lam_iter.real
-                if re_lam <= 0:
-                    break
-                omega_new = math.sqrt(re_lam) * omega_a
-
-                if omega_new <= 0:
-                    break
-
-                k_new = omega_new * b / V if V > 0 else k_current
-
-                if abs(k_new - k_current) / max(k_current, 1e-10) < 0.005:
-                    k_current = k_new
-                    break
-                k_current = 0.7 * k_current + 0.3 * k_new  # relaxation
-
-            # ── Extract damping and frequency from converged eigenvalue ──
-            # k-method convention: λ = (ω/ω_α)²·(1 + j·g), so
-            #   ω = ω_α·√(Re λ)   and   g = Im λ / Re λ
-            # (required structural damping; flutter when g crosses 0 upward)
-            lam_use = lam1 if i_mode == 0 else lam2
-            re_lam = lam_use.real
-            if re_lam > 1e-12:
-                omega_result = math.sqrt(re_lam) * omega_a
-                g_damping = lam_use.imag / re_lam
-            else:
-                omega_result = 0.0
-                g_damping = 0.0
-
-            freq_hz = omega_result / (2.0 * math.pi) if omega_result > 0 else 0.0
-
-            eigenvalues.append((g_damping, freq_hz, omega_result))
-
-            # Compute eigenvector for MAC tracking
-            vec = _eigenvector_2x2(Ae11, Ae12, Ae21, Ae22, lam_use)
-            eigenvectors.append(vec)
-
-        if len(eigenvalues) < 2:
-            continue
-
-        # ── Mode tracking via MAC ───────────────────────────────────────
-        assigned = [None, None]  # which computed mode maps to which tracked mode
-        if prev_vecs[0] is not None:
-            # Compute MAC between previous and current eigenvectors
-            mac_matrix = [[0.0, 0.0], [0.0, 0.0]]
-            for im in range(2):
-                for jm in range(2):
-                    mac_matrix[im][jm] = _mac_2dof(prev_vecs[im],
-                                                    eigenvectors[jm])
-            # Greedy assignment (2x2 is trivial)
-            if mac_matrix[0][0] + mac_matrix[1][1] >= mac_matrix[0][1] + mac_matrix[1][0]:
-                assigned = [0, 1]
-            else:
-                assigned = [1, 0]
+        # Track branches by frequency continuity (ν), seeded at the first k by
+        # proximity to the two structural frequencies.
+        sols.sort(key=lambda s: s[0])
+        if prev_nu is None:
+            order = [0, 1]      # lower ν = bending
         else:
-            # First step: assign by frequency (lower = bending)
-            if eigenvalues[0][1] <= eigenvalues[1][1]:
-                assigned = [0, 1]
-            else:
-                assigned = [1, 0]
+            direct = abs(sols[0][0] - prev_nu[0]) + abs(sols[1][0] - prev_nu[1])
+            swapped = abs(sols[1][0] - prev_nu[0]) + abs(sols[0][0] - prev_nu[1])
+            order = [0, 1] if direct <= swapped else [1, 0]
+        prev_nu = [sols[order[0]][0], sols[order[1]][0]]
 
-        # ── Store tracked results ───────────────────────────────────────
         for i_mode in range(2):
-            j_comp = assigned[i_mode]  # which computed eigenvalue
-            g_val = eigenvalues[j_comp][0]
-            f_val = eigenvalues[j_comp][1]
+            nu, g, f_hz, V = sols[order[i_mode]]
+            if not (0.0 < V <= V_scan_max):
+                continue
+            branches[i_mode].append((V, g, f_hz))
 
-            vg_data.append((V, g_val, MODE_LABELS[i_mode]))
-            vf_data.append((V, f_val, MODE_LABELS[i_mode]))
-
-            # Update tracking state
-            prev_vecs[i_mode] = eigenvectors[j_comp]
-
-            # Track minimum damping (most negative = most stable)
-            if g_val < min_g_per_mode[i_mode]:
-                min_g_per_mode[i_mode] = g_val
-
-            # ── Flutter detection: g crosses zero from negative ─────
-            if prev_g[i_mode] is not None:
-                g_prev = prev_g[i_mode]
-                if g_prev < 0 and g_val >= 0 and V < flutter_speed:
-                    # Linear interpolation for exact crossing
-                    dg = g_val - g_prev
-                    if abs(dg) > 1e-12:
-                        frac = -g_prev / dg
-                        V_cross = (V - dV) + frac * dV
-                    else:
-                        V_cross = V
+    # ── Flutter = damping crossing zero from below, lowest speed wins ───────
+    for i_mode in range(2):
+        pts = sorted(branches[i_mode], key=lambda p: p[0])
+        for V, g, f_hz in pts:
+            vg_data.append((V, g, MODE_LABELS[i_mode]))
+            vf_data.append((V, f_hz, MODE_LABELS[i_mode]))
+            if g < min_g_per_mode[i_mode]:
+                min_g_per_mode[i_mode] = g
+        for idx in range(1, len(pts)):
+            V_prev, g_prev, _ = pts[idx - 1]
+            V_cur, g_cur, f_cur = pts[idx]
+            if g_prev < 0.0 <= g_cur:
+                dg = g_cur - g_prev
+                V_cross = (V_prev + (-g_prev / dg) * (V_cur - V_prev)
+                           if abs(dg) > 1e-12 else V_cur)
+                if V_cross < flutter_speed:
                     flutter_speed = V_cross
-                    flutter_freq = f_val
+                    flutter_freq = f_cur
                     flutter_mode_idx = i_mode
-                    damping_margin = min_g_per_mode[i_mode]
                     logger.info(
-                        f"pk_flutter: zero-crossing detected at "
-                        f"V={V_cross:.1f} m/s, f={f_val:.2f} Hz, "
-                        f"mode='{MODE_LABELS[i_mode]}'"
-                    )
+                        f"pk_flutter: damping crosses zero at V={V_cross:.1f} m/s, "
+                        f"f={f_cur:.2f} Hz, mode='{MODE_LABELS[i_mode]}'")
+                break
 
-            prev_g[i_mode] = g_val
+    vg_data.sort(key=lambda p: p[0])
+    vf_data.sort(key=lambda p: p[0])
+    damping_margin = min_g_per_mode[flutter_mode_idx] if flutter_mode_idx >= 0 else 0.0
 
     # ── Determine envelope status ───────────────────────────────────────────
     if flutter_speed < float('inf'):
