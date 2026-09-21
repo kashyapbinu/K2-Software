@@ -5,10 +5,25 @@ Frequency response, Miles' equation, random vibration PSD response.
 
 Physics formulations
 --------------------
-- Complex FRF via modal superposition:
-      H(ω) = Σ_r (1/m_r) / (ω_r² − ω² + j·2·ζ_r·ω_r·ω)
+- Base-excited modal superposition. The input is a base-acceleration PSD
+  (g²/Hz), so the transfer functions are the base-excitation pair, not the
+  force-input receptance:
+
+    Absolute-acceleration transmissibility (dimensionless, → 1 at DC):
+      T_r(ω) = Γ_r · (ω_r² + j·2·ζ_r·ω_r·ω) / (ω_r² − ω² + j·2·ζ_r·ω_r·ω)
+
+    Relative displacement per unit base acceleration (m/(m/s²)):
+      D_r(ω) = −Γ_r / (ω_r² − ω² + j·2·ζ_r·ω_r·ω)
+
+  Γ_r is the modal participation factor. The receptance form
+  (1/m_r)/(ω_r² − ω² + …) is a displacement-per-unit-FORCE function in
+  m/N: multiplying it by a g²/Hz base input mixed units and scaled the whole
+  FRF by ~ω_r⁻⁴ (−124 dB at 20 Hz for a 200 Hz mode, and a response PSD that
+  integrated to 1e-5 g instead of the 17.7 g Miles predicts).
+
   Ref: Bisplinghoff, Ashley & Halfman, "Aeroelasticity", §5.4;
-       Craig & Kurdila, "Fundamentals of Structural Dynamics", Ch. 5.
+       Craig & Kurdila, "Fundamentals of Structural Dynamics", Ch. 5, 11;
+       NASA-HDBK-7005 "Dynamic Environmental Criteria", §7.
 
 - CQC (Complete Quadratic Combination) per Der Kiureghian & Nakamura (1993):
       R² = Σ_i Σ_j ρ_ij · R_i · R_j
@@ -21,9 +36,11 @@ Physics formulations
       G_rms = √(π/2 · f_n · Q · W)
   Ref: NASA-STD-7001, Miles (1954).
 
-- Displacement PSD from acceleration FRF:
-      |H_disp(f)|² = |H_accel(f)|² / ω⁴
-  Integrated numerically via trapezoidal rule.
+- Relative-displacement PSD from the base-excitation displacement transfer:
+      S_δ(f) = |D(f)|² · W_in · g²      [m²/Hz]
+  Integrated numerically via trapezoidal rule. (Dividing the ALREADY
+  transmissibility-based acceleration PSD by ω⁴ again would double-count the
+  integration.)
 """
 from __future__ import annotations
 import cmath
@@ -37,6 +54,12 @@ logger = logging.getLogger("K2.Dynamics.Vibration")
 # Constants
 # ---------------------------------------------------------------------------
 TWO_PI = 2.0 * math.pi
+G_SI = 9.80665          # m/s² per g
+
+# Modal participation factors Γ_r for a uniform cantilever beam under base
+# excitation (Blevins Table 8-1 / Craig & Kurdila §11.4). Participation drops
+# off fast: mode 1 carries ~61% of the effective mass, mode 4 under 2%.
+_DEFAULT_GAMMA = (0.7830, 0.4340, 0.2540, 0.1818, 0.1414)
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +111,9 @@ class VibrationResult:
 
     # Modal masses used per mode
     modal_masses_used: list = field(default_factory=list)
+
+    # Modal participation factors Γ_r actually applied (dimensionless)
+    participation_factors_used: list = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +240,8 @@ def random_vibration_response(natural_freqs: list, damping_ratio: float = 0.02,
                                n_points: int = 400,
                                damping_ratios: list = None,
                                modal_masses: list = None,
-                               mode_names: list = None) -> VibrationResult:
+                               mode_names: list = None,
+                               participation_factors: list = None) -> VibrationResult:
     """Full random vibration analysis with complex modal superposition.
 
     Computes:
@@ -241,9 +268,17 @@ def random_vibration_response(natural_freqs: list, damping_ratio: float = 0.02,
     damping_ratios : list[float] | None
         Per-mode damping ratios.  Falls back to scalar *damping_ratio*.
     modal_masses : list[float] | None
-        Per-mode generalised masses (kg).  Defaults to 1.0 for each mode.
+        Per-mode generalised masses (kg).  Used with *participation_factors*
+        to weight each mode; defaults to 1.0 for each mode.
     mode_names : list[str] | None
         Human-readable labels, e.g. ["Mode 1 — 1st bend", ...].
+    participation_factors : list[float] | None
+        Per-mode modal participation factor Γ_r = L_r / m_r (dimensionless
+        for mass-normalised modes). Defaults to the classic uniform-beam
+        cantilever values (0.783, 0.434, 0.254, …) rather than 1.0 for every
+        mode: giving every mode full participation makes an N-mode stack
+        respond like N independent full-amplitude oscillators and
+        over-predicts the combined RMS.
 
     Returns
     -------
@@ -283,6 +318,16 @@ def random_vibration_response(natural_freqs: list, damping_ratio: float = 0.02,
     else:
         names = [f"Mode {k+1}" for k in range(n_modes)]
 
+    # Modal participation factors. Only the first few modes of a beam carry
+    # meaningful base-excitation participation; Γ falls off roughly as 1/r².
+    if participation_factors is not None and len(participation_factors) == n_modes:
+        gammas = list(participation_factors)
+    else:
+        gammas = [_DEFAULT_GAMMA[k] if k < len(_DEFAULT_GAMMA)
+                  else _DEFAULT_GAMMA[-1] * (len(_DEFAULT_GAMMA) / (k + 1.0)) ** 2
+                  for k in range(n_modes)]
+    result.participation_factors_used = list(gammas)
+
     # Pre-compute angular eigenfrequencies
     omega_r = [TWO_PI * fn for fn in natural_freqs]  # rad/s
 
@@ -299,45 +344,44 @@ def random_vibration_response(natural_freqs: list, damping_ratio: float = 0.02,
         f = f_start * (f_end / f_start) ** (i / (n_points - 1))  # log spacing
         omega = TWO_PI * f
 
-        # Complex transfer function: H(ω) = Σ_r (1/m_r) / (ω_r² − ω² + j·2·ζ_r·ω_r·ω)
-        H_total = complex(0.0, 0.0)
+        # Base excitation: absolute-acceleration transmissibility (output g
+        # per input g) and relative displacement per input acceleration.
+        #   T_r(ω) = Γ_r (ω_r² + 2jζ_rω_rω) / (ω_r² − ω² + 2jζ_rω_rω)
+        #   D_r(ω) = −Γ_r / (ω_r² − ω² + 2jζ_rω_rω)      [m per m/s²]
+        T_total = complex(0.0, 0.0)
+        D_total = complex(0.0, 0.0)
         for r_idx in range(n_modes):
             if natural_freqs[r_idx] <= 0.0:
                 continue
             wr = omega_r[r_idx]
             zr = zetas[r_idx]
-            mr = m_r[r_idx]
+            gr = gammas[r_idx]
             denom_c = complex(wr ** 2 - omega ** 2, 2.0 * zr * wr * omega)
             if abs(denom_c) < 1e-30:
                 denom_c = complex(1e-30, 0.0)
-            H_mode = (1.0 / mr) / denom_c
-            H_total += H_mode
+            T_mode = gr * complex(wr ** 2, 2.0 * zr * wr * omega) / denom_c
+            D_mode = -gr / denom_c
+            T_total += T_mode
+            D_total += D_mode
 
-            # Per-mode contribution magnitude (dB)
-            mag_mode = abs(H_mode)
-            mag_mode_db = 20.0 * math.log10(max(mag_mode, 1e-30))
+            # Per-mode contribution magnitude (dB, transmissibility)
+            mag_mode_db = 20.0 * math.log10(max(abs(T_mode), 1e-30))
             mode_contribs[r_idx].append((f, mag_mode_db))
 
-        # Combined magnitude & phase
-        mag_total = abs(H_total)
+        # Combined magnitude & phase (dimensionless transmissibility → dB)
+        mag_total = abs(T_total)
         mag_total_db = 20.0 * math.log10(max(mag_total, 1e-30))
-        phase_total_deg = math.degrees(cmath.phase(H_total))
+        phase_total_deg = math.degrees(cmath.phase(T_total))
         combined_frf.append((f, mag_total_db, phase_total_deg))
 
-        # Output PSD = |H(f)|² × W_input
-        H_sq = mag_total ** 2
-        out_psd = H_sq * input_psd_g2_hz
+        # Output acceleration PSD = |T(f)|² × W_input   (g²/Hz in, g²/Hz out)
+        out_psd = mag_total ** 2 * input_psd_g2_hz
         response_psd.append((f, out_psd))
 
-        # Displacement PSD: |H_disp(f)|² = |H_accel(f)|² / ω⁴
-        # Convert accel g²/Hz → (m/s²)²/Hz, divide by ω⁴, → m², then to mm²
-        if omega > 0.0:
-            # accel PSD in (m/s²)²/Hz
-            accel_psd_si = out_psd * 9.81 ** 2
-            disp_psd_si = accel_psd_si / omega ** 4   # m²/Hz
-            disp_psd_mm2 = disp_psd_si * 1e6          # mm²/Hz
-        else:
-            disp_psd_mm2 = 0.0
+        # Relative-displacement PSD straight from D(ω); the input PSD is
+        # converted from g²/Hz to (m/s²)²/Hz first, so |D|² · W_si is m²/Hz.
+        w_in_si = input_psd_g2_hz * G_SI ** 2
+        disp_psd_mm2 = (abs(D_total) ** 2) * w_in_si * 1e6      # mm²/Hz
         disp_psd_curve.append((f, disp_psd_mm2))
 
     result.frf_data = combined_frf
@@ -347,12 +391,15 @@ def random_vibration_response(natural_freqs: list, damping_ratio: float = 0.02,
     # ------------------------------------------------------------------
     # 2.  CQC-combined RMS acceleration  (replaces SRSS)
     # ------------------------------------------------------------------
-    # Per-mode RMS via Miles' equation
+    # Per-mode RMS via Miles' equation, scaled by the mode's participation.
+    # Without Γ_r every mode responds as a full-amplitude single-DOF system,
+    # so a 5-mode stack reported ~sqrt(5)x the physical RMS.
     grms_per_mode = []
     for r_idx in range(n_modes):
         fn = natural_freqs[r_idx]
         zr = zetas[r_idx]
-        grms_per_mode.append(miles_equation(fn, zr, input_psd_g2_hz))
+        grms_per_mode.append(abs(gammas[r_idx]) *
+                             miles_equation(fn, zr, input_psd_g2_hz))
 
     # CQC: R² = Σ_i Σ_j ρ_ij · R_i · R_j
     rms_sq_cqc = 0.0

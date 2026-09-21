@@ -105,7 +105,7 @@ def test_flutter_speed_rises_with_the_square_root_of_shear_modulus():
     assert v2 / v1 == pytest.approx(2.0, rel=1e-9)
 
 
-def test_flutter_speed_rises_with_altitude():
+def test_flutter_speed_finite_with_altitude():
     """P falls with altitude, so the true-airspeed flutter onset rises."""
     speeds = [flutter_speed(**FIN, altitude_m=h) for h in (0, 5000, 10000)]
     assert speeds == sorted(speeds)
