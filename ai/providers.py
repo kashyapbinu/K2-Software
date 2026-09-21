@@ -4,8 +4,8 @@ LLM providers behind one streaming interface.
 Every provider yields ``Chunk`` objects from ``chat()``: text deltas as they
 arrive, then a final chunk carrying any complete tool calls. The OpenAI
 chat-completions wire format is spoken by Gemini (AI Studio), Ollama, Groq,
-OpenRouter and most others, so one HTTP client covers all of them; Anthropic
-gets its own adapter over the official SDK.
+OpenRouter and most others, so one HTTP client covers all of them -- any such
+endpoint is reachable through the "custom" provider.
 
 Selection order for ``auto``: Gemini if a key is configured, else a running
 Ollama, else nothing (the panel shows a setup card).
@@ -27,7 +27,6 @@ GEMINI_DEFAULT_MODEL = "gemini-3.6-flash"
 _GEMINI_RETIRED = {"gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"}
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_DEFAULT_MODEL = "qwen3:1.7b"
-ANTHROPIC_DEFAULT_MODEL = "claude-opus-5"
 
 
 @dataclass
@@ -262,95 +261,6 @@ class OllamaProvider(OpenAICompatProvider):
 
 
 # ---------------------------------------------------------------------------
-# Anthropic (optional; only if the user supplies a key)
-# ---------------------------------------------------------------------------
-class AnthropicProvider(Provider):
-    name = "Claude"
-
-    def __init__(self, api_key: str, model: str = ANTHROPIC_DEFAULT_MODEL):
-        self.api_key = api_key
-        self.model = model or ANTHROPIC_DEFAULT_MODEL
-
-    def available(self):
-        if not self.api_key:
-            return False, "No Anthropic API key"
-        try:
-            import anthropic  # noqa: F401
-        except ImportError:
-            return False, "pip install anthropic"
-        return True, ""
-
-    @staticmethod
-    def _convert(messages: list[dict]) -> tuple[str, list[dict]]:
-        """OpenAI-shaped history → (system, anthropic messages)."""
-        system = []
-        out = []
-        for m in messages:
-            role = m.get("role")
-            if role == "system":
-                system.append(m.get("content") or "")
-            elif role == "user":
-                out.append({"role": "user", "content": m.get("content") or ""})
-            elif role == "assistant":
-                blocks = []
-                if m.get("content"):
-                    blocks.append({"type": "text", "text": m["content"]})
-                for tc in m.get("tool_calls") or []:
-                    fn = tc["function"]
-                    try:
-                        args = json.loads(fn.get("arguments") or "{}")
-                    except json.JSONDecodeError:
-                        args = {}
-                    blocks.append({"type": "tool_use", "id": tc["id"],
-                                   "name": fn["name"], "input": args})
-                if blocks:
-                    out.append({"role": "assistant", "content": blocks})
-            elif role == "tool":
-                block = {"type": "tool_result", "tool_use_id": m.get("tool_call_id"),
-                         "content": m.get("content") or ""}
-                # Merge consecutive tool results into one user turn.
-                if out and out[-1]["role"] == "user" and isinstance(out[-1]["content"], list):
-                    out[-1]["content"].append(block)
-                else:
-                    out.append({"role": "user", "content": [block]})
-        return "\n\n".join(system), out
-
-    @staticmethod
-    def _convert_tools(tools: list[dict]) -> list[dict]:
-        res = []
-        for t in tools or []:
-            fn = t.get("function", t)
-            res.append({"name": fn["name"], "description": fn.get("description", ""),
-                        "input_schema": fn.get("parameters", {"type": "object", "properties": {}})})
-        return res
-
-    def chat(self, messages, tools=None, temperature=0.3, max_tokens=4096):
-        import anthropic
-        client = anthropic.Anthropic(api_key=self.api_key)
-        system, msgs = self._convert(messages)
-        kwargs = dict(model=self.model, max_tokens=max(max_tokens, 4096),
-                      messages=msgs, thinking={"type": "adaptive"},
-                      output_config={"effort": "medium"})
-        if system:
-            kwargs["system"] = system
-        if tools:
-            kwargs["tools"] = self._convert_tools(tools)
-        try:
-            with client.messages.stream(**kwargs) as stream:
-                for text in stream.text_stream:
-                    yield Chunk(text=text)
-                final = stream.get_final_message()
-        except anthropic.APIStatusError as e:
-            raise ProviderError(f"Claude: HTTP {e.status_code}: {e.message}") from e
-        except anthropic.APIConnectionError as e:
-            raise ProviderError(f"Claude: connection error: {e}") from e
-
-        calls = [ToolCall(id=b.id, name=b.name, arguments=dict(b.input))
-                 for b in final.content if b.type == "tool_use"]
-        yield Chunk(done=True, tool_calls=calls, finish_reason=final.stop_reason or "")
-
-
-# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 def _setting(key: str, default=""):
@@ -384,9 +294,6 @@ def build_provider(kind: str = None) -> Provider | None:
         return gemini()
     if kind == "ollama":
         return ollama()
-    if kind == "anthropic":
-        return AnthropicProvider(_setting("ai/anthropic_key"),
-                                 _setting("ai/anthropic_model", ANTHROPIC_DEFAULT_MODEL))
     if kind == "custom":
         return OpenAICompatProvider(_setting("ai/custom_url", "http://localhost:8080/v1"),
                                     _setting("ai/custom_key", "none"),

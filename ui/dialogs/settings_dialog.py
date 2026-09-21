@@ -169,7 +169,7 @@ class SettingsDialog(QDialog):
         f.setSpacing(8)
         self.cmb_ai = QComboBox()
         for label, key in (("Auto (Gemini, then Ollama)", "auto"), ("Gemini (Google AI Studio)", "gemini"),
-                           ("Ollama (local)", "ollama"), ("Claude (Anthropic)", "anthropic"),
+                           ("Ollama (local)", "ollama"),
                            ("Custom OpenAI-compatible", "custom")):
             self.cmb_ai.addItem(label, key)
         idx = self.cmb_ai.findData(str(settings.get("ai/provider") or "auto"))
@@ -196,11 +196,8 @@ class SettingsDialog(QDialog):
         self.edit_ollama_model = QLineEdit(str(settings.get("ai/ollama_model") or "qwen3:1.7b"))
         f3.addRow("Model:", self.edit_ollama_model)
 
-        g4 = QGroupBox("Claude / custom endpoint")
+        g4 = QGroupBox("Custom OpenAI-compatible endpoint")
         f4 = QFormLayout(g4)
-        self.edit_anthropic_key = QLineEdit(str(settings.get("ai/anthropic_key") or ""))
-        self.edit_anthropic_key.setEchoMode(QLineEdit.EchoMode.Password)
-        f4.addRow("Anthropic key:", self.edit_anthropic_key)
         self.edit_custom_url = QLineEdit(str(settings.get("ai/custom_url") or ""))
         self.edit_custom_url.setPlaceholderText("https://api.groq.com/openai/v1")
         f4.addRow("Custom base URL:", self.edit_custom_url)
@@ -255,7 +252,6 @@ class SettingsDialog(QDialog):
         settings.set("ai/gemini_model", self.edit_gemini_model.text().strip() or "gemini-3.6-flash")
         settings.set("ai/ollama_url", self.edit_ollama_url.text().strip() or "http://localhost:11434")
         settings.set("ai/ollama_model", self.edit_ollama_model.text().strip() or "qwen3:1.7b")
-        settings.set("ai/anthropic_key", self.edit_anthropic_key.text().strip())
         settings.set("ai/custom_url", self.edit_custom_url.text().strip())
         settings.set("ai/custom_key", self.edit_custom_key.text().strip())
         settings.set("ai/custom_model", self.edit_custom_model.text().strip())

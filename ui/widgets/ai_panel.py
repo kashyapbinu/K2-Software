@@ -271,8 +271,6 @@ class AIPanel(QWidget):
         if _setting("ai/gemini_key"):
             out.append(("gemini", f"Gemini · {gemini_model_setting()}"))
         out.append(("ollama", f"Ollama · {_setting('ai/ollama_model', 'local')}"))
-        if _setting("ai/anthropic_key"):
-            out.append(("anthropic", f"Claude · {_setting('ai/anthropic_model', 'opus')}"))
         if _setting("ai/custom_url"):
             out.append(("custom", f"Custom · {_setting('ai/custom_model', 'model')}"))
         return out
