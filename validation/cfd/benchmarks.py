@@ -62,7 +62,8 @@ def bench_taylor_maccoll_reference() -> Benchmark:
 def _run_su2_point(assembly, mach: float, aoa_deg: float, refinement: str,
                    tag: str, cg_from_nose_m: float | None = None,
                    geom_overrides: dict | None = None,
-                   turbulence_model: str = "SST"):
+                   turbulence_model: str = "SST",
+                   euler_analytic_friction: bool = False):
     """Run ONE SU2 point on `assembly` through the K2 pipeline. Returns CFDResult.
 
     `geom_overrides` patches the extracted geometry dict (e.g. ``fin_count=0`` to
@@ -95,9 +96,14 @@ def _run_su2_point(assembly, mach: float, aoa_deg: float, refinement: str,
         mesh_refinement=refinement, work_dir=work,
         geometry_stl=stl, geometry_dict=geom,
         cg_from_nose_m=cg_from_nose_m, turbulence_model=turbulence_model,
+        euler_analytic_friction=euler_analytic_friction,
         # Keep curvature-based sizing ON (coarse/medium meshes fold at the cone
         # tip otherwise — see project notes). Cap iterations for a quick check.
         max_iterations=2000,
+        # Nothing watches a benchmark run, so the periodic volume dumps are pure
+        # cost: each one rebuilds the full field in memory beside the solver.
+        # Write the field once, at the end, which is all parse_results reads.
+        output_wrt_freq=2000,
     )
     solver = SU2Solver(cfg)
     solver.generate_mesh()
@@ -270,6 +276,174 @@ def bench_barrowman_vs_su2() -> Benchmark:
                                diagnostic=True,
                                note="inherits the OpenRocket base-drag model; "
                                     "see the AGARD-B C_D0 rows"))
+        return bm
+    except Exception as exc:
+        return _skip(name, ref, exc)
+
+
+def bench_barrowman_vs_su2_supersonic(machs=(1.5, 2.5, 3.5),
+                                      aoa: float = 4.0) -> Benchmark:
+    """K2 AeroModel vs SU2 ABOVE Mach 1 — the regime with no experimental cover.
+
+    Why this exists
+    ---------------
+    Every other check on the analytic model is subsonic: ``bench_agardb_barrowman``
+    runs M0.2-0.9 (the AEDC dataset itself stops at M1.0) and
+    ``bench_barrowman_vs_su2`` runs a single point at M0.5. The supersonic
+    benchmarks in this module — ``bench_taylor_maccoll_reference`` and
+    ``bench_su2_cone`` — validate the *CFD solver*, not the Barrowman path the
+    flight simulator actually flies on.
+
+    That left the whole supersonic branch of ``physics.aerodynamics``
+    unvalidated: the Busemann second-order fin coefficients (M>=1.5), the
+    transonic quartic that bridges M0.9-1.5, and the Mach-dependent fin CP.
+    High-power flights in this tool routinely reach M2-M4.7, so that branch is
+    the normal operating regime, not an edge case.
+
+    What is gated
+    -------------
+    Absolute agreement between a preliminary-design method and RANS is not the
+    interesting question supersonically — the bands below are deliberately wide
+    and are there to catch a *blunder*, not to certify accuracy. The tight gates
+    are on TRENDS, because those are the physical claims the model makes and
+    they do not depend on either side's absolute calibration:
+
+      * CN_alpha must FALL with Mach (roughly as 1/beta) on both sides, and the
+        two must agree on how fast.
+      * CP must move FORWARD with Mach — fins lose authority faster than the
+        nose, which is why real rockets shed static margin supersonically. If
+        K2 and SU2 disagree on the DIRECTION, fin sizing built on K2 is unsafe.
+
+    Why Euler and not RANS
+    ----------------------
+    This ran as SST first and the reference side failed, not the model under
+    test: M1.5 converged, M2.5 limit-cycled with the density residual stalled
+    near -2 and Cd swinging 5%, and M3.5 diverged to NaN by iteration 90 with
+    CFL adaption already on. Convergence degraded monotonically with Mach,
+    which is what wall-unresolved SST does as the shocks strengthen on a
+    tet-only mesh -- the same y+ problem that made the RANS polars untrustworthy
+    and put ``euler_analytic_friction`` in CFDConfig in the first place.
+
+    So the supersonic reference is the inviscid solve plus the flat-plate
+    friction build-up, which is the path the cone benchmark
+    (``bench_taylor_maccoll_reference``, agreeing to 4-5.5%) and the production
+    polars already use. Lift, moments and CP keep their integrated inviscid
+    values; only Cd carries the analytic friction term, so the Cd rows stay
+    diagnostic rather than gating.
+
+    Slow: one gmsh + SU2 solve per Mach. Skips cleanly if the head-less
+    pipeline fails, like the other SU2 benchmarks here.
+    """
+    name = "Barrowman aero vs SU2 (supersonic)"
+    ref = "SU2 Euler + flat-plate friction (canonical rocket, M>1)"
+    try:
+        from validation.cases.rocket_canonical import canonical_state, canonical_assembly
+        from physics.aerodynamics import AeroModel
+        from environment.atmosphere_model import Atmosphere
+
+        asm = canonical_assembly()
+        state = canonical_state()
+        cg = state.cg or 1.2
+        atm = Atmosphere()
+        alt = 3000.0
+        a_snd = atm.speed_of_sound(alt)
+        rho = atm.density(alt)
+        aero = AeroModel.from_state(state)
+
+        bm = Benchmark(name=name, domain="cfd", reference=ref,
+                       level=ValidationLevel.ESTIMATED)
+        cos_a, sin_a = math.cos(math.radians(aoa)), math.sin(math.radians(aoa))
+
+        k2_cn, su2_cn, k2_cp, su2_cp, solved = {}, {}, {}, {}, []
+        lost = []
+        for M in machs:
+            # One point failing must not discard the points that worked. SU2
+            # diverges more readily the higher the Mach (stronger shocks on a
+            # tet-only mesh), and a raise here used to escape to the outer
+            # handler and skip the whole benchmark — throwing away an hour of
+            # solves because the last point NaN'd. Record it and carry on; the
+            # `len(solved) < 2` guard below still refuses to report a verdict
+            # off too little data.
+            try:
+                res = _run_su2_point(asm, mach=M, aoa_deg=aoa, refinement="medium",
+                                     tag=f"barrowman_ss_M{M:g}".replace(".", "p"),
+                                     cg_from_nose_m=cg,
+                                     turbulence_model="Euler",
+                                     euler_analytic_friction=True)
+            except Exception as exc:
+                lost.append(f"M={M:g} ({type(exc).__name__}: {exc})")
+                continue
+            if not res.converged:
+                lost.append(f"M={M:g} (not converged: {res.convergence_note})")
+                continue
+            v = M * a_snd
+            k2 = aero.compute(alpha=math.radians(aoa), mach=M,
+                              q_dyn=0.5 * rho * v ** 2, pitch_rate=0.0,
+                              v_rel=v, cg=cg)
+            solved.append(M)
+            k2_cn[M] = k2["cn"]
+            k2_cp[M] = k2["cp"]
+            # Same body-axis reconciliation as the subsonic case: SU2 reports
+            # wind-axis CL/CD, K2's `cn` is body-axis.
+            su2_cn[M] = res.cl * cos_a + res.cd * sin_a
+            su2_cp[M] = res.cp_from_nose_m
+
+            bm.add(Comparison.make(
+                f"Normal force Cn, M={M:g} (body axes)",
+                k2_cn[M], su2_cn[M], "SU2", "-", tol_rel=0.35,
+                note="wide band: low-order method vs RANS, no supersonic "
+                     "fin tip-loss term in K2"))
+            bm.add(Comparison.make(
+                f"CP from nose, M={M:g}",
+                k2_cp[M], su2_cp[M], "SU2", "m",
+                tol_abs=2.0 * state.diameter,
+                note="2 calibers — CP drives stability margin, so this is the "
+                     "number fin sizing depends on"))
+            bm.add(Comparison.make(
+                f"Drag Cd, M={M:g} (wind axes)",
+                k2["cd"], res.cd, "SU2", "-", tol_rel=0.30, diagnostic=True,
+                note="inherits the OpenRocket base-drag model"))
+
+        if len(solved) < 2:
+            detail = ("; lost: " + ", ".join(lost)) if lost else ""
+            return _skip(name, ref,
+                         f"only {len(solved)} of {len(machs)} supersonic points "
+                         f"converged head-less{detail}")
+        if lost:
+            # A trend gated on a subset is still a trend, but the reader has to
+            # know which Machs are behind it.
+            bm.notes = ("supersonic points dropped: " + ", ".join(lost))
+
+        # ── Trend gates — the real physics claims ──
+        lo, hi = solved[0], solved[-1]
+        bm.add(Comparison.make(
+            f"CN falls with Mach, K2 (M{lo:g}→M{hi:g})",
+            1.0 if k2_cn[hi] < k2_cn[lo] else 0.0, 1.0, "sign", "bool",
+            tol_abs=0.5,
+            note="fin CN_alpha must decay with Mach (~1/beta)"))
+        bm.add(Comparison.make(
+            f"CN falls with Mach, SU2 (M{lo:g}→M{hi:g})",
+            1.0 if su2_cn[hi] < su2_cn[lo] else 0.0, 1.0, "sign", "bool",
+            tol_abs=0.5))
+        # How fast it falls — independent of either side's absolute level.
+        bm.add(Comparison.make(
+            f"CN decay ratio M{lo:g}→M{hi:g}",
+            k2_cn[hi] / k2_cn[lo] if k2_cn[lo] else 0.0,
+            su2_cn[hi] / su2_cn[lo] if su2_cn[lo] else 0.0,
+            "SU2", "-", tol_rel=0.25,
+            note="shape of the falloff, with the absolute level divided out"))
+        # CP direction of travel. Disagreeing on the SIGN here would mean K2
+        # predicts a stability trend opposite to the solver.
+        bm.add(Comparison.make(
+            f"CP moves forward, K2 (M{lo:g}→M{hi:g})",
+            1.0 if k2_cp[hi] < k2_cp[lo] else 0.0, 1.0, "sign", "bool",
+            tol_abs=0.5,
+            note="fins lose authority faster than the nose"))
+        bm.add(Comparison.make(
+            f"CP travel M{lo:g}→M{hi:g}",
+            k2_cp[hi] - k2_cp[lo], su2_cp[hi] - su2_cp[lo],
+            "SU2", "m", tol_abs=1.5 * state.diameter,
+            note="how far the CP marches, K2 vs SU2"))
         return bm
     except Exception as exc:
         return _skip(name, ref, exc)
