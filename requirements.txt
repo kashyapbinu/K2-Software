@@ -18,6 +18,8 @@ gmsh>=4.11
 # transitively via matplotlib.
 pillow>=10
 requests>=2.32
+# AI assistant (ai/providers.py) streams from OpenAI-compatible endpoints.
+httpx>=0.27
 # requests supports chardet <6 only; newer chardet triggers
 # RequestsDependencyWarning and unsupported decode paths.
 chardet>=3.0.2,<6

@@ -74,6 +74,13 @@ _MAP = {
     "refresh":       "fa5s.sync-alt",
     "reset_view":    "fa5s.expand",
     "settings":      "fa5s.cog",
+    "ai":            "fa5s.robot",
+    "send":          "fa5s.paper-plane",
+    "debrief":       "fa5s.clipboard-list",
+    "more":          "fa5s.ellipsis-h",
+    "close":         "fa5s.times",
+    "dock_out":      "fa5s.external-link-alt",   # float a dock panel
+    "dock_in":       "fa5s.window-restore",      # re-dock a floating panel
     "update":        "fa5s.cloud-download-alt",
 
     # ── Generic actions ──

@@ -19,8 +19,6 @@ from PyQt6.QtWidgets import QApplication
 from ui import settings, theme
 from ui.icons import icon
 
-from ui import theme
-
 logger = logging.getLogger("K2.SettingsDialog")
 
 
@@ -45,6 +43,7 @@ class SettingsDialog(QDialog):
                        self._console_page())
         self._add_page("Projects", "open", self._projects_page())
         self._add_page("Updates", "update", self._updates_page())
+        self._add_page("AI Assistant", "ai", self._ai_page())
         self._nav.setCurrentRow(0)
         self._nav.currentRowChanged.connect(self._pages.setCurrentIndex)
 
@@ -164,6 +163,55 @@ class SettingsDialog(QDialog):
             ))
         return self._page(g)
 
+    def _ai_page(self) -> QWidget:
+        g = QGroupBox("Backend")
+        f = QFormLayout(g)
+        f.setSpacing(8)
+        self.cmb_ai = QComboBox()
+        for label, key in (("Auto (Gemini, then Ollama)", "auto"), ("Gemini (Google AI Studio)", "gemini"),
+                           ("Ollama (local)", "ollama"), ("Claude (Anthropic)", "anthropic"),
+                           ("Custom OpenAI-compatible", "custom")):
+            self.cmb_ai.addItem(label, key)
+        idx = self.cmb_ai.findData(str(settings.get("ai/provider") or "auto"))
+        self.cmb_ai.setCurrentIndex(max(idx, 0))
+        f.addRow("Provider:", self.cmb_ai)
+        f.addRow("", self._hint(
+            "Gemini has a free tier (aistudio.google.com/apikey). Ollama runs a small "
+            "model on this machine, no key, works offline. Keys are stored in the "
+            "application settings on this computer."))
+
+        g2 = QGroupBox("Gemini")
+        f2 = QFormLayout(g2)
+        self.edit_gemini_key = QLineEdit(str(settings.get("ai/gemini_key") or ""))
+        self.edit_gemini_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.edit_gemini_key.setPlaceholderText("AIza...")
+        f2.addRow("API key:", self.edit_gemini_key)
+        self.edit_gemini_model = QLineEdit(str(settings.get("ai/gemini_model") or "gemini-3.6-flash"))
+        f2.addRow("Model:", self.edit_gemini_model)
+
+        g3 = QGroupBox("Ollama")
+        f3 = QFormLayout(g3)
+        self.edit_ollama_url = QLineEdit(str(settings.get("ai/ollama_url") or "http://localhost:11434"))
+        f3.addRow("Server:", self.edit_ollama_url)
+        self.edit_ollama_model = QLineEdit(str(settings.get("ai/ollama_model") or "qwen3:1.7b"))
+        f3.addRow("Model:", self.edit_ollama_model)
+
+        g4 = QGroupBox("Claude / custom endpoint")
+        f4 = QFormLayout(g4)
+        self.edit_anthropic_key = QLineEdit(str(settings.get("ai/anthropic_key") or ""))
+        self.edit_anthropic_key.setEchoMode(QLineEdit.EchoMode.Password)
+        f4.addRow("Anthropic key:", self.edit_anthropic_key)
+        self.edit_custom_url = QLineEdit(str(settings.get("ai/custom_url") or ""))
+        self.edit_custom_url.setPlaceholderText("https://api.groq.com/openai/v1")
+        f4.addRow("Custom base URL:", self.edit_custom_url)
+        self.edit_custom_key = QLineEdit(str(settings.get("ai/custom_key") or ""))
+        self.edit_custom_key.setEchoMode(QLineEdit.EchoMode.Password)
+        f4.addRow("Custom key:", self.edit_custom_key)
+        self.edit_custom_model = QLineEdit(str(settings.get("ai/custom_model") or ""))
+        self.edit_custom_model.setPlaceholderText("llama-3.3-70b-versatile")
+        f4.addRow("Custom model:", self.edit_custom_model)
+        return self._page(g, g2, g3, g4)
+
     # -- actions ----------------------------------------------------------
     def _browse_dir(self):
         start = self.edit_dir.text().strip() or str(settings.project_dir())
@@ -190,6 +238,10 @@ class SettingsDialog(QDialog):
         self.edit_dir.setText("")
         self.chk_updates.setChecked(bool(settings.DEFAULTS["startup/check_updates"]))
         self.chk_confirm_exit.setChecked(bool(settings.DEFAULTS["sim/confirm_on_exit"]))
+        self.cmb_ai.setCurrentIndex(max(self.cmb_ai.findData("auto"), 0))
+        self.edit_gemini_model.setText(settings.DEFAULTS["ai/gemini_model"])
+        self.edit_ollama_url.setText(settings.DEFAULTS["ai/ollama_url"])
+        self.edit_ollama_model.setText(settings.DEFAULTS["ai/ollama_model"])
 
     def _on_accept(self):
         mode = self.cmb_theme.currentData()
@@ -198,6 +250,15 @@ class SettingsDialog(QDialog):
         settings.set("projects/default_dir", self.edit_dir.text().strip())
         settings.set("startup/check_updates", self.chk_updates.isChecked())
         settings.set("sim/confirm_on_exit", self.chk_confirm_exit.isChecked())
+        settings.set("ai/provider", self.cmb_ai.currentData())
+        settings.set("ai/gemini_key", self.edit_gemini_key.text().strip())
+        settings.set("ai/gemini_model", self.edit_gemini_model.text().strip() or "gemini-3.6-flash")
+        settings.set("ai/ollama_url", self.edit_ollama_url.text().strip() or "http://localhost:11434")
+        settings.set("ai/ollama_model", self.edit_ollama_model.text().strip() or "qwen3:1.7b")
+        settings.set("ai/anthropic_key", self.edit_anthropic_key.text().strip())
+        settings.set("ai/custom_url", self.edit_custom_url.text().strip())
+        settings.set("ai/custom_key", self.edit_custom_key.text().strip())
+        settings.set("ai/custom_model", self.edit_custom_model.text().strip())
         settings.apply_log_level()
         if mode != self._initial_theme:
             self.theme_changed.emit(mode)

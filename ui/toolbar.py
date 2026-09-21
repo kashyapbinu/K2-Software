@@ -72,6 +72,12 @@ class MainToolbar(QToolBar):
         self.action_reset_view.setToolTip("Reset 3D camera to default view")
 
         # ── Settings ──
+        self.action_ai = QAction(icon("ai"), "AI Assistant", self)
+        self.action_ai.setToolTip("Toggle the AI design assistant (Ctrl+Shift+A)")
+        self.action_ai.setIconText("AI")          # short label on tool buttons; menus keep the full name
+        self.action_ai.setCheckable(True)
+        self.action_ai.setShortcut("Ctrl+Shift+A")
+
         self.action_settings = QAction(icon("settings"), "Settings", self)
         self.action_settings.setToolTip("Application settings")
 
@@ -100,5 +106,6 @@ class MainToolbar(QToolBar):
         )
         self.addWidget(spacer)
 
+        self.addAction(self.action_ai)
         self.addAction(self.action_check_updates)
         self.addAction(self.action_settings)
