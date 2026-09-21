@@ -14,6 +14,58 @@ G0 = 9.80665
 P_ATM = 101325.0
 
 
+def critical_pressure_ratio(gamma: float) -> float:
+    """Pe/Pc at the throat (M = 1) — the boundary between the subsonic and
+    supersonic branches of the area-ratio relation."""
+    g = max(gamma, 1.01)
+    return (2.0 / (g + 1.0)) ** (g / (g - 1.0))
+
+
+def area_ratio_for_pressure_ratio(pe_pc: float, gamma: float) -> float:
+    """Nozzle area ratio ε = Ae/At for a given exit/chamber pressure ratio.
+
+    Sutton, "Rocket Propulsion Elements", eq. 3-25:
+
+        ε = 1 / { [(γ+1)/2]^(1/(γ-1)) · (Pe/Pc)^(1/γ)
+                  · √[ (γ+1)/(γ-1) · (1 - (Pe/Pc)^((γ-1)/γ)) ] }
+
+    The whole bracket is inverted. Writing it as ``t1/(t2·t3)`` instead of
+    ``1/(t1·t2·t3)`` — which this module did in three places — scales ε by
+    t1² = [(γ+1)/2]^(2/(γ-1)), i.e. 2.59× at γ=1.2, so every solve returned
+    the pressure ratio of a nozzle 2.59× less expanded than the one asked
+    for (exit pressure ~3.7× too high, Cf over-predicted 6–14%).
+    """
+    g = max(gamma, 1.01)
+    if pe_pc <= 0.0 or pe_pc >= 1.0:
+        return float('inf')
+    t1 = ((g + 1) / 2.0) ** (1.0 / (g - 1.0))
+    t2 = pe_pc ** (1.0 / g)
+    t3 = math.sqrt(max((g + 1) / (g - 1) * (1 - pe_pc ** ((g - 1) / g)), 1e-300))
+    denom = t1 * t2 * t3
+    return 1.0 / denom if denom > 0.0 else float('inf')
+
+
+def exit_pressure_ratio(eps: float, gamma: float) -> float:
+    """Invert the area-ratio relation for Pe/Pc on the SUPERSONIC branch.
+
+    ε(Pe/Pc) is U-shaped with a minimum of 1 at the throat ratio, so the
+    bracket is clamped to [0, critical] to keep the bisection off the
+    subsonic branch entirely (ε is monotonically decreasing there).
+    """
+    g = max(gamma, 1.01)
+    crit = critical_pressure_ratio(g)
+    if eps <= 1.0:
+        return crit
+    lo, hi = 1e-12, crit
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if area_ratio_for_pressure_ratio(mid, g) < eps:
+            hi = mid          # ε falls as Pe/Pc rises → step down
+        else:
+            lo = mid
+    return 0.5 * (lo + hi)
+
+
 def nozzle_cf(pc: float, eps: float, gamma: float, ambient: float = P_ATM) -> tuple[float, float]:
     """Ideal nozzle thrust coefficient Cf and exit pressure Pe (Pa) for a given
     chamber pressure, area ratio and ambient, with a simple over-expansion
@@ -21,20 +73,7 @@ def nozzle_cf(pc: float, eps: float, gamma: float, ambient: float = P_ATM) -> tu
     g = max(gamma, 1.01)
     if eps <= 1.0 or pc <= 0:
         return 0.0, pc
-    # Pe/Pc from the area ratio (supersonic branch) via bisection.
-    def area_ratio(pe_pc):
-        t1 = ((g + 1) / 2.0) ** (1.0 / (g - 1.0))
-        t2 = pe_pc ** (1.0 / g)
-        t3 = math.sqrt(max((g + 1) / (g - 1) * (1 - pe_pc ** ((g - 1) / g)), 1e-12))
-        return t1 / (t2 * t3)
-    lo, hi = 1e-6, 0.999999
-    for _ in range(120):
-        mid = 0.5 * (lo + hi)
-        if area_ratio(mid) < eps:   # area_ratio decreases as pe_pc rises
-            hi = mid
-        else:
-            lo = mid
-    pe_pc = 0.5 * (lo + hi)
+    pe_pc = exit_pressure_ratio(eps, g)
     pe = pe_pc * pc
     term1 = (2 * g * g) / (g - 1)
     term2 = (2 / (g + 1)) ** ((g + 1) / (g - 1))
@@ -54,11 +93,8 @@ def optimum_expansion_ratio(ambient: float, pc: float, gamma: float) -> float:
     if ambient >= pc:
         return 1.0
     g = max(gamma, 1.01)
-    pe_pc = ambient / pc
-    t1 = ((g + 1) / 2.0) ** (1.0 / (g - 1.0))
-    t2 = pe_pc ** (1.0 / g)
-    t3 = math.sqrt(max((g + 1) / (g - 1) * (1 - pe_pc ** ((g - 1) / g)), 1e-12))
-    return max(1.5, min(200.0, t1 / (t2 * t3)))
+    return max(1.5, min(200.0,
+                        area_ratio_for_pressure_ratio(ambient / pc, g)))
 
 class Propellant:
     def __init__(self, a: float, n: float, density: float, c_star: float, gamma: float = 1.2):
@@ -241,21 +277,16 @@ class MotorSimulator:
         self.efficiency = efficiency
 
     def _calc_exit_pressure_ratio(self) -> float:
-        """Finds Pe/Pc for the given expansion ratio."""
-        if self.eps <= 1.0: return 1.0
-        g = self.propellant.gamma
-        def eq(pe_pc):
-            if pe_pc <= 0 or pe_pc >= 1: return 1000
-            term1 = ((g+1)/2.0)**(1.0/(g-1.0))
-            term2 = pe_pc**(1.0/g)
-            term3 = math.sqrt((g+1)/(g-1) * (1 - pe_pc**((g-1)/g)))
-            if term2 == 0 or term3 == 0: return 1000
-            return (term1 / (term2 * term3)) - self.eps
-        try:
-            res = fsolve(eq, 0.01)
-            return res[0]
-        except Exception:
-            return 0.1 # Fallback
+        """Finds Pe/Pc for the given expansion ratio.
+
+        Delegates to the shared bracketed solver rather than running its own
+        fsolve on a hand-written area-ratio expression: the copy here had the
+        same inverted form as ``nozzle_cf``, and fsolve on a U-shaped residual
+        could also settle on the subsonic branch.
+        """
+        if self.eps <= 1.0:
+            return 1.0
+        return exit_pressure_ratio(self.eps, self.propellant.gamma)
 
     def simulate(self, dt: float = 0.01) -> dict:
         times = [0.0]

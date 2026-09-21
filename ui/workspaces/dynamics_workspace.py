@@ -260,9 +260,19 @@ class DynamicsWorkspace(QWidget):
         self.lbl_divmargin = _vl(); fa.addRow("Margin:", self.lbl_divmargin)
         self.lbl_divverdict = QLabel("—"); self.lbl_divverdict.setStyleSheet("font-weight:700;font-size:14px;padding:4px;")
         fa.addRow("Status:", self.lbl_divverdict)
-        self.lbl_revmach = _vl();   fa.addRow("Reversal Mach:", self.lbl_revmach)
-        self.lbl_effmax = _vl();    fa.addRow("η @ Max Mach:", self.lbl_effmax)
-        self.lbl_deflect = _vl();   fa.addRow("Max Fin Deflect:", self.lbl_deflect)
+        self.lbl_revmach = _vl();   fa.addRow("Divergence Crossed At:", self.lbl_revmach)
+        self.lbl_revmach.setToolTip(
+            "Mach at which the flight dynamic pressure reaches the fin's "
+            "divergence dynamic pressure. A fixed fin has no control-reversal "
+            "mode — reversal needs a deflectable surface.")
+        self.lbl_effmax = _vl();    fa.addRow("Aeroelastic Amplification:", self.lbl_effmax)
+        self.lbl_effmax.setToolTip(
+            "Flexible-to-rigid lift ratio η = 1/(1 − q/q_div) at the max "
+            "design Mach. 1.0 = rigid; grows without bound toward divergence.")
+        self.lbl_deflect = _vl();   fa.addRow("Fin Bend / Twist:", self.lbl_deflect)
+        self.lbl_deflect.setToolTip(
+            "Tip bending deflection and elastic twist of the divergence-"
+            "critical fin at max-Q under a 5° gust.")
         ga.setLayout(fa); lay.addWidget(ga)
 
         # Vibration
@@ -376,17 +386,47 @@ class DynamicsWorkspace(QWidget):
         assembly = self._get_assembly()
         if not assembly:
             self._status.setText("No rocket assembly available."); return
-        from structures.fem_interface import FEMInterface
         from dynamics.vibration_analysis import random_vibration_response
-        fem = FEMInterface()
-        modal = fem.modal_analysis(assembly)
-        freqs = modal.frequencies_hz if modal.frequencies_hz else [50, 120, 250, 400, 600]
+
+        # Reuse a modal result we (or the Structures workspace) already have.
+        modal = self._modal_result or self._shared_modal_result()
+        freqs = list(getattr(modal, "frequencies_hz", None) or []) if modal else []
+        freqs = [f for f in freqs if f > 1.0]
+
         self._busy(True)
-        self._thread = DynThread(random_vibration_response,
-            (freqs, self.sp_damp.value(), self.sp_psd.value()), "vibration")
+        if freqs:
+            self._synth_freqs = False
+            self._thread = DynThread(random_vibration_response,
+                (freqs, self.sp_damp.value(), self.sp_psd.value()), "vibration")
+        else:
+            # No modal data yet. Run CalculiX and the vibration response
+            # together IN THE WORKER — calling fem.modal_analysis() here ran a
+            # full FE solve on the GUI thread and froze the window for its
+            # duration, and its silent [50,120,250,400,600] Hz fallback was
+            # presented as if it were the real rocket's modes.
+            self._synth_freqs = True
+            self._thread = DynThread(self._modal_then_vibration,
+                (assembly, self.sp_damp.value(), self.sp_psd.value()), "vibration")
         self._thread.finished.connect(self._on_result)
         self._thread.errored.connect(self._on_error)
         self._thread.start()
+
+    def _modal_then_vibration(self, assembly, damping, psd):
+        """Worker-thread helper: solve the modes, then the random response."""
+        from structures.fem_interface import FEMInterface
+        from dynamics.vibration_analysis import random_vibration_response
+        freqs = []
+        try:
+            modal = FEMInterface().modal_analysis(assembly)
+            freqs = [f for f in (modal.frequencies_hz or []) if f > 1.0]
+            if freqs:
+                self._modal_result = modal
+                self._synth_freqs = False
+        except Exception as e:
+            logger.warning(f"modal solve for vibration failed: {e}")
+        if not freqs:
+            freqs = [50, 120, 250, 400, 600]
+        return random_vibration_response(freqs, damping, psd)
 
     def _run_aeroelastic(self):
         assembly = self._get_assembly()
@@ -553,6 +593,9 @@ class DynamicsWorkspace(QWidget):
         self.lbl_grms.setText(f"{r.rms_acceleration_g:.2f} g")
         self.lbl_gpk.setText(f"{r.peak_response_g:.2f} g")
         self.lbl_drms.setText(f"{r.rms_displacement_mm:.3f} mm")
+        if getattr(self, "_synth_freqs", False):
+            self._status.setText("Vibration: PLACEHOLDER modes (FEM modal "
+                                 "unavailable) — frequencies are not this rocket's")
 
         ax = getattr(self._frf_plot, "ax", None)
         if ax is not None and r.frf_data:
@@ -661,27 +704,37 @@ class DynamicsWorkspace(QWidget):
             self.lbl_divverdict.setText("SAFE")
             self.lbl_divverdict.setStyleSheet(f"color:{theme.OK};font-weight:700;font-size:14px;padding:4px;")
         rev = getattr(r, "reversal_mach", 0.0)
-        self.lbl_revmach.setText(f"{rev:.2f}" if rev > 0 else "none")
+        self.lbl_revmach.setText(f"M {rev:.2f}" if rev > 0 else "not reached")
         self.lbl_effmax.setText(f"{getattr(r, 'effectiveness_at_max_mach', 1.0):+.2f}")
-        self.lbl_deflect.setText(f"{r.max_deflection_mm:.2f} mm / {r.max_deflection_deg:.2f}°")
+        self.lbl_deflect.setText(f"{r.max_deflection_mm:.2f} mm bend / "
+                                 f"{r.max_deflection_deg:.2f}° twist")
 
         ax = getattr(self._aero_plot, "ax", None)
         if ax is not None and r.effectiveness_data:
             self._aero_plot.clear()
-            self._aero_plot._style_axis("Aeroelastic Effectiveness (smooth reversal)", "Mach", "Effectiveness η")
+            self._aero_plot._style_axis("Aeroelastic Lift Amplification", "Mach",
+                                        "η = flexible / rigid lift")
             xs = [p[0] for p in r.effectiveness_data]; ys = [p[1] for p in r.effectiveness_data]
-            # Authority regions (by effectiveness value)
-            ax.axhspan(0.3, 1.2, color=theme.OK, alpha=0.10)    # positive authority
-            ax.axhspan(-0.3, 0.3, color=theme.WARN, alpha=0.12)   # neutral zone
-            ax.axhspan(-1.2, -0.3, color=theme.ERR, alpha=0.12)   # control reversal
-            ax.text(xs[0], 0.7, "AUTHORITY", color=theme.OK, fontsize=7, va="center")
-            ax.text(xs[0], 0.0, "NEUTRAL", color=theme.WARN, fontsize=7, va="center")
-            ax.text(xs[0], -0.7, "REVERSAL", color=theme.ERR, fontsize=7, va="center")
+            # Bands by amplification, not by "authority": eta rises from 1
+            # (rigid) and runs away at divergence. Negative eta is the
+            # post-divergence branch — the fin has already failed there.
+            y_top = min(8.0, max(2.0, (max(ys) * 1.1) if ys else 2.0))
+            ax.axhspan(0.9, 1.5, color=theme.OK, alpha=0.10)
+            ax.axhspan(1.5, 3.0, color=theme.WARN, alpha=0.12)
+            ax.axhspan(3.0, 20.0, color=theme.ERR, alpha=0.12)
+            # Label only the bands actually visible at this y-scale, otherwise
+            # the text sits outside the axes and fights tight_layout.
+            for y_lbl, txt, col in ((1.2, "NEAR-RIGID", theme.OK),
+                                    (2.2, "SOFTENING", theme.WARN),
+                                    (5.0, "APPROACHING DIVERGENCE", theme.ERR)):
+                if y_lbl < y_top:
+                    ax.text(xs[0], y_lbl, txt, color=col, fontsize=7, va="center")
             ax.plot(xs, ys, color=theme.TEXT_BRIGHT, linewidth=2.0)
-            ax.axhline(0, color=theme.LINE_STRONG, linewidth=0.8)
+            ax.axhline(1.0, color=theme.LINE_STRONG, linewidth=0.8)
+            ax.set_ylim(0.0, y_top)
             if rev > 0:
                 ax.axvline(rev, color=theme.ERR, linestyle="--", linewidth=1.4,
-                           label=f"Reversal M={rev:.2f}")
+                           label=f"Divergence M={rev:.2f}")
             ax.axvline(self.sp_mmax.value(), color=theme.ACCENT, linestyle="-", linewidth=1.4,
                        label=f"Flight M={self.sp_mmax.value():.2f}")
             ax.legend(facecolor=theme.PANEL, edgecolor=theme.LINE, labelcolor=theme.TEXT, fontsize=8)
@@ -967,7 +1020,11 @@ class DynamicsWorkspace(QWidget):
         if self._maxq_info and self._maxq_info["verdict"] == "UNSAFE":
             warns.append(("UNSAFE", f"Max-Q {self._maxq_info['qmax']/1000:.1f} kPa exceeds limit"))
         if ar and getattr(ar, "reversal_mach", 0.0) > 0 and ar.reversal_mach < mmax:
-            warns.append(("UNSAFE", f"Control reversal at M={ar.reversal_mach:.2f} below max Mach"))
+            warns.append(("UNSAFE", f"Torsional divergence at M={ar.reversal_mach:.2f} "
+                                    f"below max Mach"))
+        if getattr(self, "_synth_freqs", False) and self._vib_result is not None:
+            warns.append(("CAUTION", "Vibration used placeholder modal frequencies — "
+                                     "run a modal analysis for real modes"))
 
         if not warns:
             self.lbl_warnings.setText("✓ All consistency checks passed.")
@@ -1003,6 +1060,9 @@ class DynamicsWorkspace(QWidget):
             d["aeroelastic"] = {"divergence_speed_mps": r.divergence_speed_mps,
                                 "divergence_mach": r.divergence_mach, "margin_pct": pct,
                                 "reversal_mach": getattr(r, "reversal_mach", 0.0),
+                                "divergence_crossing_mach": getattr(r, "reversal_mach", 0.0),
+                                "aeroelastic_amplification_at_max_mach":
+                                    getattr(r, "effectiveness_at_max_mach", 1.0),
                                 "effectiveness_at_max_mach": getattr(r, "effectiveness_at_max_mach", 1.0),
                                 "verdict": _verdict(pct)[0] if pct != float('inf') else "SAFE"}
         if self._vib_result:

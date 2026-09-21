@@ -151,7 +151,9 @@ def _uniform_tube_modal_inputs():
 def bench_modal_vs_ccx() -> Benchmark:
     """K2 closed-form 1st bending frequency vs CalculiX modal on the airframe.
 
-    Both use a cantilever (clamped-aft) boundary condition and an identical
+    Both use a cantilever (clamped-aft) boundary condition — the closed form
+    is asked for its cantilever eigenvalues explicitly, since the app default
+    is the free-free set a rocket has in flight — and an identical
     uniform aluminium tube with matched mass, so they describe the same
     idealisation; the 3-D shell mesh still differs from the Euler–Bernoulli beam
     (shell ovalisation lowers FE frequency), hence a moderate tolerance and an
@@ -165,7 +167,7 @@ def bench_modal_vs_ccx() -> Benchmark:
                    level=ValidationLevel.ESTIMATED)
 
     state, asm = _uniform_tube_modal_inputs()
-    est = modal_estimate(state, "Aluminum 6061-T6")
+    est = modal_estimate(state, "Aluminum 6061-T6", boundary="cantilever")
     fem = FEMInterface(work_dir=_WORK / "modal")
     modal = fem.modal_analysis(asm, material_name="Aluminum 6061-T6",
                                num_modes=6, refinement="coarse")

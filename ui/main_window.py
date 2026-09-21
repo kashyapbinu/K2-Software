@@ -22,6 +22,7 @@ from avionics.flight_computer.flight_computer import FlightComputer
 from ui.toolbar import MainToolbar
 from ui.console_panel import ConsolePanel
 from ui.icons import icon
+from ui.widgets.dock_title_bar import install as install_dock_title_bar
 from ui import theme
 from ui import settings
 from ui.workspaces.design_workspace import DesignWorkspace
@@ -67,6 +68,7 @@ class MainWindow(QMainWindow):
         self._setup_toolbar()
         self._setup_tabs()
         self._setup_bottom_dock()
+        self._setup_ai_dock()
         self._setup_status_bar()
         self._connect_actions()
         self._connect_sim_signals()
@@ -116,6 +118,7 @@ class MainWindow(QMainWindow):
         self.act_toggle_console.setChecked(True)
         self.act_toggle_console.setShortcut("Ctrl+`")
         m_view.addAction(self.act_toggle_console)
+        m_view.addAction(tb.action_ai)
 
         m_tools = bar.addMenu("&Tools")
         m_tools.addAction(tb.action_run_sim)
@@ -137,6 +140,12 @@ class MainWindow(QMainWindow):
         bar.setContentsMargins(0, 0, 0, 0)
         bar.addAction(tb.action_save)
         bar.addAction(tb.action_run_sim)
+        # Checkable "AI" toggle with a visible label so a closed assistant
+        # dock is always one click away (also: View menu, Ctrl+Shift+A).
+        bar.addAction(tb.action_ai)
+        btn = bar.widgetForAction(tb.action_ai)
+        if btn is not None:
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         bar.addAction(tb.action_settings)
         return bar
 
@@ -198,6 +207,7 @@ class MainWindow(QMainWindow):
         )
         self.console_panel = ConsolePanel(self)
         dock.setWidget(self.console_panel)
+        install_dock_title_bar(dock)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
         self.console_dock = dock
         self.act_toggle_console.toggled.connect(dock.setVisible)
@@ -213,6 +223,34 @@ class MainWindow(QMainWindow):
             self.console_panel.log(msg, level)
             
         self.engine.log_message.connect(_route_log)
+
+    def _setup_ai_dock(self):
+        from ui.widgets.ai_panel import AIPanel
+        dock = QDockWidget("AI Assistant", self)
+        dock.setObjectName("AIAssistantDock")
+        dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable |
+            QDockWidget.DockWidgetFeature.DockWidgetFloatable |
+            QDockWidget.DockWidgetFeature.DockWidgetClosable
+        )
+        self.ai_panel = AIPanel(self)
+        dock.setWidget(self.ai_panel)
+        install_dock_title_bar(dock)
+        dock.setMinimumWidth(320)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self.ai_dock = dock
+        act = self.toolbar.action_ai
+        act.toggled.connect(dock.setVisible)
+        dock.visibilityChanged.connect(act.setChecked)
+        # Persist only genuine user toggles: the dock also reports hidden while
+        # the main window is not yet shown and again during shutdown.
+        def _remember(v):
+            if self.isVisible() and not getattr(self, "_closing", False):
+                settings.set("ai/panel_visible", bool(v))
+        act.toggled.connect(_remember)
+        visible = bool(settings.get("ai/panel_visible"))
+        dock.setVisible(visible)
+        act.setChecked(visible)
 
     def _setup_status_bar(self):
         status = QStatusBar()
@@ -495,6 +533,8 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self)
         dlg.theme_changed.connect(self._on_theme_changed)
         dlg.exec()
+        if hasattr(self, "ai_panel"):
+            self.ai_panel.reload_provider()
 
     def _on_theme_changed(self, mode: str):
         """Repaint what the global stylesheet cannot reach on its own.
@@ -505,6 +545,8 @@ class MainWindow(QMainWindow):
         self.status_motor.setStyleSheet(f"color: {theme.TEXT_DIM}; padding-right: 8px;")
         self.status_sim.setStyleSheet(f"color: {theme.TEXT_DIM}; padding-right: 12px;")
         counts = theme.restyle_all(self)
+        if hasattr(self, "ai_panel"):
+            self.ai_panel.retheme()
         logger.info(
             "Theme set to %s — restyled %d stylesheets, %d widgets, %d figures, "
             "%d viewports", mode, counts["stylesheets"], counts["widgets"],
@@ -520,6 +562,9 @@ class MainWindow(QMainWindow):
             "Are you sure you want to quit?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
+            self._closing = True
+            if hasattr(self, "ai_panel"):
+                self.ai_panel.shutdown()
             if self.sim_engine.is_running:
                 self.sim_engine.stop()
             self.mission_viz_ws.shutdown()

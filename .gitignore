@@ -49,3 +49,6 @@ scratch/openMotor_repo/
 # ── Scratch experiments ──
 scratch/
 data/thrust_curves/
+
+# ── UI theme cache (generated chevron SVGs, ui/theme.py) ──
+ui_cache/

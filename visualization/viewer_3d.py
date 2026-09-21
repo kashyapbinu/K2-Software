@@ -486,7 +486,6 @@ class Viewer3D(QWidget):
         ])
 
         # Add visual thickness
-        thick = max(0.002, getattr(comp, 'thickness', 0.003) if 'comp' in dir() else 0.003)
         thick = 0.003  # visual minimum
         pts_inner = pts.copy()
         pts_outer = pts.copy()

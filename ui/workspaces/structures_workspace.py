@@ -457,7 +457,7 @@ class StructuresWorkspace(QWidget):
         self.lbl_buck_euler = self._metric(f, "Euler Column:")
         self.lbl_buck_shell = self._metric(f, "Shell Buckling:")
         self.lbl_buck_panel = self._metric(f, "Panel Buckling:")
-        self.lbl_buck_crippling = self._metric(f, "Local Crippling:")
+        self.lbl_buck_crippling = self._metric(f, "Bending Buckling:")
         self.lbl_buck_applied = self._metric(f, "Applied Axial Load:")
         self.lbl_buck_gov = self._metric(f, "Governing Margin:", big=True)
         self.lbl_buck_status = QLabel("—")
@@ -822,6 +822,14 @@ class StructuresWorkspace(QWidget):
         self._update_mat_display()
         condition = self.lc_combo.currentText()
         force = max(abs(s.net_force), abs(s.thrust), s.weight, self.sp_force.value())
+        if condition == "Recovery Shock":
+            # Recovery is a TENSILE harness load from the parachute opening
+            # shock — thrust is irrelevant. Use the same Knacke model as the
+            # Recovery tab so every number in the report shares one load.
+            try:
+                force = wks.recovery_loads(s, self._get_history()).harness_tension_N
+            except Exception:
+                force = 0.0   # solver falls back to its 15 g envelope
         mach = self.sp_mach.value()
         alt = self.sp_alt.value()
 
@@ -1384,10 +1392,9 @@ class StructuresWorkspace(QWidget):
             mat = self.mat_combo.currentText()
             cond = self.lc_combo.currentText()
             cond = cond if cond in ("Max Thrust", "Max-Q", "Recovery Shock", "Thermal") else "Max-Q"
-            rep = wks.full_analysis(s, assembly, hist, mat, cond)
+            rep = wks.full_analysis(s, assembly, hist, mat, cond,
+                                    body_condition=body_condition)
             self._wks_report = rep
-            if body_condition is not None:
-                rep.body_condition = body_condition
             self._populate_workstation(rep)
         except Exception as e:
             logger.error(f"Workstation run failed: {e}", exc_info=True)
@@ -1502,7 +1509,7 @@ class StructuresWorkspace(QWidget):
         self.lbl_buck_euler.setText(fmt(m.get("Euler Column")))
         self.lbl_buck_shell.setText(fmt(m.get("Shell Buckling")))
         self.lbl_buck_panel.setText(fmt(m.get("Panel Buckling")))
-        self.lbl_buck_crippling.setText(fmt(m.get("Local Crippling")))
+        self.lbl_buck_crippling.setText(fmt(m.get("Bending Buckling")))
         self.lbl_buck_applied.setText(f"{ba.applied_axial_N:.0f} N")
         g = ba.governing
         self.lbl_buck_gov.setText(f"{g.name}: ×{g.margin:.2f}")
@@ -1637,9 +1644,11 @@ class StructuresWorkspace(QWidget):
             return
         from structures.solvers.base import get_structural_material
         mat = get_structural_material(self.mat_combo.currentText())
+        rep = getattr(self, "_wks_report", None)
+        fin_pa = rep.fin.root_bending_MPa * 1e6 if rep is not None else 0.0
         try:
             self._stress3d.set_result(self.engine.state, self._get_assembly(),
-                                      bc, mat.yield_strength)
+                                      bc, mat.yield_strength, fin_stress_pa=fin_pa)
         except Exception as e:
             logger.error(f"3D stress update failed: {e}")
 

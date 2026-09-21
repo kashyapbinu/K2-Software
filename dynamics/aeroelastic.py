@@ -16,12 +16,30 @@ Physics formulations
        NACA Report 1135, "Equations, Tables and Charts for
        Compressible Flow".
 
-- Divergence dynamic pressure (Mach-dependent):
-    q_div(M) = K_θ / (S × e × CL_α(M))
+- Aerodynamic centre position (drives the EA offset e):
+    Subsonic:   x_AC = 0.25 c     (thin-aerofoil theory)
+    Supersonic: x_AC → 0.50 c     (Ackeret — the AC moves aft through the
+                                   transonic range)
+  A flat-plate fin's elastic axis is at mid-chord, so e = (x_EA − x_AC)·c
+  COLLAPSES in supersonic flow and torsional divergence disappears. Holding
+  x_AC at 0.25 c everywhere predicted a supersonic divergence that does not
+  physically occur.
 
-- Aeroelastic effectiveness:
+- Divergence dynamic pressure of a uniform cantilever fin (Mach-dependent):
+    q_div(M) = (π² / 4) × GJ / (L² × c × e(M) × CL_α(M))
+  This is the exact continuous-beam eigenvalue, not the lumped single-spring
+  form K_θ/(S·e·CL_α) with K_θ = GJ/L, which is 2.47x low in q (1.57x in V).
+
+  Ref: Bisplinghoff, Ashley & Halfman, "Aeroelasticity", §8-2 eq. 8-46;
+       Hodges & Pierce, "Introduction to Structural Dynamics and
+       Aeroelasticity", §4.1.
+
+- Aeroelastic amplification (the flexible-to-rigid lift ratio):
     η(M) = 1 / (1 − q(M) / q_div(M))
-  True value stored; η < 0 indicates control reversal.
+  η → +∞ as q → q_div. η < 0 is NOT control reversal: it is the
+  post-divergence branch, i.e. the fin has already failed. A fixed fin with
+  no control surface has no reversal mode at all — reversal requires a
+  deflectable surface whose hinge moment reverses (C_Mδ sign change).
 
   Ref: Bisplinghoff, Ashley & Halfman, "Aeroelasticity", §8.3.
 """
@@ -37,6 +55,11 @@ logger = logging.getLogger("K2.Dynamics.Aeroelastic")
 # ---------------------------------------------------------------------------
 GAMMA_AIR = 1.4
 R_AIR = 287.05      # J/(kg·K)
+
+# Chordwise elastic-axis position of a symmetric constant-thickness fin, as a
+# fraction of chord. Mid-chord — matching flutter_analysis's x_ea = 0.5 for
+# the same slab. Keep the two in step: they analyse the same panel.
+_EA_FRACTION = 0.50
 
 
 # ---------------------------------------------------------------------------
@@ -60,15 +83,18 @@ class AeroelasticResult:
     max_deflection_mm: float = 0.0
 
     # --- NEW fields ---
-    # Mach number where η crosses zero (control reversal)
+    # Mach number at which the divergence boundary is crossed (q = q_div).
+    # Named ``reversal_mach`` for backward compatibility with existing UI and
+    # export call-sites; it is the DIVERGENCE Mach, not a control reversal —
+    # a fixed fin has no reversal mode. See the module docstring.
     reversal_mach: float = 0.0
 
     # Per-point regime identification: [(mach, regime_str), ...]
     mach_regime_data: list = field(default_factory=list)
 
-    # Control-reversal margin (M_reversal - M_max; inf if no reversal in range)
+    # Divergence-Mach margin (M_div - M_max; inf if not crossed in range)
     reversal_margin: float = float('inf')
-    # Effectiveness at the max design Mach (interpolated from effectiveness_data)
+    # Aeroelastic amplification at the max design Mach (interpolated)
     effectiveness_at_max_mach: float = 1.0
 
 
@@ -137,6 +163,50 @@ def _cl_alpha(mach: float, aspect_ratio: float) -> float:
     return cl_a
 
 
+def _x_ac(mach: float) -> float:
+    """Chordwise aerodynamic-centre position as a fraction of chord.
+
+    Thin-aerofoil theory puts the AC at the quarter chord subsonically; in
+    linearised supersonic (Ackeret) flow the load is uniform over the chord
+    and the AC sits at mid-chord. The shift happens across the transonic
+    range, blended here with the same smoothstep used for CL_α so the two
+    stay consistent.
+
+    Ref: Anderson, "Fundamentals of Aerodynamics", §4.5 (subsonic) and
+    §12.3 (supersonic); NACA Report 1135.
+    """
+    if mach < 0.80:
+        return 0.25
+    if mach > 1.20:
+        return 0.50
+    t = (mach - 0.80) / (1.20 - 0.80)
+    sm = 3.0 * t ** 2 - 2.0 * t ** 3
+    return 0.25 + 0.25 * sm
+
+
+def _q_divergence(shear_modulus: float, chord: float, thickness: float,
+                  span: float, e: float, cl_alpha: float) -> float:
+    """Divergence dynamic pressure of a uniform cantilever fin (Pa).
+
+        q_div = (π² / 4) · G·J / (L² · c · e · CL_α)
+
+    with the thin-rectangle torsion constant J = c·t³/3. This is the exact
+    first eigenvalue of the continuous torsional-divergence problem, and is
+    2.47x (= π²/4 · 1) higher in q than the lumped-spring approximation
+    K_θ/(S·e·CL_α) with K_θ = GJ/L that this module used before.
+
+    Ref: BAH "Aeroelasticity" §8-2 eq. 8-46; Hodges & Pierce §4.1.
+    """
+    if span <= 0 or chord <= 0 or thickness <= 0 or e <= 0 or cl_alpha <= 0:
+        return float('inf')
+    J = chord * thickness ** 3 / 3.0
+    GJ = shear_modulus * J
+    denom = span ** 2 * chord * e * cl_alpha
+    if denom <= 0.0 or GJ <= 0.0:
+        return float('inf')
+    return (math.pi ** 2 / 4.0) * GJ / denom
+
+
 def _mach_regime(mach: float) -> str:
     """Return a human-readable regime label for the given Mach number."""
     if mach < 0.80:
@@ -152,16 +222,12 @@ def _mach_regime(mach: float) -> str:
 # ---------------------------------------------------------------------------
 def divergence_speed(span: float, chord: float, thickness: float,
                      shear_modulus: float, altitude_m: float = 0.0,
-                     elastic_axis_fraction: float = 0.40,
+                     elastic_axis_fraction: float = 0.50,
                      aspect_ratio: float = None,
                      mach: float = 0.0) -> float:
     """Torsional divergence speed for a thin fin.
 
-    V_div = √(2 · q_div / ρ)
-    q_div = K_θ / (S · e · CL_α)
-
-    Torsional stiffness K_θ is the thin-plate cantilever formula:
-        K_θ = G · c · t³ / (3 · L)
+    V_div = √(2 · q_div / ρ),  q_div = (π²/4)·G·J / (L²·c·e·CL_α)
 
     Parameters
     ----------
@@ -171,17 +237,24 @@ def divergence_speed(span: float, chord: float, thickness: float,
     shear_modulus : float        Shear modulus G (Pa).
     altitude_m : float           Flight altitude (m).
     elastic_axis_fraction : float
-        Chordwise position of elastic axis as fraction of chord
-        (default 0.40 → offset e = (0.40 − 0.25)·c = 0.15·c from AC).
+        Chordwise position of the elastic axis as a fraction of chord. The
+        default is 0.50 — a symmetric flat/uncambered plate of uniform
+        thickness has its shear centre at mid-chord, which is also what
+        ``flutter_analysis._fin_section_properties`` assumes (x_ea = 0.5).
+        The old 0.40 default disagreed with the flutter model on the same
+        fin and, being closer to the AC, gave a 1.29x HIGHER (unconservative)
+        divergence speed.
     aspect_ratio : float | None
         Fin aspect ratio for finite-span correction.  If None, computed
         from span²/(span×chord) = span/chord.
     mach : float
-        Free-stream Mach for compressibility-corrected CL_α.  0 → incompressible.
+        Free-stream Mach for compressibility-corrected CL_α and for the
+        aerodynamic-centre shift.  0 → incompressible.
 
     Returns
     -------
-    float : Divergence speed (m/s).
+    float : Divergence speed (m/s). Infinite when the AC has moved back to
+    the elastic axis (supersonic) so no divergent moment exists.
 
     Reference
     ---------
@@ -194,16 +267,12 @@ def divergence_speed(span: float, chord: float, thickness: float,
 
     _, T, rho = isa_conditions(altitude_m)
 
-    # Torsional stiffness  (thin rectangular plate, cantilever)
-    K_theta = shear_modulus * chord * thickness ** 3 / (3.0 * span)
-
-    # Planform area  (using mean chord — works for trapezoidal via c_mean)
-    S = span * chord
-
-    # Elastic axis offset from aerodynamic centre (at 25 % chord)
-    e = (elastic_axis_fraction - 0.25) * chord
+    # Elastic-axis offset AFT of the aerodynamic centre. The AC moves from
+    # 0.25c to 0.50c through the transonic range, so e shrinks to zero for a
+    # mid-chord EA and supersonic torsional divergence disappears.
+    e = (elastic_axis_fraction - _x_ac(mach)) * chord
     if e <= 0.0:
-        # EA at or ahead of AC → no divergence in this model
+        # EA at or ahead of AC → the aero moment is restoring, no divergence
         return float('inf')
 
     # Aspect ratio
@@ -213,14 +282,10 @@ def divergence_speed(span: float, chord: float, thickness: float,
     # Lift-curve slope (compressibility + finite span)
     cl_a = _cl_alpha(mach, aspect_ratio)
 
-    # Divergence dynamic pressure
-    denom = S * e * cl_a
-    if denom <= 0.0:
-        return float('inf')
-    q_div = K_theta / denom
+    q_div = _q_divergence(shear_modulus, chord, thickness, span, e, cl_a)
 
     # Divergence speed
-    if q_div > 0 and rho > 0:
+    if q_div > 0 and math.isfinite(q_div) and rho > 0:
         V_div = math.sqrt(2.0 * q_div / rho)
     else:
         V_div = float('inf')
@@ -235,7 +300,7 @@ def aeroelastic_effectiveness(span: float, chord: float, thickness: float,
                               shear_modulus: float, altitude_m: float = 0.0,
                               mach_range: tuple = (0.1, 3.0),
                               n_points: int = 30,
-                              elastic_axis_fraction: float = 0.40,
+                              elastic_axis_fraction: float = 0.50,
                               aspect_ratio: float = None) -> list:
     """Compute aeroelastic effectiveness η vs Mach with compressibility.
 
@@ -244,7 +309,8 @@ def aeroelastic_effectiveness(span: float, chord: float, thickness: float,
     q_div now varies with Mach because CL_α(M) changes across subsonic,
     transonic, and supersonic regimes.
 
-    True η is stored (negative values → control reversal).
+    η → +∞ as q → q_div (divergence). Negative η is the post-divergence
+    branch — the fin has already failed, NOT control reversal.
     Display values are clamped to ±20 for plotting sanity.
 
     Parameters
@@ -278,15 +344,6 @@ def aeroelastic_effectiveness(span: float, chord: float, thickness: float,
     _, T, rho = isa_conditions(altitude_m)
     a = math.sqrt(GAMMA_AIR * R_AIR * T)  # speed of sound
 
-    # Torsional stiffness
-    K_theta = shear_modulus * chord * thickness ** 3 / (3.0 * span)
-
-    # Planform
-    S = span * chord
-    e = (elastic_axis_fraction - 0.25) * chord
-    if e <= 0.0:
-        return [(m, 1.0) for m in _linspace(mach_range[0], mach_range[1], n_points)]
-
     if aspect_ratio is None:
         aspect_ratio = span / chord if chord > 0 else 4.0
 
@@ -298,16 +355,15 @@ def aeroelastic_effectiveness(span: float, chord: float, thickness: float,
         V = mach * a
         q = 0.5 * rho * V ** 2
 
-        # Mach-dependent divergence dynamic pressure
+        # Mach-dependent divergence dynamic pressure (AC shift included)
+        e = (elastic_axis_fraction - _x_ac(mach)) * chord
         cl_a = _cl_alpha(mach, aspect_ratio)
-        denom = S * e * cl_a
-        q_div = K_theta / denom if denom > 0 else float('inf')
+        q_div = (_q_divergence(shear_modulus, chord, thickness, span, e, cl_a)
+                 if e > 0.0 else float('inf'))
 
-        # True effectiveness (may be negative → reversal)
-        if q_div != 0.0 and q_div != float('inf'):
-            eta_true = 1.0 / (1.0 - q / q_div)
-        elif q_div == float('inf'):
-            eta_true = 1.0
+        if math.isfinite(q_div) and q_div > 0.0:
+            ratio = q / q_div
+            eta_true = 1.0 / (1.0 - ratio) if abs(1.0 - ratio) > 1e-9 else float('inf')
         else:
             eta_true = 1.0
 
@@ -336,11 +392,19 @@ def _effectiveness_full(span: float, chord: float, thickness: float,
                         mach_range: tuple, n_points: int,
                         elastic_axis_fraction: float,
                         aspect_ratio: float):
-    """Return (display_list, reversal_mach, regime_list).
+    """Return (display_list, divergence_mach, regime_list).
 
     display_list : [(mach, eta_display), ...]
-    reversal_mach : float  (0.0 if no reversal found)
+    divergence_mach : float  (0.0 if q never reaches q_div in the range)
     regime_list : [(mach, regime_str), ...]
+
+    The crossing reported is where q(M) reaches q_div(M) — torsional
+    DIVERGENCE. The previous version called it "control reversal", found it
+    by watching η change sign, and then overwrote the whole curve with
+    ``eta0·tanh((M_rev − M)/k)``: an invented function that made η glide
+    smoothly through zero and hid the divergence singularity entirely. A
+    fixed fin has no reversal mode, so nothing about that curve was
+    physical.
     """
     from cfd.solvers.base import isa_conditions
 
@@ -352,73 +416,47 @@ def _effectiveness_full(span: float, chord: float, thickness: float,
     _, T, rho = isa_conditions(altitude_m)
     a = math.sqrt(GAMMA_AIR * R_AIR * T)
 
-    K_theta = shear_modulus * chord * thickness ** 3 / (3.0 * span)
-    S = span * chord
-    e = (elastic_axis_fraction - 0.25) * chord
-    if e <= 0.0:
-        pts = _linspace(mach_range[0], mach_range[1], n_points)
-        return ([(m, 1.0) for m in pts], 0.0,
-                [(m, _mach_regime(m)) for m in pts])
-
     if aspect_ratio is None:
         aspect_ratio = span / chord if chord > 0 else 4.0
 
     m_start, m_end = mach_range
     display_list = []
     regime_list = []
-    reversal_mach = 0.0
-    prev_eta = None
+    divergence_mach = 0.0
+    prev_ratio = None
+    prev_mach = None
 
     for i in range(n_points):
         mach = m_start + (m_end - m_start) * i / max(n_points - 1, 1)
         V = mach * a
         q = 0.5 * rho * V ** 2
+        e = (elastic_axis_fraction - _x_ac(mach)) * chord
         cl_a = _cl_alpha(mach, aspect_ratio)
-        denom = S * e * cl_a
-        q_div = K_theta / denom if denom > 0 else float('inf')
+        q_div = (_q_divergence(shear_modulus, chord, thickness, span, e, cl_a)
+                 if e > 0.0 else float('inf'))
 
-        if q_div != 0.0 and q_div != float('inf'):
-            eta_true = 1.0 / (1.0 - q / q_div)
-        elif q_div == float('inf'):
-            eta_true = 1.0
+        if math.isfinite(q_div) and q_div > 0.0:
+            ratio = q / q_div
+            eta_true = 1.0 / (1.0 - ratio) if abs(1.0 - ratio) > 1e-9 else float('inf')
         else:
+            ratio = 0.0
             eta_true = 1.0
 
-        # Detect first zero-crossing (control reversal)
-        if prev_eta is not None and reversal_mach == 0.0:
-            if prev_eta > 0.0 and eta_true <= 0.0:
-                # Linear interpolation for crossing Mach
-                prev_mach = m_start + (m_end - m_start) * (i - 1) / max(n_points - 1, 1)
-                if abs(prev_eta - eta_true) > 1e-12:
-                    frac = prev_eta / (prev_eta - eta_true)
-                    reversal_mach = prev_mach + frac * (mach - prev_mach)
-                else:
-                    reversal_mach = mach
-        prev_eta = eta_true
+        # Divergence = q reaching q_div, i.e. the load ratio crossing 1.
+        # Interpolating on the ratio is well behaved; interpolating on η is
+        # not, because η is singular exactly at the crossing.
+        if prev_ratio is not None and divergence_mach == 0.0:
+            if prev_ratio < 1.0 <= ratio:
+                dr = ratio - prev_ratio
+                divergence_mach = (prev_mach + (1.0 - prev_ratio) / dr * (mach - prev_mach)
+                                   if abs(dr) > 1e-12 else mach)
+        prev_ratio, prev_mach = ratio, mach
 
         eta_display = max(-20.0, min(20.0, eta_true))
         display_list.append((mach, eta_display))
         regime_list.append((mach, _mach_regime(mach)))
 
-    # ------------------------------------------------------------------
-    # Smooth transition through control reversal.
-    # The physical model eta = 1/(1 - q/q_div) is singular at q = q_div: it
-    # blows up to +inf just below reversal and to -inf just above, which the
-    # ±20 clamp turns into an artificial vertical jump (+20 -> -20). Replace
-    # the curve around reversal with a smooth logistic/tanh model that passes
-    # continuously through zero at the reversal Mach:
-    #     eta(M) = eta0 * tanh((M_reversal - M) / k)
-    # eta0 = nominal pre-reversal effectiveness amplitude, k = transition width.
-    # ------------------------------------------------------------------
-    if reversal_mach > 0.0:
-        k = max(0.05, 0.10 * reversal_mach)   # transition width in Mach
-        eta0 = 1.0                            # 100% nominal effectiveness
-        display_list = [
-            (m, eta0 * math.tanh((reversal_mach - m) / k))
-            for (m, _) in display_list
-        ]
-
-    return display_list, reversal_mach, regime_list
+    return display_list, divergence_mach, regime_list
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +519,7 @@ def full_aeroelastic_analysis(assembly, max_flight_speed: float = 300.0,
         ar = fin.height ** 2 / S_trap if S_trap > 0 else 4.0
 
         v_div = divergence_speed(fin.height, c_mean, fin.thickness, mat.G,
-                                 aspect_ratio=ar)
+                                 aspect_ratio=ar, mach=0.0)
         if v_div < min_v_div:
             min_v_div = v_div
             critical_fin = fin
@@ -503,7 +541,7 @@ def full_aeroelastic_analysis(assembly, max_flight_speed: float = 300.0,
         eff_data, rev_mach, regime_data = _effectiveness_full(
             critical_fin.height, c_mean, critical_fin.thickness, critical_mat.G,
             altitude_m=0.0, mach_range=(0.1, 3.0), n_points=60,
-            elastic_axis_fraction=0.40, aspect_ratio=ar,
+            elastic_axis_fraction=_EA_FRACTION, aspect_ratio=ar,
         )
         result.effectiveness_data = eff_data
         result.reversal_mach = rev_mach
@@ -524,28 +562,41 @@ def full_aeroelastic_analysis(assembly, max_flight_speed: float = 300.0,
                     break
             result.effectiveness_at_max_mach = eff
 
-    # Fin deflection estimate at max-Q
-    if fins and max_flight_speed > 0:
-        fin = fins[0]
-        mat = get_structural_material(getattr(fin, 'material', 'Plywood (Birch)'))
+    # ── Fin bending deflection at max-Q ─────────────────────────────────
+    # Same model as structures.workstation.fin_analysis so the Dynamics and
+    # Structures tabs report one number for one fin: the DIVERGENCE-critical
+    # fin (was fins[0]), a finite-AR lift slope at a 5 deg gust AoA (was a
+    # bare CN = 0.5), and a uniformly distributed load, delta = F L^3/(8EI)
+    # (was a tip point load, F L^3/(3EI) — 2.67x high).
+    defl_fin = critical_fin if critical_fin is not None else (fins[0] if fins else None)
+    if defl_fin is not None and max_flight_speed > 0:
+        mat = critical_mat if critical_mat is not None else get_structural_material(
+            getattr(defl_fin, 'material', 'Plywood (Birch)'))
         _, _, rho = isa_conditions(0)
         q = 0.5 * rho * max_flight_speed ** 2
-        # Trapezoidal planform area
-        S = 0.5 * (fin.root_chord + fin.tip_chord) * fin.height
-        F_aero = q * S * 0.5  # rough normal force
-        # Cantilever beam deflection
-        c_mean = (fin.root_chord + fin.tip_chord) / 2.0
-        I = c_mean * fin.thickness ** 3 / 12.0
+        root, tip = defl_fin.root_chord, defl_fin.tip_chord
+        S = 0.5 * (root + tip) * defl_fin.height          # trapezoid planform
+        c_mean = 0.5 * (root + tip)
+        ar_d = defl_fin.height ** 2 / S if S > 0 else 4.0
+        cn_alpha = 2.0 * math.pi * ar_d / (ar_d + 2.0)    # finite-AR lift slope
+        F_aero = q * cn_alpha * math.radians(5.0) * S
+        I = c_mean * defl_fin.thickness ** 3 / 12.0
         if mat.E > 0 and I > 0:
-            delta = F_aero * fin.height ** 3 / (3.0 * mat.E * I)
+            delta = F_aero * defl_fin.height ** 3 / (8.0 * mat.E * I)
             result.max_deflection_mm = delta * 1000.0
-            result.max_deflection_deg = math.degrees(
-                math.atan(delta / max(fin.height, 0.01))
-            )
+            # Elastic twist of the tip section is what matters aeroelastically
+            # (an incidence change), not atan(delta/span) — that is the bend
+            # slope of the beam, which adds no angle of attack.
+            J = c_mean * defl_fin.thickness ** 3 / 3.0
+            GJ = mat.G * J if mat.G > 0 else 0.0
+            e_arm = (_EA_FRACTION - 0.25) * c_mean
+            if GJ > 0:
+                twist = F_aero * e_arm * defl_fin.height / GJ   # rad, T·L/GJ
+                result.max_deflection_deg = math.degrees(twist)
 
     # Logging
-    rev_str = (f", reversal M={result.reversal_mach:.2f}"
-               if result.reversal_mach > 0.0 else ", no reversal")
+    rev_str = (f", divergence crossed at M={result.reversal_mach:.2f}"
+               if result.reversal_mach > 0.0 else ", divergence not reached")
     logger.info(
         f"Aeroelastic: V_div={min_v_div:.1f} m/s (M={result.divergence_mach:.2f}), "
         f"margin={result.divergence_margin:.2f}{rev_str}"

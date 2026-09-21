@@ -28,6 +28,18 @@ def test_barrowman_vs_su2():
 
 
 @pytest.mark.cfd
+@pytest.mark.slow
+def test_barrowman_vs_su2_supersonic():
+    """The analytic model above Mach 1, where no experimental data covers it.
+
+    Everything else that checks AeroModel is subsonic (AGARD-B stops at M1.0,
+    the other SU2 comparison runs one point at M0.5), yet flights in this tool
+    routinely reach M2-M4.7.
+    """
+    assert_benchmark(B.bench_barrowman_vs_su2_supersonic())
+
+
+@pytest.mark.cfd
 def test_barrowman_vs_agardb_experiment():
     assert_benchmark(B.bench_agardb_barrowman())
 

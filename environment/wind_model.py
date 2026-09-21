@@ -10,9 +10,12 @@ Supports:
     - Configurable wind direction
 """
 
+import logging
 import math
 import random
 import numpy as np
+
+logger = logging.getLogger("K2.Wind")
 
 
 # ── Pink Noise Generator (Voss-McCartney IIR filter) ─────────────────────────
@@ -62,11 +65,30 @@ class WindModel:
         base_speed:       Mean wind speed at 10m altitude (m/s).
         direction:        Wind direction in degrees (0=North, 90=East).
                           This is the direction the wind is BLOWING FROM.
-        gust_intensity:   Legacy parameter (ignored if turbulence_intensity > 0).
+        gust_intensity:   Legacy alias for turbulence_intensity (the sim engine,
+                          batch sim and weather profiles pass the user's setting
+                          here positionally). Pass None to leave it unset.
         turbulence_intensity: Standard deviation / mean speed (0.0 to 0.3 typical).
-                          0.0  = calm, 0.1 = moderate, 0.2 = high
+                          0.0  = calm, 0.1 = moderate, 0.2 = high.
+                          Wins over gust_intensity when both are given.
         seed:             Random seed for reproducibility.
+
+    Turbulence defaulting
+    ---------------------
+    Both intensity arguments default to ``None``, not to a number, so that an
+    explicit **0 means zero turbulence**. The previous signature defaulted
+    ``turbulence_intensity`` to 0.1 and only overrode it ``if gust_intensity >
+    0`` — and 0 is not > 0, so asking for calm air silently produced 10%
+    turbulence. The UI turbulence spinbox defaults to 0%, so that was the
+    default experience, and it was non-monotonic: 0% was noisier than 5%.
+    ``MultiLevelWindModel`` passed by keyword and so honoured 0 correctly,
+    which left the same UI control meaning two different things.
     """
+
+    # Turbulence used when the caller specifies neither intensity argument.
+    _DEFAULT_TURBULENCE = 0.1
+    # Ceiling on the σ/mean ratio — matches the top INTENSITY_LABELS band.
+    _MAX_TURBULENCE = 1.0
 
     # Pink noise parameters (from OpenRocket)
     _ALPHA = 5.0 / 3.0
@@ -86,18 +108,32 @@ class WindModel:
     ]
 
     def __init__(self, base_speed: float = 0.0, direction: float = 0.0,
-                 gust_intensity: float = 0.0,
-                 turbulence_intensity: float = 0.1,
+                 gust_intensity: float = None,
+                 turbulence_intensity: float = None,
                  seed: int = None):
         self.base_speed = base_speed
         self.direction = math.radians(direction)
-        self.gust_intensity = gust_intensity
-        # Callers (sim engine, batch sim, weather profiles) pass the user's
-        # gust setting positionally as gust_intensity — honor it as the
-        # turbulence intensity instead of silently using the 0.1 default.
-        if gust_intensity > 0:
-            turbulence_intensity = gust_intensity
-        self.turbulence_intensity = turbulence_intensity
+        self.gust_intensity = gust_intensity or 0.0
+        # An explicit 0 from either argument means zero turbulence; the 0.1
+        # default applies only when the caller specifies neither.
+        if turbulence_intensity is not None:
+            ti = turbulence_intensity
+        elif gust_intensity is not None:
+            ti = gust_intensity
+        else:
+            ti = self._DEFAULT_TURBULENCE
+        ti = max(0.0, float(ti))
+        # Intensity is a RATIO (σ / mean speed), not a gust speed in m/s.
+        # INTENSITY_LABELS tops out at 1.00 ("Extreme"), and beyond ~0.3 the
+        # model's own assumption breaks down anyway: it perturbs speed along a
+        # fixed bearing, so σ > mean drives the speed negative most of the time
+        # and `max(0.0, speed)` then silently rectifies it into garbage.
+        if ti > self._MAX_TURBULENCE:
+            logger.warning(
+                "turbulence_intensity=%.3g is a ratio (sigma/mean), not a gust "
+                "speed in m/s; clamping to %.2f", ti, self._MAX_TURBULENCE)
+            ti = self._MAX_TURBULENCE
+        self.turbulence_intensity = ti
 
         # Pink noise state
         seed = seed if seed is not None else random.randint(0, 2**31)
@@ -140,12 +176,17 @@ class WindModel:
         Returns:
             Tuple of (wind_vx, wind_vy, wind_vz).
         """
-        if altitude <= 0 or self.base_speed <= 0:
+        if self.base_speed <= 0:
             return (0.0, 0.0, 0.0)
 
         # ── Altitude-scaled mean speed ──
-        z = max(0.1, altitude)
-        mean_speed = self.base_speed * (z / 10.0) ** 0.143
+        # The 1/7 power law is already continuous down to the surface, where it
+        # goes to zero (no-slip). Returning a hard zero for altitude <= 0 while
+        # flooring the profile at z = 0.1 m put a 52%-of-reference step in the
+        # wind at exactly z = 0 — a discontinuity in the derivative that RK4
+        # sub-steps straddle at lift-off and at touchdown.
+        z = max(0.0, altitude)
+        mean_speed = self.base_speed * (z / 10.0) ** 0.143 if z > 0.0 else 0.0
 
         # ── Pink noise turbulence ──
         if self.turbulence_intensity > 0.001 and self.base_speed > 0:

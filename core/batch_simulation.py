@@ -28,12 +28,22 @@ import numpy as np
 
 from core.constants import G_EARTH, gravity_at_altitude
 from environment.atmosphere_model import Atmosphere
+from core.flight_dynamics import (resolve_aero_frame, wrap_angle,
+                                  yaw_euler_rate)
 from core.flight_phases import FlightPhase, PhaseManager
 from core.integrators import get_integrator
-from physics.aerodynamics import AeroModel
+from physics.aerodynamics import AeroModel, compute_pitching_moment_coefficient
 from environment.wind_model import WindModel, MultiLevelWindModel
 
 logger = logging.getLogger("K2.BatchSim")
+
+# Gust-torque tone frequencies (rad/s), all well below the attitude natural
+# frequency so the perturbation never drives it resonantly. Shared value with
+# SimulationEngine._derivatives.
+_GUST_W = (0.7, 1.7, 3.1)
+# Gust torque amplitude as a fraction of q·A·d. Module-level so tests can zero
+# it to check that the flight physics is otherwise isotropic in wind bearing.
+_GUST_AMP_COEFF = 0.0006
 
 
 # Substrings that mark a run as a numerical artifact rather than a real flight.
@@ -109,6 +119,7 @@ class BatchSimConfig:
 
     # ── Environment ───────────────────────────────────────────────
     launch_angle: float = 90.0
+    launch_rod_length: float = 1.0        # guided length before free flight (m)
     wind_speed: float = 0.0
     wind_direction: float = 0.0
     wind_gust_intensity: float = 0.0
@@ -171,6 +182,7 @@ class BatchSimConfig:
             custom_thrust_curve=list(getattr(state, "custom_thrust_curve", [])),
             # Environment
             launch_angle=getattr(state, "launch_angle", 90.0),
+            launch_rod_length=getattr(state, "launch_rod_length", 1.0) or 1.0,
             wind_speed=getattr(state, "wind_speed", 0.0),
             wind_direction=getattr(state, "wind_direction", 0.0),
             wind_gust_intensity=getattr(state, "wind_gust_intensity", 0.0),
@@ -424,6 +436,11 @@ def run_batch_simulation(
     dry_mass = config.dry_mass
     burnout_mass = config.dry_mass + config.motor_dry_mass
     ref_area = math.pi * (diameter / 2.0) ** 2
+    rod_len = config.launch_rod_length or 1.0
+
+    # Gust-tone phases, per run, from this run's own generator.
+    gust_phase_p = list(rng.uniform(0.0, 2.0 * math.pi, 3))
+    gust_phase_y = list(rng.uniform(0.0, 2.0 * math.pi, 3))
 
     # ── Dynamic CG helper (mirrors RocketStateEngine._recompute_derived) ──
 
@@ -446,8 +463,10 @@ def run_batch_simulation(
         z = max(0.0, z)
         mass = max(0.01, mass)
 
-        # Rail constraint
-        on_rail = z < body_length
+        # Rail constraint — guided until the rocket clears the launch rod/rail.
+        # Was `z < body_length`, i.e. the rocket's own length, which has nothing
+        # to do with how long the rail is.
+        on_rail = z < rod_len
         if on_rail or phase == FlightPhase.PRELAUNCH:
             pitch = launch_pitch
             yaw = 0.0
@@ -470,19 +489,24 @@ def run_batch_simulation(
         v_rel = math.sqrt(vrel_x**2 + vrel_y**2 + vrel_z**2)
         mach = v_rel / a_sound if a_sound > 0 else 0.0
 
-        # Angle of attack (in pitch plane)
+        # Aerodynamic angles resolved onto the BODY axes — same shared helper
+        # the interactive engine uses (core.flight_dynamics). Replaces the
+        # bearing-blind `atan2(vrel_z, hypot(vrel_x, vrel_y))` pitch angle and
+        # the flow-angle-only sideslip, which left a yawed rocket with no
+        # restoring moment until its velocity had already drifted.
+        _AOA_LIMIT = math.radians(45)
         if v_rel > 0.5:
-            vel_angle = math.atan2(vrel_z, math.sqrt(vrel_x**2 + vrel_y**2))
+            frame = resolve_aero_frame((vrel_x, vrel_y, vrel_z), v_rel,
+                                       pitch, yaw)
+            alpha = max(-_AOA_LIMIT, min(_AOA_LIMIT, frame.alpha))
+            beta_angle = max(-_AOA_LIMIT, min(_AOA_LIMIT, frame.beta))
+            alpha_total = min(frame.alpha_total, _AOA_LIMIT)
+            normal_dir = frame.normal_dir
         else:
-            vel_angle = pitch
-        alpha = pitch - vel_angle
-        alpha = max(-math.radians(45), min(math.radians(45), alpha))
-
-        # Sideslip (yaw plane)
-        if v_rel > 0.5:
-            beta_angle = math.atan2(vrel_y, math.sqrt(vrel_x**2 + vrel_z**2))
-        else:
+            alpha = 0.0
             beta_angle = 0.0
+            alpha_total = 0.0
+            normal_dir = (0.0, 0.0, 0.0)
 
         # Dynamic pressure
         q_dyn = 0.5 * rho * v_rel**2
@@ -492,12 +516,30 @@ def run_batch_simulation(
 
         # Aerodynamic model
         if aero_model is not None:
-            aero = aero_model.compute(alpha, mach, q_dyn, pitch_rate_, v_rel, cg)
+            # Evaluated at the TOTAL angle of attack so CN/CD/CP do not depend
+            # on how the incidence splits between pitch and yaw.
+            aero = aero_model.compute(alpha_total, mach, q_dyn, pitch_rate_,
+                                      v_rel, cg)
             F_drag = aero["F_drag"] * cd_scale  # Apply MC Cd perturbation
             F_normal = aero["F_normal"]
-            M_pitch = aero["M_pitch"]
-            # Yaw moment (symmetric to pitch for axisymmetric rocket)
-            M_yaw = -aero.get("cm", 0) * q_dyn * ref_area * diameter * math.sin(beta_angle)
+            cn_total = aero.get("cn_total", 2.0)
+            cmq = aero.get("cmq", -1.0)
+            cp_now = aero["cp"]
+            # Pitch and yaw built from one bearing-independent CNα plus the
+            # body-frame incidence angles, each with rate damping. The old yaw
+            # term was `-cm·sin(β)`; since the pitch `cm` already carries
+            # sin(α), yaw stiffness vanished whenever pitch AoA was near zero,
+            # and there was no yaw damping at all.
+            cm_pitch = compute_pitching_moment_coefficient(
+                cn_total, cp_now, cg, diameter, alpha)
+            M_pitch = cm_pitch * q_dyn * ref_area * diameter
+            M_pitch += aero_model._damping_moment(
+                cmq, pitch_rate_, v_rel, q_dyn, ref_area, diameter, cn_total)
+            cm_yaw = compute_pitching_moment_coefficient(
+                cn_total, cp_now, cg, diameter, beta_angle)
+            M_yaw = cm_yaw * q_dyn * ref_area * diameter
+            M_yaw += aero_model._damping_moment(
+                cmq, yaw_rate_, v_rel, q_dyn, ref_area, diameter, cn_total)
         else:
             cd_val = config.cd
             # Basic transonic/supersonic drag rise when aero_model unavailable
@@ -521,10 +563,22 @@ def run_batch_simulation(
         # Roll damping (simple model)
         M_roll = -0.01 * roll_rate_ * q_dyn * ref_area * diameter if v_rel > 1.0 else 0.0
 
-        # Random perturbation to prevent over-perfect flight (OpenRocket technique)
-        # CRITICAL: uses thread-local rng, NOT np.random globally
-        M_pitch += rng.normal(0, 0.0005) * q_dyn * ref_area * diameter
-        M_yaw += rng.normal(0, 0.0005) * q_dyn * ref_area * diameter
+        # Gust torque ("prevent over-perfect flight"). Must be a SMOOTH,
+        # low-frequency, time-correlated perturbation — NOT per-step white
+        # noise. White noise carries spectral energy at the pitch/yaw natural
+        # frequency (~10-15 Hz at high q) and resonantly pumps the lightly
+        # damped attitude mode into a divergent tumble; that is what
+        # `is_divergence_reason` above exists to filter out. Matches
+        # SimulationEngine._derivatives. Phases are drawn from the run's own
+        # thread-local rng so runs stay independent and reproducible.
+        q_gust = min(q_dyn, 2000.0)
+        gust_amp = _GUST_AMP_COEFF * q_gust * ref_area * diameter
+        gp = sum(math.sin(w * t_ + ph)
+                 for w, ph in zip(_GUST_W, gust_phase_p)) / 3.0
+        gy = sum(math.sin(w * t_ + ph)
+                 for w, ph in zip(_GUST_W, gust_phase_y)) / 3.0
+        M_pitch += gust_amp * gp
+        M_yaw += gust_amp * gy
 
         # Thrust
         thrust = _get_thrust(t_, thrust_curve)
@@ -540,14 +594,20 @@ def run_batch_simulation(
         else:
             drag_x = drag_y = drag_z = 0.0
 
-        # Normal force in pitch plane
-        if v_rel > 0.5:
-            perp_angle = vel_angle + math.pi / 2
-            normal_x = F_normal * math.cos(perp_angle) * math.copysign(1, alpha)
-            normal_z = F_normal * math.sin(perp_angle) * math.copysign(1, alpha)
+        # Aerodynamic normal force as one 3D vector along `normal_dir`, with
+        # its magnitude set by the total angle of attack. Replaces the
+        # global-X-only pitch term plus a hard-coded `normal_y = 0.0`, which
+        # gave the Monte Carlo dispersion no lateral force whatsoever: a
+        # crosswind from any bearing pushed the vehicle along X.
+        _deployed = drogue_deployed or main_deployed
+        if v_rel > 0.5 and not _deployed and aero_model is not None:
+            eff_aoa = min(alpha_total, math.radians(20))
+            F_normal_mag = q_dyn * ref_area * cn_total * math.sin(eff_aoa)
+            normal_x = F_normal_mag * normal_dir[0]
+            normal_y = F_normal_mag * normal_dir[1]
+            normal_z = F_normal_mag * normal_dir[2]
         else:
-            normal_x = normal_z = 0.0
-        normal_y = 0.0
+            normal_x = normal_y = normal_z = 0.0
 
         weight = mass * g
         ax = (tx + drag_x + normal_x) / mass
@@ -601,8 +661,11 @@ def run_batch_simulation(
         else:
             dm_dt = 0.0
 
+        # Attitude kinematics. `yaw_rate_` is the BODY rate about the yaw axis
+        # (the axis M_yaw acts about), so the Euler yaw rate carries the
+        # 1/cos(pitch) metric factor — see core.flight_dynamics.
         return [vx, vy, vz, ax, ay, az,
-                pitch_rate_, yaw_rate_, roll_rate_,
+                pitch_rate_, yaw_euler_rate(yaw_rate_, pitch), roll_rate_,
                 pitch_accel, yaw_accel, roll_accel, dm_dt]
 
     # ── Main simulation loop ──────────────────────────────────────
@@ -656,6 +719,10 @@ def run_batch_simulation(
 
             # Enforce mass floor (structure + spent motor casing)
             new_vec[12] = max(burnout_mass, new_vec[12])
+
+            # Keep the Euler yaw bounded: a near-vertical slew can run it
+            # through many turns, and only cos/sin of it are ever used.
+            new_vec[7] = wrap_angle(new_vec[7])
 
             state_vec = new_vec
             t += adaptive_dt

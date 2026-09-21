@@ -230,7 +230,7 @@ CONV_FILENAME= history
 VOLUME_FILENAME= flow
 SURFACE_FILENAME= surface_flow
 OUTPUT_FILES= (RESTART, PARAVIEW, SURFACE_PARAVIEW)
-OUTPUT_WRT_FREQ= 250
+OUTPUT_WRT_FREQ= {output_wrt_freq}
 
 % Volume fields: solution + derived.
 % VORTICITY and LAMBDA2 were requested here for a long time but this SU2
@@ -754,6 +754,7 @@ class SU2Solver(CFDSolver):
             ref_area=round(ref_area, 6),
             moment_x=round(moment_x, 5),
             max_iter=cfg.max_iterations,
+            output_wrt_freq=cfg.output_wrt_freq,
             conv_order=conv_order,
             restart_sol=restart_sol,
             conv_startiter=conv_startiter,

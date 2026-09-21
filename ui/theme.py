@@ -121,7 +121,46 @@ def palette() -> dict:
 
 def stylesheet(for_mode: str = None) -> str:
     """Full application stylesheet for the active (or given) palette."""
-    return _QSS_TEMPLATE.format(**PALETTES.get(for_mode or _mode, DARK))
+    pal = dict(PALETTES.get(for_mode or _mode, DARK))
+    pal.update(_arrow_images(pal))
+    return _QSS_TEMPLATE.format(**pal)
+
+
+_CHEVRON_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="14" viewBox="0 0 10 14">'
+                '<path d="{d}" fill="none" stroke="{c}" stroke-width="2.2" '
+                'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+_CHEVRON_PATHS = {"left": "M7 2 L2.5 7 L7 12", "right": "M3 2 L7.5 7 L3 12"}
+
+
+def _arrow_images(pal: dict) -> dict:
+    """Write chevron SVGs for this palette and return their QSS ``url()`` keys.
+
+    QSS cannot draw a triangle reliably on tab-bar scroll buttons (the border
+    trick renders as a filled square there), and Qt's stock arrow pixmaps
+    are too small to read, so real images are generated per colour.
+    """
+    from pathlib import Path
+    import hashlib
+    out = {}
+    try:
+        from core.paths import user_data_dir
+        d = Path(user_data_dir("ui_cache"))
+    except Exception:
+        import tempfile
+        d = Path(tempfile.gettempdir()) / "k2_ui_cache"
+        d.mkdir(parents=True, exist_ok=True)
+    for role, color in (("ARROW", pal["TEXT"]), ("ARROW_DIM", pal["TEXT_FAINT"]),
+                        ("ARROW_HOT", pal["ACCENT"])):
+        for side, path in _CHEVRON_PATHS.items():
+            svg = _CHEVRON_SVG.format(d=path, c=color)
+            f = d / f"chevron_{side}_{hashlib.md5(svg.encode()).hexdigest()[:8]}.svg"
+            try:
+                if not f.exists():
+                    f.write_text(svg, encoding="utf-8")
+                out[f"{role}_{side.upper()}"] = f'url("{f.as_posix()}")'
+            except Exception:
+                out[f"{role}_{side.upper()}"] = "none"
+    return out
 
 
 _QSS_TEMPLATE = """
@@ -179,16 +218,26 @@ QTabBar::tab:selected {{
     border-bottom: 2px solid {ACCENT};
 }}
 QTabBar::tab:hover:!selected {{ color: {TEXT_BRIGHT}; }}
-QTabBar::scroller {{ width: 28px; }}
+/* Tab-strip overflow scrollers: draw explicit chevron triangles. The stock
+   arrow pixmaps are ~6 px and unreadable on a dark panel, leaving what looks
+   like two blank pills. */
+QTabBar::scroller {{ width: 56px; }}
 QTabBar QToolButton {{
     background-color: {RAISED};
     border: 1px solid {LINE};
     border-radius: 4px;
-    margin: 3px 1px;
-    width: 20px;
-    color: {TEXT_DIM};
+    margin: 4px 2px;
+    min-width: 22px;
+    color: {TEXT};
 }}
-QTabBar QToolButton:hover {{ color: {ACCENT}; border-color: {LINE_STRONG}; }}
+QTabBar QToolButton:hover {{ background-color: {LINE}; border-color: {ACCENT}; }}
+QTabBar QToolButton:disabled {{ background-color: transparent; border-color: {LINE}; }}
+QTabBar QToolButton::left-arrow {{ image: {ARROW_LEFT}; width: 10px; height: 14px; }}
+QTabBar QToolButton::right-arrow {{ image: {ARROW_RIGHT}; width: 10px; height: 14px; }}
+QTabBar QToolButton::left-arrow:hover {{ image: {ARROW_HOT_LEFT}; }}
+QTabBar QToolButton::right-arrow:hover {{ image: {ARROW_HOT_RIGHT}; }}
+QTabBar QToolButton::left-arrow:disabled {{ image: {ARROW_DIM_LEFT}; }}
+QTabBar QToolButton::right-arrow:disabled {{ image: {ARROW_DIM_RIGHT}; }}
 
 /* ---- toolbars ---- */
 QToolBar {{

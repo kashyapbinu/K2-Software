@@ -113,6 +113,13 @@ class CFDConfig:
     # spurious viscous body lift + inflated pressure drag of wall-unresolved
     # RANS on the tet-only mesh (y+ >> 1, no prism layers, no wall functions).
     euler_analytic_friction: bool = False
+    # How often SU2 dumps the volume/surface VTK files mid-run. Each dump
+    # rebuilds the whole field in memory (tens of MB for flow.vtu) on top of the
+    # solver's own footprint, which is a spike, not a steady cost. The UI wants
+    # them periodically so the contour view can follow a run; a head-less
+    # benchmark only needs the final field, so it can set this >= max_iterations
+    # and pay the cost once. SU2 always writes the final output regardless.
+    output_wrt_freq: int = 250
     # Parallelism for SU2_CFD. 0 = auto (cores - 1, leaving one for the UI).
     # The BUNDLED SU2 is an OpenMP build with no MPI, so in practice this sets
     # OMP_NUM_THREADS on a single process — it is a thread count, not a rank

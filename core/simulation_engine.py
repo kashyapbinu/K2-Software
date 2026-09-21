@@ -31,6 +31,8 @@ from environment.atmosphere_model import Atmosphere
 from core.flight_phases import FlightPhase, PhaseManager
 from core.integrators import get_integrator
 from core.event_manager import EventManager, SimEvent
+from core.flight_dynamics import (resolve_aero_frame, wrap_angle,
+                                  yaw_euler_rate)
 from core.history_manager import HistoryManager
 from physics.aerodynamics import (AeroModel, compute_drag_coefficient,
                                   compute_drag_force,
@@ -533,25 +535,24 @@ class SimulationEngine(QObject):
         v_rel = math.sqrt(vrel_x**2 + vrel_y**2 + vrel_z**2)
         mach = v_rel / a_sound if a_sound > 0 else 0.0
 
-        # Angle of attack (in pitch plane)
+        # Aerodynamic angles, resolved onto the BODY axes (see
+        # core.flight_dynamics). alpha and beta are now independent of the
+        # wind's compass bearing: a pure crosswind is pure sideslip, and the
+        # normal-force direction rotates with the flow instead of always
+        # landing on the global X–Z plane.
+        _AOA_LIMIT = math.radians(45)
         if v_rel > 0.5:
-            vel_angle = math.atan2(vrel_z, math.sqrt(vrel_x**2 + vrel_y**2))
+            frame = resolve_aero_frame((vrel_x, vrel_y, vrel_z), v_rel,
+                                       pitch, yaw)
+            alpha = max(-_AOA_LIMIT, min(_AOA_LIMIT, frame.alpha))
+            beta_angle = max(-_AOA_LIMIT, min(_AOA_LIMIT, frame.beta))
+            alpha_total = min(frame.alpha_total, _AOA_LIMIT)
+            normal_dir = frame.normal_dir
         else:
-            vel_angle = pitch
-        alpha = pitch - vel_angle
-        alpha = max(-math.radians(45), min(math.radians(45), alpha))
-
-        # Sideslip (yaw plane): effective sideslip is the angle between the
-        # body axis and the relative wind in the yaw plane — body yaw minus
-        # the lateral flow angle — mirroring alpha = pitch - vel_angle. Using
-        # the flow angle alone left the yaw attitude itself unrestored: a
-        # yawed rocket felt no correcting moment until its velocity drifted.
-        if v_rel > 0.5:
-            flow_beta = math.atan2(vrel_y, math.sqrt(vrel_x**2 + vrel_z**2))
-            beta_angle = yaw - flow_beta
-            beta_angle = max(-math.radians(45), min(math.radians(45), beta_angle))
-        else:
+            alpha = 0.0
             beta_angle = 0.0
+            alpha_total = 0.0
+            normal_dir = (0.0, 0.0, 0.0)
 
         # Reference geometry. Multistage shrinks with each separation, so take
         # the active-stack diameter/CG from the stage manager; single-stage
@@ -566,25 +567,37 @@ class SimulationEngine(QObject):
         # Aerodynamic model
         cg = self.stage_mgr.active_cg() if ms else s.cg
         if self.aero_model is not None:
-            aero = self.aero_model.compute(alpha, mach, q_dyn, pitch_rate, v_rel, cg)
+            # Evaluate the aero model at the TOTAL angle of attack. CN, CD and
+            # CP are functions of total incidence for an axisymmetric body —
+            # feeding it only the pitch-plane alpha made every coefficient
+            # depend on how the incidence happened to split between pitch and
+            # yaw, so an identical crosswind gave different CN depending on the
+            # wind's compass bearing.
+            aero = self.aero_model.compute(alpha_total, mach, q_dyn,
+                                           pitch_rate, v_rel, cg)
             F_drag = aero["F_drag"]
             F_normal = aero["F_normal"]
-            M_pitch = aero["M_pitch"]
             cd = aero["cd"]
             cp = aero["cp"]
             stab_margin = aero["stability_margin"]
-            # Yaw moment (symmetric to pitch for axisymmetric rocket) + yaw
-            # damping mirroring the pitch-damping fix (else yaw weathercock is
-            # undamped and tumbles in crosswind just like pitch did). Built
-            # from CNα and the effective sideslip directly — the pitch cm
-            # already contains sin(α), so scaling it by sin(β) made yaw
-            # stiffness vanish whenever the pitch AoA was near zero.
+            cn_total = aero.get("cn_total", 2.0)
+            cmq = aero.get("cmq", -1.0)
+            # Pitch and yaw moments share one bearing-independent CNα and split
+            # by the body-frame incidence angles, so the restoring moment
+            # rotates with the flow but never changes total magnitude. Both
+            # channels use the same reference area/diameter (the active stack's
+            # for a multistage flight) — pitch used to take the aero model's
+            # own full-stack reference while yaw took the staged one.
+            cm_pitch = compute_pitching_moment_coefficient(
+                cn_total, cp, cg, ref_diameter, alpha)
+            M_pitch = cm_pitch * q_dyn * ref_area * ref_diameter
+            M_pitch += self.aero_model._damping_moment(
+                cmq, pitch_rate, v_rel, q_dyn, ref_area, ref_diameter, cn_total)
             cm_yaw = compute_pitching_moment_coefficient(
-                aero.get("cn_total", 2.0), cp, cg, s.diameter, beta_angle)
-            M_yaw = cm_yaw * q_dyn * ref_area * s.diameter
+                cn_total, cp, cg, ref_diameter, beta_angle)
+            M_yaw = cm_yaw * q_dyn * ref_area * ref_diameter
             M_yaw += self.aero_model._damping_moment(
-                aero.get("cmq", -1.0), yaw_rate, v_rel, q_dyn,
-                ref_area, s.diameter, aero.get("cn_total", 2.0))
+                cmq, yaw_rate, v_rel, q_dyn, ref_area, ref_diameter, cn_total)
         else:
             from physics.aerodynamics import compute_cd as _cd
             cd = _cd(mach, alpha, s.length / max(s.diameter, 0.01))
@@ -643,25 +656,23 @@ class SimulationEngine(QObject):
         else:
             drag_x = drag_y = drag_z = 0.0
 
-        # Normal force in pitch plane
-        if v_rel > 0.5:
-            perp_angle = vel_angle + math.pi / 2
-            normal_x = F_normal * math.cos(perp_angle) * math.copysign(1, alpha)
-            normal_z = F_normal * math.sin(perp_angle) * math.copysign(1, alpha)
-        else:
-            normal_x = normal_z = 0.0
-        # Lateral (yaw-plane) normal force from sideslip — mirrors the pitch-plane
-        # term so a crosswind produces side translation, not just a yaw moment.
-        # Same CNα·sin(β) form with the 20° stall clamp; acts toward the side
-        # the nose points relative to the flow (lift), like the pitch term.
+        # Aerodynamic normal force. One 3D vector along `normal_dir` — the
+        # component of the body axis perpendicular to the relative wind, which
+        # is where lift acts — instead of a global-X pitch term plus a bolted-on
+        # lateral term. Magnitude comes from the TOTAL angle of attack, so a
+        # crosswind and a headwind of the same strength produce the same force,
+        # just pointed differently. Under canopy the airframe hangs and carries
+        # no normal force.
         _deployed = self._drogue_deployed or self._main_deployed
-        if v_rel > 0.5 and abs(beta_angle) > 1e-6 and not _deployed:
-            cn_total_now = aero.get("cn_total", 2.0) if self.aero_model is not None else 0.0
-            eff_beta = min(abs(beta_angle), math.radians(20))
-            F_normal_y = q_dyn * ref_area * cn_total_now * math.sin(eff_beta)
-            normal_y = math.copysign(F_normal_y, beta_angle)
+        if v_rel > 0.5 and not _deployed and self.aero_model is not None:
+            cn_total_now = aero.get("cn_total", 2.0)
+            eff_aoa = min(alpha_total, math.radians(20))
+            F_normal_mag = q_dyn * ref_area * cn_total_now * math.sin(eff_aoa)
+            normal_x = F_normal_mag * normal_dir[0]
+            normal_y = F_normal_mag * normal_dir[1]
+            normal_z = F_normal_mag * normal_dir[2]
         else:
-            normal_y = 0.0
+            normal_x = normal_y = normal_z = 0.0
 
         weight = mass * g
         ax = (tx + drag_x + normal_x) / mass
@@ -726,8 +737,11 @@ class SimulationEngine(QObject):
             "wind_vx": wind_vx, "thrust": thrust, "F_normal": F_normal,
         }
 
+        # Attitude kinematics. `yaw_rate` is the BODY rate about the yaw axis
+        # (that is the axis M_yaw acts about), so the Euler yaw rate carries
+        # the 1/cos(pitch) metric factor — see core.flight_dynamics.
         return [vx, vy, vz, ax, ay, az,
-                pitch_rate, yaw_rate, roll_rate,
+                pitch_rate, yaw_euler_rate(yaw_rate, pitch), roll_rate,
                 pitch_accel, yaw_accel, roll_accel, dm_dt]
 
     def _estimate_inertia(self, mass: float, s) -> float:
@@ -857,6 +871,10 @@ class SimulationEngine(QObject):
             new_vec[9] = 0.0             # pitch_rate
             new_vec[10] = 0.0            # yaw_rate
             new_vec[11] = 0.0            # roll_rate
+
+        # Keep the Euler yaw bounded: a near-vertical slew can run it through
+        # many turns, and only cos/sin of it are ever used.
+        new_vec[7] = wrap_angle(new_vec[7])
 
         self._state_vec = new_vec
 

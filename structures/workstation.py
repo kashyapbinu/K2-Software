@@ -182,18 +182,24 @@ _EVENT_ORDER = [
 ]
 
 
-def _event_indices(history) -> dict:
+def _event_indices(history, state=None) -> dict:
     """Map each named flight event to a history index."""
     n = len(history)
     if n == 0:
         return {}
     idx = {}
     idx["Launch"] = 0
-    # Rail exit: first point past ~2 m travel (or 3% into flight)
-    xs = history.get_values("x") or history.get_values("altitude")
+    # Rail exit: first sample above the launch rod/rail length. Uses
+    # altitude — history "x" is DOWNRANGE distance, which the old code read
+    # as travel along the rail and fired only once the rocket had drifted 2 m
+    # sideways (typically near burnout).
+    rod_len = 1.0
+    if state is not None:
+        rod_len = getattr(state, "launch_rod_length", 1.0) or 1.0
+    alts = history.get_values("altitude")
     rail = 0
-    for i, x in enumerate(xs):
-        if x > 2.0:
+    for i, z in enumerate(alts):
+        if z > rod_len:
             rail = i
             break
     idx["Rail Exit"] = rail
@@ -232,8 +238,11 @@ def find_worst_case(state, history, material_name: str,
     t = state.wall_thickness
     L = state.length
     mat = get_structural_material(material_name)
-    indices = _event_indices(history)
+    indices = _event_indices(history, state)
     mass = state.total_mass() if callable(getattr(state, "total_mass", None)) else 5.0
+    # One recovery-shock model for the whole report: harness tension from the
+    # real CdA + deploy velocity (recovery_loads), not a separate 15 g guess.
+    rec_force = recovery_loads(state, history).harness_tension_N
 
     events = []
     for k, name in enumerate(_EVENT_ORDER):
@@ -262,10 +271,10 @@ def find_worst_case(state, history, material_name: str,
             force = max(mass * G, 1.0)
         elif name == "Parachute Deployment":
             cond = "Recovery Shock"
-            force = 0.0
+            force = rec_force
         else:  # Landing Impact
             cond = "Recovery Shock"
-            force = 0.0
+            force = rec_force
 
         aoa = 3.0 if cond == "Max-Q" else 2.0
         arm = abs(snap.get("cp", 0.0) - snap.get("cg", 0.0))
@@ -387,22 +396,28 @@ class BeamDeflection:
 
 
 def beam_deflection(state, flight: "FlightLoads", material_name: str) -> BeamDeflection:
-    """Lateral deflection of the airframe treated as a cantilever beam under
-    the distributed aerodynamic side load at max-Q.
+    """Lateral (elastic) deflection of the airframe under the aerodynamic side
+    load at max-Q.
 
-        Distributed load  w = F_N / L        (N/m)
-        Tip deflection     δ = w·L⁴ / (8·E·I) = F_N·L³ / (8·E·I)
+    A rocket in free flight is a FREE-FREE beam: nothing clamps it. The aero
+    normal force F_N is balanced by the distributed inertia of the vehicle
+    (w = F_N / L), so the elastic bend is the deflection of the ends relative
+    to the load point — two back-to-back cantilevers of length L/2 under the
+    uniform inertial load:
 
-    (Euler-Bernoulli, uniformly distributed load on a cantilever — Roark
-    Table 8.1 case 1d.) Returns a non-zero deflection whenever a lateral
-    load exists, so the deformation view is never falsely flat."""
+        δ_end = w·(L/2)⁴ / (8·E·I) = F_N·L³ / (128·E·I)
+
+    (Euler-Bernoulli, Roark Table 8.1 case 1d applied to each half.) The old
+    cantilever-from-the-tail form F_N·L³/(8EI) over-predicted by 16×.
+    Returns a non-zero deflection whenever a lateral load exists, so the
+    deformation view is never falsely flat."""
     bd = BeamDeflection()
     mat = get_structural_material(material_name)
     d, t, L = state.diameter, state.wall_thickness, state.length
     if d <= 0 or t <= 0 or L <= 0:
         return bd
-    r_o = d / 2 + t / 2
-    r_i = d / 2 - t / 2
+    r_o = d / 2                 # d = outer diameter
+    r_i = d / 2 - t
     I = (math.pi / 4) * (r_o ** 4 - r_i ** 4)
     EI = mat.E * I
     bd.EI = EI
@@ -421,10 +436,10 @@ def beam_deflection(state, flight: "FlightLoads", material_name: str) -> BeamDef
     bd.applied_normal_force_N = F_N
     bd.bending_moment_Nm = F_N * L / 2.0
 
-    delta_m = F_N * L ** 3 / (8.0 * EI)     # cantilever, distributed load
+    delta_m = F_N * L ** 3 / (128.0 * EI)   # free-free, inertia-balanced
     bd.tip_deflection_mm = delta_m * 1000.0
     bd.max_deflection_mm = bd.tip_deflection_mm
-    bd.location = "Forward Airframe / Nose"
+    bd.location = "Nose / Tail (relative to mid-body)"
     return bd
 
 
@@ -441,25 +456,35 @@ class ModalEstimate:
     low_freq: bool = False
 
 
-# Euler-Bernoulli cantilever eigenvalues (βL)
-_BETA_L = (1.875104, 4.694091, 7.854757)
+# Euler-Bernoulli FREE-FREE eigenvalues (βL). A rocket in flight is not
+# clamped anywhere; the cantilever set (1.875, 4.694, 7.855) under-predicts
+# the fundamental by (4.730/1.875)² ≈ 6.4×.
+_BETA_L = (4.730041, 7.853205, 10.995608)
+_BETA_L_BY_BC = {
+    "free-free": _BETA_L,
+    "cantilever": (1.875104, 4.694091, 7.854757),   # benchmark vs clamped FE only
+}
 
 
-def modal_estimate(state, material_name: str) -> ModalEstimate:
+def modal_estimate(state, material_name: str,
+                   boundary: str = "free-free") -> ModalEstimate:
     """First three lateral-bending natural frequencies of the airframe as a
-    uniform cantilever beam:
+    uniform FREE-FREE beam (free flight — no clamped end):
 
         fₙ = (βₙL)² / (2π) · √( E·I / (m'·L⁴) )
 
-    where m' = total mass / length. Flags fundamentals below 20 Hz for
-    vehicles under 3 m (resonance / controllability concern)."""
+    where m' = total mass / length. Flags fundamentals below 50 Hz for
+    vehicles under 3 m (resonance / controllability concern).
+
+    ``boundary`` selects the eigenvalue set: "free-free" (flight, default)
+    or "cantilever" (only for comparing against a clamped FE model)."""
     me = ModalEstimate()
     mat = get_structural_material(material_name)
     d, t, L = state.diameter, state.wall_thickness, state.length
     if d <= 0 or t <= 0 or L <= 0:
         return me
-    r_o = d / 2 + t / 2
-    r_i = d / 2 - t / 2
+    r_o = d / 2                 # d = outer diameter
+    r_i = d / 2 - t
     I = (math.pi / 4) * (r_o ** 4 - r_i ** 4)
     EI = mat.E * I
     mass = state.total_mass() if callable(getattr(state, "total_mass", None)) else 5.0
@@ -469,12 +494,13 @@ def modal_estimate(state, material_name: str) -> ModalEstimate:
     m_per_L = mass / L
     if EI <= 0 or m_per_L <= 0:
         return me
+    betas = _BETA_L_BY_BC.get(boundary, _BETA_L)
     freqs = [(bl ** 2 / (2 * math.pi)) * math.sqrt(EI / (m_per_L * L ** 4))
-             for bl in _BETA_L]
+             for bl in betas]
     me.f1_hz, me.f2_hz, me.f3_hz = freqs
-    if L < 3.0 and me.f1_hz < 20.0:
+    if boundary == "free-free" and L < 3.0 and me.f1_hz < 50.0:
         me.low_freq = True
-        me.warning = (f"1st bending mode {me.f1_hz:.0f} Hz is below 20 Hz for a "
+        me.warning = (f"1st bending mode {me.f1_hz:.0f} Hz is below 50 Hz for a "
                       f"{L:.1f} m vehicle — soft airframe; check flutter / control coupling.")
     return me
 
@@ -499,9 +525,34 @@ class FinAnalysis:
     deflection_profile: list = field(default_factory=list)  # [(span_frac, defl_mm)]
 
 
+def _fin_material_name(assembly, fallback: str) -> str:
+    """Material of the first fin set in the assembly, else the body material.
+
+    Fins are commonly a different material from the airframe (plywood or G10
+    fins on a fibreglass tube). The flat RocketState carries only one
+    material, so without the assembly the fin analysis silently used the
+    BODY's E, G and yield — and the flutter speed it reported then disagreed
+    with the Dynamics workspace, which reads fin.material directly."""
+    if assembly is None:
+        return fallback
+    try:
+        from core.components import TrapezoidalFinSet
+        for comp in assembly.all_components():
+            if isinstance(comp, TrapezoidalFinSet):
+                name = getattr(comp, "material", None)
+                if name:
+                    return name
+    except Exception as e:
+        logger.debug(f"fin material lookup failed: {e}")
+    return fallback
+
+
 def fin_analysis(state, flight: FlightLoads, material_name: str) -> FinAnalysis:
     """Cantilever-plate fin analysis: root bending/shear, tip deflection,
-    fundamental frequency, and NACA flutter margin."""
+    fundamental frequency, and NACA flutter margin.
+
+    ``material_name`` should be the FIN material (see _fin_material_name),
+    not the airframe's, when the two differ."""
     fa = FinAnalysis()
     mat = get_structural_material(material_name)
 
@@ -599,8 +650,11 @@ class BucklingAnalysis:
     status_color: str = "#8b949e"
 
 
-def buckling_analysis(state, flight: FlightLoads, material_name: str) -> BucklingAnalysis:
-    """Euler column, NASA SP-8007 shell, flat-panel, and local crippling."""
+def buckling_analysis(state, flight: FlightLoads, material_name: str,
+                      bending_stress_pa: float = 0.0) -> BucklingAnalysis:
+    """Euler column, NASA SP-8007 axial shell, flat-panel, and shell buckling
+    under bending (the max-Q governing load). ``bending_stress_pa`` is the
+    peak fibre bending stress from the body condition."""
     ba = BucklingAnalysis()
     mat = get_structural_material(material_name)
     d, t, L = state.diameter, state.wall_thickness, state.length
@@ -633,10 +687,18 @@ def buckling_analysis(state, flight: FlightLoads, material_name: str) -> Bucklin
                    (12 * (1 - mat.nu ** 2))) * (t / b_panel) ** 2 if b_panel > 0 else float("inf")
     ba.modes.append(BucklingMode("Panel Buckling", sigma_panel, sigma_applied, "Pa"))
 
-    # 4. Local crippling (Gerard method for curved skin)
-    sigma_cripple = 0.6 * mat.E * (t / r) if r > 0 else float("inf")
-    sigma_cripple = min(sigma_cripple, mat.yield_strength)
-    ba.modes.append(BucklingMode("Local Crippling", sigma_cripple, sigma_applied, "Pa"))
+    # 4. Shell buckling under pure bending (NASA SP-8007 sec. 4.2.2). The old
+    #    "Local Crippling" entry was 0.6·E·t/r — the classical axial shell
+    #    value with no knockdown, i.e. the same mode as (2) at ×4–5 the
+    #    allowable, so it never governed. Bending is the max-Q load, so it
+    #    gets its own check: γ_b = 1 − 0.731(1 − e^(−√(r/t)/16)) is less
+    #    severe than the axial knockdown, and the applied stress is the
+    #    outer-fibre bending stress.
+    gamma_b = 1.0 - 0.731 * (1.0 - math.exp(-math.sqrt(r / t) / 16.0)) if t > 0 else 1.0
+    sigma_cl = mat.E * t / (r * math.sqrt(3.0 * (1.0 - mat.nu ** 2))) if r > 0 else float("inf")
+    sigma_bend_cr = gamma_b * sigma_cl
+    ba.modes.append(BucklingMode("Bending Buckling", sigma_bend_cr,
+                                 max(bending_stress_pa, 0.0), "Pa"))
 
     for m in ba.modes:
         m.margin = (m.critical / m.applied) if m.applied > 0 else float("inf")
@@ -894,6 +956,23 @@ _SUBSYSTEMS = [
 ]
 
 
+_T_REF_K = 293.15   # stress-free assembly / service-limit reference temperature
+
+
+def thermal_margin(thermal: "ThermalProfile") -> float:
+    """Thermal safety factor = allowable temperature RISE / actual rise above
+    the 20 °C reference. The old form (T_limit / T_skin, an absolute-Kelvin
+    ratio) gave SF ≈ 1.35 for an unheated Mach-0.8 skin at 314 K and knocked
+    the thermal sub-score to ~60 with no aero heating at all. No rise → ∞."""
+    rise = thermal.skin_temp_K - _T_REF_K
+    allow = thermal.service_limit_K - _T_REF_K
+    if rise <= 0.0:
+        return float("inf")
+    if allow <= 0.0:
+        return 0.0
+    return allow / rise
+
+
 def _status_from_sf(sf: float) -> tuple[str, str]:
     """Spec status colors: Green safe, Yellow<1.5, Orange<1.2, Red<1.0."""
     if not math.isfinite(sf) or sf >= 1.5:
@@ -910,8 +989,7 @@ def failure_map(state, body_sf: float, fin: FinAnalysis,
                 thermal: ThermalProfile) -> FailureMap:
     """Roll the analysis results up into a per-subsystem dashboard."""
     fm = FailureMap()
-    thermal_sf = (thermal.service_limit_K / thermal.skin_temp_K
-                  if thermal.skin_temp_K > 0 else 99.0)
+    thermal_sf = thermal_margin(thermal)
 
     rows = {
         "Motor Mount": (min(body_sf, buckling.governing.margin if buckling.governing else body_sf),
@@ -1004,34 +1082,48 @@ class WorkstationReport:
 
 
 def full_analysis(state, assembly, history, material_name: str,
-                  condition: str = "Max-Q") -> WorkstationReport:
+                  condition: str = "Max-Q",
+                  body_condition: Optional[dict] = None) -> WorkstationReport:
     """Run the complete workstation analysis suite and assemble a report.
-    Designed to complete in well under a second."""
+    Designed to complete in well under a second.
+
+    ``body_condition`` — an already-computed compute_for_condition() result
+    (e.g. the one the workspace shows in its stress panel). When given it is
+    the single source for body SF, so the score / failure map / mass
+    efficiency agree with the numbers on screen instead of being derived
+    from a second, differently-loaded evaluation."""
     rep = WorkstationReport()
     rep.flight = FlightLoads.from_history(history, state)
+    rep.recovery = recovery_loads(state, history)
 
     # Governing body stress for the selected condition
     mass = state.total_mass() if callable(getattr(state, "total_mass", None)) else 5.0
-    force = max(rep.flight.max_thrust, getattr(state, "thrust", 0.0), mass * G, 1.0)
-    rep.body_condition = compute_for_condition(
-        condition, state.diameter, state.wall_thickness, state.length,
-        material_name, force=force, mach=rep.flight.maxq_mach,
-        altitude_m=rep.flight.maxq_altitude, vehicle_mass_kg=mass,
-        angle_of_attack_deg=3.0 if condition == "Max-Q" else 2.0,
-        moment_arm_m=rep.flight.moment_arm,
-    )
+    if body_condition:
+        rep.body_condition = body_condition
+    else:
+        if condition == "Recovery Shock":
+            force = rep.recovery.harness_tension_N
+        else:
+            force = max(rep.flight.max_thrust, getattr(state, "thrust", 0.0), mass * G, 1.0)
+        rep.body_condition = compute_for_condition(
+            condition, state.diameter, state.wall_thickness, state.length,
+            material_name, force=force, mach=rep.flight.maxq_mach,
+            altitude_m=rep.flight.maxq_altitude, vehicle_mass_kg=mass,
+            angle_of_attack_deg=3.0 if condition == "Max-Q" else 2.0,
+            moment_arm_m=rep.flight.moment_arm,
+        )
     body_sf = rep.body_condition["safety_factor"]
 
-    rep.recovery = recovery_loads(state, history)
-    rep.fin = fin_analysis(state, rep.flight, material_name)
-    rep.buckling = buckling_analysis(state, rep.flight, material_name)
+    fin_mat = _fin_material_name(assembly, material_name)
+    rep.fin = fin_analysis(state, rep.flight, fin_mat)
+    rep.buckling = buckling_analysis(state, rep.flight, material_name,
+                                     bending_stress_pa=rep.body_condition.get("bending", 0.0))
     rep.thermal = thermal_profile(state, rep.flight, history, material_name)
     rep.mass = mass_efficiency(state, assembly,
                                min(body_sf, rep.buckling.governing.margin
                                    if rep.buckling.governing else body_sf))
 
-    thermal_sf = (rep.thermal.service_limit_K / rep.thermal.skin_temp_K
-                  if rep.thermal.skin_temp_K > 0 else 99.0)
+    thermal_sf = thermal_margin(rep.thermal)
     buck_sf = rep.buckling.governing.margin if rep.buckling.governing else 99.0
     rep.score = safety_score(body_sf, buck_sf, rep.recovery.safety_factor,
                              min(rep.fin.safety_factor, rep.fin.flutter_margin),

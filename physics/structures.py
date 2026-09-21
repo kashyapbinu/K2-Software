@@ -149,6 +149,9 @@ def compute_for_condition(condition, diameter, wall_thickness, length, material_
 
     ``moment_arm_m`` is the aerodynamic bending moment arm (|x_CP - x_CG|).
     When > 0 it is used directly; otherwise a length-fraction fallback applies.
+
+    For "Recovery Shock", ``force`` is the harness tension (N) from the
+    parachute opening-shock model; 0 falls back to a 15 g envelope.
     """
     if condition == "Max Thrust" or condition == "max_thrust":
         return _compute_max_thrust(force, diameter, wall_thickness, length,
@@ -157,7 +160,8 @@ def compute_for_condition(condition, diameter, wall_thickness, length, material_
                                     moment_arm_m)
     elif condition == "Recovery Shock" or condition == "recovery":
         return _compute_recovery(diameter, wall_thickness, length,
-                                  material_name, vehicle_mass_kg)
+                                  material_name, vehicle_mass_kg,
+                                  shock_force_N=force)
     elif condition == "Thermal" or condition == "thermal":
         return _compute_thermal(diameter, wall_thickness, length,
                                  material_name, mach, altitude_m)
@@ -189,8 +193,8 @@ def _compute_max_thrust(force, diameter, wall_thickness, length, material_name,
     """
     mat = get_material(material_name)
     r = diameter / 2
-    r_o = r + wall_thickness / 2
-    r_i = r - wall_thickness / 2
+    r_o = r                        # diameter is the tube OUTER diameter
+    r_i = r - wall_thickness
     area = math.pi * diameter * wall_thickness
     I = (math.pi / 4) * (r_o**4 - r_i**4)
 
@@ -259,8 +263,8 @@ def _compute_max_q(force, diameter, wall_thickness, length, material_name,
     """
     mat = get_material(material_name)
     r = diameter / 2
-    r_o = r + wall_thickness / 2
-    r_i = r - wall_thickness / 2
+    r_o = r                        # diameter is the tube OUTER diameter
+    r_i = r - wall_thickness
     area = math.pi * diameter * wall_thickness
     I = (math.pi / 4) * (r_o**4 - r_i**4)
 
@@ -316,17 +320,26 @@ def _compute_max_q(force, diameter, wall_thickness, length, material_name,
 
 
 def _compute_recovery(diameter, wall_thickness, length, material_name,
-                       vehicle_mass_kg=5.0, shock_g=15.0, daf=1.8, kt=2.5):
-    """Recovery shock: tensile axial from parachute snap + stress concentrations."""
+                       vehicle_mass_kg=5.0, shock_g=15.0, daf=1.8, kt=2.5,
+                       shock_force_N=0.0):
+    """Recovery shock: tensile axial from parachute snap + stress concentrations.
+
+    ``shock_force_N`` — when > 0 it is the harness tension from the actual
+    parachute opening-shock model (structures.workstation.recovery_loads:
+    Knacke Cx on the real CdA + deploy velocity, already dynamically
+    amplified) and is used directly. Otherwise the generic 15 g x DAF
+    envelope applies. Both paths share the same attachment Kt.
+    """
     mat = get_material(material_name)
     r = diameter / 2
-    r_o = r + wall_thickness / 2
-    r_i = r - wall_thickness / 2
+    r_o = r                        # diameter is the tube OUTER diameter
+    r_i = r - wall_thickness
     area = math.pi * diameter * wall_thickness
     I = (math.pi / 4) * (r_o**4 - r_i**4)
 
     # 1. Recovery shock force: F = m * a_shock * DAF
-    F_recovery = vehicle_mass_kg * shock_g * 9.81 * daf
+    F_recovery = (shock_force_N if shock_force_N > 0
+                  else vehicle_mass_kg * shock_g * 9.81 * daf)
 
     # 2. TENSILE axial stress (not compressive!)
     ax = F_recovery / area if area > 0 else 0.0

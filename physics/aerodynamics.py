@@ -10,7 +10,7 @@ Implements:
     - Reynolds-based skin friction with Mach compressibility correction
     - Mach-dependent base drag and stagnation pressure drag
     - Full Barrowman method (nose + body + fins) for CN and CP
-    - Supersonic fin CN with K1/K2/K3 tables (up to Mach 5)
+    - Supersonic fin CN with Busemann K1/K2/K3 tables (M1.5 to M10)
     - Mach-dependent fin CP (quarter-chord → supersonic empirical)
     - Body lift (Galejs method)
     - Stall model (20° with graceful reduction)
@@ -35,9 +35,31 @@ from physics.drag_tables import (
     LinearInterpolator, stagnation_cd, base_cd,
     FIN_K1, FIN_K2, FIN_K3, SurfaceFinish, FinCrossSection,
     CNA_SUPERSONIC_MACH, GAMMA_AIR,
+    FIN_K_TABLE_MAX_MACH, fin_k_out_of_range,
 )
 
 logger = logging.getLogger("K2.Aerodynamics")
+
+# One-shot guard so a supersonic trajectory does not log this every step.
+_fin_k_clamp_warned = False
+
+
+def _warn_fin_k_clamped(mach: float) -> None:
+    """Report, once, that the fin K-tables have run out of range.
+
+    Past ``FIN_K_TABLE_MAX_MACH`` the interpolator clamps, so fin normal force
+    stops falling off with Mach and the model over-predicts fin authority (and
+    therefore stability margin). Silent clamping is the dangerous case — the
+    numbers still look plausible.
+    """
+    global _fin_k_clamp_warned
+    if not _fin_k_clamp_warned:
+        _fin_k_clamp_warned = True
+        logger.warning(
+            "Mach %.2f is above the supersonic fin table limit (M%.1f): K1/K2/K3 "
+            "are clamped, so fin CN_alpha no longer decreases with Mach and "
+            "stability margin will read high. Treat results above M%.1f as "
+            "out of range.", mach, FIN_K_TABLE_MAX_MACH, FIN_K_TABLE_MAX_MACH)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 STALL_ANGLE = math.radians(20)      # 20° stall angle (OpenRocket)
@@ -310,6 +332,8 @@ def compute_fin_cn_alpha(fin_count: int, fin_span: float, fin_root_chord: float,
         cna1 = 2 * math.pi * s**2 / denom
     # --- Supersonic regime ---
     elif mach >= CNA_SUPERSONIC_MACH:
+        if fin_k_out_of_range(mach):
+            _warn_fin_k_clamped(mach)
         k1 = FIN_K1.get_value(mach)
         k2 = FIN_K2.get_value(mach)
         k3 = FIN_K3.get_value(mach)

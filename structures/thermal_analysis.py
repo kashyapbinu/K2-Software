@@ -88,24 +88,27 @@ def local_reynolds(rho: float, V: float, x: float, T_ref: float) -> float:
 
 def stagnation_heat_flux(T_inf: float, rho: float, V: float,
                          nose_radius: float, wall_temp: float) -> float:
-    """Stagnation-point heating using Sutton-Graves correlation (W/m²).
+    """Stagnation-point heating using the Sutton-Graves correlation (W/m²).
 
-    q_stag = K × √(ρ∞ / R_n) × (h₀ - h_w)
-    where K = 1.7415e-4 kg^0.5/m for air (earth entry)
+    Cold-wall correlation:
+        q_cold = K_SG × √(ρ∞ / R_n) × V³ ,   K_SG = 1.7415e-4 kg^0.5/m (air)
 
-    Simplified engineering form:
-    q_stag ≈ K_SG × √(ρ∞ / R_n) × V³
-    where K_SG ≈ 1.7415e-4 (air, moderate velocities)
+    Hot-wall correction — the correlation's driving potential is the enthalpy
+    difference, and the V³ form is its h_w → 0 limit (h₀ ≈ V²/2):
+        q_stag = q_cold × (h₀ - h_w) / h₀
+        h₀ = cp × T∞ + V²/2 ,  h_w = cp × T_wall
 
-    For rocket-scale velocities, we use the enthalpy-difference form:
-    q_stag = C_stag × √(ρ∞ / R_n) × (h_0 - h_w)
-    h_0 = cp × T_inf + V²/2
-    h_w = cp × T_wall
+    K_SG is calibrated for the V³ form, so it must multiply V³ and not the
+    enthalpy difference on its own: [K_SG]·[√(ρ/R_n)]·[Δh] works out to
+    kg/(m·s²) = Pa, not W/m². Dropping that velocity factor under-predicted
+    stagnation heating by ~4000× at Mach 5, and the ``h₀ ≤ h_w`` guard below
+    then returned exactly 0 for any wall above ~430 K at Mach 2.
 
     Ref: Sutton & Graves, NASA TR R-376, 1971
          Anderson, Hypersonic Gas Dynamics, Eq. 6.57
     """
-    if nose_radius <= 0 or V < 1:
+    q_cold = stagnation_heat_flux_cold_wall(rho, V, nose_radius)
+    if q_cold <= 0.0:
         return 0.0
 
     cp_air = GAMMA * R_AIR / (GAMMA - 1)  # ~1004.5 J/(kg·K)
@@ -115,11 +118,22 @@ def stagnation_heat_flux(T_inf: float, rho: float, V: float,
     if h_0 <= h_w:
         return 0.0
 
-    # Sutton-Graves constant for air (N₂/O₂ mixture)
-    K_SG = 1.7415e-4  # kg^0.5 / m
+    return max(q_cold * (h_0 - h_w) / h_0, 0.0)   # hot-wall correction
 
-    q = K_SG * math.sqrt(rho / nose_radius) * (h_0 - h_w)
-    return max(q, 0.0)
+
+def stagnation_heat_flux_cold_wall(rho: float, V: float,
+                                   nose_radius: float) -> float:
+    """Cold-wall Sutton-Graves stagnation heat flux (W/m²).
+
+        q_cold = K_SG × √(ρ∞ / R_n) × V³
+
+    Split out so the wall-temperature solve can form the exact derivative
+    ∂q/∂T_w = −q_cold · cp / h₀ instead of a secant approximation.
+    """
+    if nose_radius <= 0 or V < 1 or rho <= 0:
+        return 0.0
+    K_SG = 1.7415e-4  # kg^0.5 / m — air (N₂/O₂), calibrated for the V³ form
+    return K_SG * math.sqrt(rho / nose_radius) * V ** 3
 
 
 def convective_heat_flux(T_inf: float, rho: float, V: float, mach: float,
@@ -364,13 +378,16 @@ def analyze_thermal(assembly, mach: float, altitude_m: float,
                 residual = q_stag - q_rad
                 if abs(residual) < 1.0:
                     break
-                # Simple damped iteration
+                # Newton step with the EXACT derivative of both terms.
+                # q_stag = q_cold·(h₀ - cp·T_w)/h₀  →  ∂q/∂T_w = -q_cold·cp/h₀
                 dq_rad_dT = 4.0 * emissivity * SIGMA_SB * T_wall_stag ** 3
                 cp_air = GAMMA * R_AIR / (GAMMA - 1)
-                dq_stag_dT = -stagnation_heat_flux(T_inf, rho, V, nose_radius, T_wall_stag) / max(T_stag - T_wall_stag, 1.0) if T_stag > T_wall_stag else 0
+                h_0_stag = cp_air * T_inf + 0.5 * V ** 2
+                q_cold = stagnation_heat_flux_cold_wall(rho, V, nose_radius)
+                dq_stag_dT = (-q_cold * cp_air / h_0_stag) if h_0_stag > 0 else 0.0
                 deriv = dq_stag_dT - dq_rad_dT
                 step = residual / deriv if abs(deriv) > 1e-6 else 0.0
-                step = max(min(step, 50.0), -50.0)
+                step = max(min(step, 200.0), -200.0)
                 T_wall_stag -= step
                 T_wall_stag = max(T_wall_stag, T_inf)
 

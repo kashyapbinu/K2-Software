@@ -139,13 +139,40 @@ BLUNT_TABLE = LinearInterpolator(_blunt_x, _blunt_y)
 GAMMA_AIR = 1.4
 CNA_SUPERSONIC_MACH = 1.5
 
+# Top of the tabulated range. ``LinearInterpolator`` clamps outside its range,
+# so whatever this is, the coefficients freeze above it.
+#
+# This used to be 4.9 — ``range(int((5.0 - 1.5) * 10))`` walks 1.5 to 4.9, one
+# step short of the 5.0 the docstring claimed. Freezing there over-predicts fin
+# lift badly, because K1 = 2/beta keeps falling in reality while the frozen
+# value does not: 1.23x high at M6, 1.65x at M8, 2.5x at M12. High-power
+# flights in this tool reach M4.7, right at that edge.
+#
+# The coefficients are closed-form and stay finite and smooth well past this,
+# so the table now runs to M10 — beyond anything a rocket here will fly — and
+# ``fin_k_out_of_range`` reports the clamp instead of it happening silently.
+FIN_K_TABLE_MAX_MACH = 10.0
+_FIN_K_STEP = 0.1
+
+
 def _build_fin_k_tables():
-    """Pre-compute K1, K2, K3 tables for supersonic fin CN_alpha."""
-    n = int((5.0 - CNA_SUPERSONIC_MACH) * 10)
+    """Pre-compute K1, K2, K3 tables for supersonic fin CN_alpha.
+
+    Busemann second-order supersonic airfoil theory:
+
+        CN = K1·α + K2·α² + K3·α³
+
+    Accuracy note: this is a small-perturbation expansion about the linearised
+    (Ackeret) solution. It is at its best for thin sections at modest α through
+    the low supersonic range, and degrades as the second-order terms grow — at
+    5° AoA they add 8% of the linear term at M1.5 but 41% by M10. Numbers above
+    roughly M5 should be read as extrapolation, not prediction.
+    """
+    n = int(round((FIN_K_TABLE_MAX_MACH - CNA_SUPERSONIC_MACH) / _FIN_K_STEP)) + 1
     x = []
     k1_vals, k2_vals, k3_vals = [], [], []
     for i in range(n):
-        M = CNA_SUPERSONIC_MACH + i * 0.1
+        M = CNA_SUPERSONIC_MACH + i * _FIN_K_STEP
         beta = math.sqrt(max(1e-12, M * M - 1.0))
         x.append(M)
         k1_vals.append(2.0 / beta)
@@ -166,6 +193,12 @@ def _build_fin_k_tables():
 
 
 FIN_K1, FIN_K2, FIN_K3 = _build_fin_k_tables()
+
+
+def fin_k_out_of_range(mach: float) -> bool:
+    """True when *mach* is past the tabulated range, so K1/K2/K3 are clamped
+    and the fin normal force no longer falls off with Mach."""
+    return mach > FIN_K_TABLE_MAX_MACH
 
 
 # ── Ogive/Conical Nose Pressure Interpolator ──────────────────────────────────
