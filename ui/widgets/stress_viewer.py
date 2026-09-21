@@ -272,6 +272,7 @@ class StressViewer(QWidget):
         self._region_meshes: dict[str, object] = {}
         self._total_len = 1.0
         self._body_condition: dict = {}
+        self._fin_stress_pa = 0.0     # fin root bending from fin_analysis
         self._yield_pa = 276e6
         self._mode = "Von Mises Stress"
         self._component = "Entire Vehicle"
@@ -352,6 +353,34 @@ class StressViewer(QWidget):
             pass
 
     # ── Field synthesis ───────────────────────────────────────────────────
+    @staticmethod
+    def _bc_amplification(bc):
+        """Kt · DAF that the condition solver folded into its von Mises.
+
+        compute_for_condition reports σ_vm = Kt·DAF·√(σx² − σx·σy + σy² + 3τ²)
+        but only exposes the raw components. Rebuilding the field from the
+        components alone dropped that factor, so the contour peak read up to
+        2.3× below the number in the stress panel. Recover the factor from
+        the ratio of reported σ_vm to the raw combination of the components."""
+        sx = bc.get("axial", 0.0) + bc.get("longitudinal", 0.0) + bc.get("bending", 0.0) \
+            + bc.get("thermal", 0.0)
+        sy = bc.get("hoop", 0.0)
+        tau = bc.get("shear", 0.0)
+        raw = math.sqrt(max(sx * sx - sx * sy + sy * sy + 3 * tau * tau, 0.0))
+        vm = bc.get("von_mises", 0.0)
+        if raw <= 0.0 or vm <= 0.0:
+            return 1.0
+        return max(vm / raw, 1.0)
+
+    def _fin_span_frac(self, mesh):
+        """0 at the fin root (min radius) → 1 at the tip (max radius)."""
+        pts = mesh.points
+        rr = np.hypot(pts[:, 0], pts[:, 1])
+        r0, r1 = float(rr.min()), float(rr.max())
+        if r1 - r0 < 1e-9:
+            return np.zeros_like(rr)
+        return np.clip((rr - r0) / (r1 - r0), 0, 1)
+
     def _field_for_mesh(self, mesh, region, mode, bc):
         pts = mesh.points
         L = max(self._total_len, 1e-9)
@@ -361,11 +390,23 @@ class StressViewer(QWidget):
         peak = bc.get(_MODE_KEY[mode], 0.0)
 
         if mode == "Safety Factor":
-            vm_local = self._vm_field(zf, theta, region, bc)
+            vm_local = self._vm_field(zf, theta, region, bc, mesh)
             sf = np.where(vm_local > 1e3, self._yield_pa / np.maximum(vm_local, 1e3), 10.0)
             return np.clip(sf, 0, 10)
         if mode == "Von Mises Stress":
-            return self._vm_field(zf, theta, region, bc) / 1e6
+            return self._vm_field(zf, theta, region, bc, mesh) / 1e6
+        if region == "fins":
+            # Fins carry their own load path (root bending from fin_analysis);
+            # the body's axial / hoop / thermal do not flow through them.
+            if mode == "Thermal Stress":
+                return np.full(len(zf), peak * 0.85 / 1e6)
+            if mode == "Hoop Stress":
+                return np.zeros(len(zf))
+            sf_span = self._fin_span_frac(mesh)
+            fin_peak = self._fin_stress_pa if self._fin_stress_pa > 0 else peak
+            if mode == "Shear Stress":
+                return fin_peak * 0.25 * (1.0 - sf_span) / 1e6
+            return fin_peak * (1.0 - sf_span) ** 2 / 1e6
         if mode == "Axial Stress":
             # Compressive load enters at the motor (aft) and is reacted by the
             # inertia of everything forward of each station, so axial stress is
@@ -379,29 +420,47 @@ class StressViewer(QWidget):
             shape = np.exp(-3.0 * zf) * 0.8 + 0.2
         else:
             shape = np.ones_like(zf)
-        field = peak * shape / 1e6
-        if region == "fins":
-            field = field * 1.4
-        return field
+        return peak * shape / 1e6
 
-    def _vm_field(self, zf, theta, region, bc):
-        axial = bc.get("axial", 0.0); hoop = bc.get("hoop", 0.0)
+    def _vm_field(self, zf, theta, region, bc, mesh=None):
+        if region == "fins":
+            # Fin von Mises = root bending from fin_analysis (uniaxial plate
+            # bending, max at the root, ∝ (1 − η)² for a distributed load).
+            # Was 1.3× the BODY field — an invented number that put the
+            # "Peak" marker on the fins regardless of the fin result.
+            fin_peak = self._fin_stress_pa
+            if fin_peak <= 0 or mesh is None:
+                fin_peak = bc.get("von_mises", 0.0) * 0.6
+                return np.full(len(zf), fin_peak)
+            return fin_peak * (1.0 - self._fin_span_frac(mesh)) ** 2
+
+        axial = bc.get("axial", 0.0) + bc.get("longitudinal", 0.0) + bc.get("thermal", 0.0)
+        hoop = bc.get("hoop", 0.0)
         bend = bc.get("bending", 0.0); shear = bc.get("shear", 0.0)
+        amp = self._bc_amplification(bc)
         # Bending moment of the airframe as a free-free beam under the aero
-        # normal force at the CP balanced by distributed inertia: the moment is
-        # zero at the free ends (nose tip, tail) and peaks near mid-body. A
-        # parabolic envelope captures that without the old gaussian that
-        # zeroed the entire nose. The von Mises magnitude is the same on the
-        # tension and compression fibres, so no cos(theta) lobing is applied
-        # (that term only created spurious circumferential stripes).
+        # normal force at the CP balanced by distributed inertia: zero at the
+        # free ends (nose tip, tail), peak near mid-body → parabolic envelope.
+        # Bending is a signed fibre stress: it ADDS to the compressive axial
+        # on one side of the tube (cos θ = −1) and subtracts on the other, so
+        # the compression-side fibre carries |σ_ax + σ_b| and the tension side
+        # |σ_ax − σ_b|. Summing both as positive everywhere (the old field)
+        # over-stated the tension side.
         bshape = 4.0 * zf * (1.0 - zf)
-        # Axial: low at the nose tip, accumulating toward the aft base.
-        sx = axial * (0.2 + 0.8 * zf) + bend * bshape
+        # Axial compression: low at the nose tip, accumulating toward the aft
+        # base where the thrust enters.
+        sx = -axial * (0.2 + 0.8 * zf) - bend * bshape * np.cos(theta)
         sy = hoop * np.where((zf > 0.2) & (zf < 0.85), 1.0, 0.5)
         tau = shear * (0.4 + 0.6 * zf)
-        vm = np.sqrt(np.abs(sx ** 2 - sx * sy + sy ** 2 + 3 * tau ** 2))
-        if region == "fins":
-            vm = vm * 1.3   # root-bending concentration at the fin/body joint
+        vm = amp * np.sqrt(np.abs(sx ** 2 - sx * sy + sy ** 2 + 3 * tau ** 2))
+        # The panel's σ_vm is the critical-section value with every component
+        # at its peak. The shape functions never coincide (axial peaks aft,
+        # bending mid-body), so pin the field maximum to the reported peak —
+        # the contour then agrees with the number on screen.
+        target = bc.get("von_mises", 0.0)
+        vmax = float(vm.max()) if len(vm) else 0.0
+        if target > 0 and vmax > 0:
+            vm = vm * (target / vmax)
         return vm
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -410,11 +469,15 @@ class StressViewer(QWidget):
             return
         self._region_meshes, self._total_len = build_rocket_regions(state, assembly)
 
-    def set_result(self, state, assembly, body_condition: dict, yield_pa: float):
+    def set_result(self, state, assembly, body_condition: dict, yield_pa: float,
+                   fin_stress_pa: float = 0.0):
+        """``fin_stress_pa`` = fin root bending stress (Pa) from
+        structures.workstation.fin_analysis; drives the fin region's field."""
         if not _PYVISTA or self.plotter is None:
             return
         self._region_meshes, self._total_len = build_rocket_regions(state, assembly)
         self._body_condition = body_condition or {}
+        self._fin_stress_pa = float(fin_stress_pa or 0.0)
         self._yield_pa = yield_pa or 276e6
         if hasattr(self, "_empty"):
             self._empty.hide()

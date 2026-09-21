@@ -11,8 +11,8 @@ Two classes of check
    (e.g. stress above yield with zero displacement, negative margin while
    SF > 1, buckling loads far above the material's own strength).
 2. Range plausibility — values outside the bands known for aluminium
-   airframes (Mode-1 20–80 Hz, tip deflection 0.5–20 mm, von Mises
-   20–250 MPa, SF 1.2–3.0, wall temperature 300–700 K).
+   airframes (free-free Mode-1 100–500 Hz, end deflection 0.02–2 mm,
+   von Mises 20–250 MPa, SF 1.2–3.0, wall temperature 300–700 K).
 
 Each warning is a dataclass with a severity so the UI can colour it.
 """
@@ -86,16 +86,18 @@ def validate_report(state, rep) -> list:
 
     # ── 2. Range plausibility (1–3 m aluminium) ──────────────────────────────
     if is_metal_small:
+        # Free-free first bending of a 1–3 m thin-wall aluminium tube sits in
+        # the low hundreds of Hz (cantilever would be ~6.4× lower).
         f1 = rep.modal.f1_hz
-        if f1 > 0 and not (20 <= f1 <= 80):
-            sev = "warn" if 10 <= f1 <= 120 else "error"
+        if f1 > 0 and not (100 <= f1 <= 500):
+            sev = "warn" if 50 <= f1 <= 800 else "error"
             w.append(Warning_(sev,
-                f"Mode-1 frequency {f1:.0f} Hz outside the 20–80 Hz band typical "
-                f"for a {L:.1f} m aluminium airframe."))
-        if defl > 0 and not (0.5 <= defl <= 20):
+                f"Mode-1 frequency {f1:.0f} Hz outside the 100–500 Hz band typical "
+                f"for a {L:.1f} m free-free aluminium airframe."))
+        if defl > 0 and not (0.02 <= defl <= 2.0):
             w.append(Warning_("warn",
-                f"Tip deflection {defl:.2f} mm outside the 0.5–20 mm band for a "
-                f"stiff metal airframe."))
+                f"Elastic end deflection {defl:.3f} mm outside the 0.02–2 mm band "
+                f"for a stiff metal airframe in free flight."))
         if vm > 0 and not (20e6 <= vm <= 250e6):
             sev = "info" if vm < 20e6 else "warn"
             note = "very lightly loaded / overbuilt" if vm < 20e6 else "approaching limits"

@@ -7,8 +7,8 @@ so the shape matches everywhere.
 
 Renders a translucent undeformed "ghost" plus the deformed body coloured by
 displacement magnitude (mm), with a user-selectable exaggeration factor.
-The deflection shape is a cantilever bend (fixed at the aft end, growing
-toward the nose) scaled to the analysed maximum displacement.
+The deflection shape is a free-free bow (both ends bending relative to
+mid-body, as in flight) scaled to the analysed maximum displacement.
 """
 from __future__ import annotations
 
@@ -106,9 +106,14 @@ class DeformationViewer(QWidget):
         base = self._base
         pts = base.points
         L = self._total_len
-        # Cantilever bend: fixed at aft (z=0), grows toward nose (z=L).
+        # Free-free bow (matches structures.workstation.beam_deflection):
+        # the aero side load is reacted by distributed inertia, so both ends
+        # deflect relative to mid-body. Each half is a cantilever of length
+        # L/2 under uniform load, δ(ξ) ∝ ξ²(6 − 4ξ + ξ²), ξ = distance from
+        # mid-body as a fraction of L/2. 0 at centre → 1 at nose and tail.
         zf = np.clip(pts[:, 2] / L, 0, 1)
-        dmag = zf ** 2                                  # 0 at tail → 1 at nose
+        xi = np.abs(2.0 * zf - 1.0)
+        dmag = xi ** 2 * (6.0 - 4.0 * xi + xi ** 2) / 3.0
 
         # Visual amplitude = true deflection × exaggeration, but a stiff metal
         # airframe deflects <1 mm — invisible on a metre-scale model. So when a
