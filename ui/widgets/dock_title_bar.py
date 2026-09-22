@@ -5,11 +5,14 @@ Qt's stock dock buttons are 10 px pixmaps that all but vanish on a dark
 panel. This bar draws the caption plus proper 22 px icon buttons from the
 shared icon set, and re-themes itself with the rest of the UI (``retheme``
 is picked up by ``theme.restyle_widgets``).
+
+``bind_toggle_action`` ties a dock to a checkable menu/toolbar action.
 """
 
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLabel, QToolButton, QDockWidget
 
 from ui import theme
@@ -92,3 +95,32 @@ def install(dock: QDockWidget, title: str = None) -> DockTitleBar:
     bar = DockTitleBar(dock, title)
     dock.setTitleBarWidget(bar)
     return bar
+
+
+def bind_toggle_action(dock: QDockWidget, action: QAction,
+                       on_open_changed=None) -> None:
+    """Drive *dock* from a checkable menu/toolbar *action*.
+
+    The check mark tracks whether the dock is OPEN, via Qt's own
+    toggleViewAction. It must not follow ``visibilityChanged``: that also
+    fires when the dock is merely a background tab of a tabified group, and
+    feeding it back into ``setVisible`` closed the dock outright — tabify the
+    console with the AI panel, click one tab, and the other one was gone.
+
+    ``on_open_changed(is_open)`` runs when the dock is opened or closed (by
+    the action, its title-bar button or code), never on a tab switch.
+
+    Call it after the dock's initial visibility is set: a dock hidden before
+    its window is first shown gets no hide event to sync the action from.
+    """
+    def _set_open(checked: bool):
+        dock.setVisible(checked)
+        if checked:
+            dock.raise_()          # bring a tabified dock to the front
+
+    view = dock.toggleViewAction()
+    action.triggered.connect(_set_open)      # user activation only
+    view.toggled.connect(action.setChecked)
+    if on_open_changed is not None:
+        view.toggled.connect(on_open_changed)
+    action.setChecked(not dock.isHidden())

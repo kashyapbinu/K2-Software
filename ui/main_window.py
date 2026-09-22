@@ -22,7 +22,8 @@ from avionics.flight_computer.flight_computer import FlightComputer
 from ui.toolbar import MainToolbar
 from ui.console_panel import ConsolePanel
 from ui.icons import icon
-from ui.widgets.dock_title_bar import install as install_dock_title_bar
+from ui.widgets.dock_title_bar import (bind_toggle_action,
+                                      install as install_dock_title_bar)
 from ui import theme
 from ui import settings
 from ui.workspaces.design_workspace import DesignWorkspace
@@ -210,9 +211,8 @@ class MainWindow(QMainWindow):
         install_dock_title_bar(dock)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
         self.console_dock = dock
-        self.act_toggle_console.toggled.connect(dock.setVisible)
-        dock.visibilityChanged.connect(self.act_toggle_console.setChecked)
-        
+        bind_toggle_action(dock, self.act_toggle_console)
+
         # Connect engine log messages to the console
         def _route_log(msg):
             level = "INFO"
@@ -239,18 +239,13 @@ class MainWindow(QMainWindow):
         dock.setMinimumWidth(320)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         self.ai_dock = dock
-        act = self.toolbar.action_ai
-        act.toggled.connect(dock.setVisible)
-        dock.visibilityChanged.connect(act.setChecked)
+        dock.setVisible(bool(settings.get("ai/panel_visible")))
         # Persist only genuine user toggles: the dock also reports hidden while
         # the main window is not yet shown and again during shutdown.
         def _remember(v):
             if self.isVisible() and not getattr(self, "_closing", False):
                 settings.set("ai/panel_visible", bool(v))
-        act.toggled.connect(_remember)
-        visible = bool(settings.get("ai/panel_visible"))
-        dock.setVisible(visible)
-        act.setChecked(visible)
+        bind_toggle_action(dock, self.toolbar.action_ai, on_open_changed=_remember)
 
     def _setup_status_bar(self):
         status = QStatusBar()
