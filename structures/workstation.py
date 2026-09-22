@@ -1081,6 +1081,35 @@ class WorkstationReport:
     verdict_color: str = "#8b949e"
 
 
+def body_condition_from_fem(result) -> dict:
+    """A static FEMResult in the shape of a compute_for_condition() result.
+
+    full_analysis(), the PDF report, the physics checks and the 3D stress
+    view all read the body condition by those keys. The Structures workspace
+    built this dict inline with the stress components only, so full_analysis
+    raised KeyError('safety_factor') after every CalculiX run and the
+    workstation tabs never updated (and before that, the report printed an
+    FEM run's safety factor as 0.00).
+
+    The margin follows the workstation convention MoS = SF − 1, as
+    compute_for_condition reports it. The FEM result's own margin divides by
+    FEMConfig.safety_factor_required (2.0) first, which the physics checks
+    would flag as a negative margin at SF > 1.
+    """
+    vm = result.max_von_mises
+    # No stress → no failure. The analytical FEM fallback leaves SF at 0.0 in
+    # that case, which would read as the worst possible result.
+    sf = result.safety_factor if vm > 0 else float("inf")
+    return {
+        "axial": result.max_axial_stress, "hoop": result.max_hoop_stress,
+        "bending": result.max_bending_stress, "shear": result.max_shear_stress,
+        "thermal": result.max_thermal_stress, "von_mises": vm,
+        "safety_factor": sf,
+        "margin_of_safety": sf - 1.0,
+        "yield_utilization": result.yield_utilization,
+    }
+
+
 def full_analysis(state, assembly, history, material_name: str,
                   condition: str = "Max-Q",
                   body_condition: Optional[dict] = None) -> WorkstationReport:

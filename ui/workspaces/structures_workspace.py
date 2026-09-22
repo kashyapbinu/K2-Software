@@ -1069,11 +1069,7 @@ class StructuresWorkspace(QWidget):
                     self._temp_plot.update_plot(txs, tys, "Wall Temperature", "Position (m)", "T (K)", theme.ERR_DEEP)
 
             # Feed FEM peak stresses into the 3D stress viewer + workstation suite
-            self._last_bc = {
-                "axial": result.max_axial_stress, "hoop": result.max_hoop_stress,
-                "bending": result.max_bending_stress, "shear": result.max_shear_stress,
-                "thermal": result.max_thermal_stress, "von_mises": result.max_von_mises,
-            }
+            self._last_bc = wks.body_condition_from_fem(result)
             self._run_workstation(body_condition=self._last_bc)
             self._update_stress3d()
 
