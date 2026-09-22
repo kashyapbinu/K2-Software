@@ -58,7 +58,11 @@ class AssistantSession:
         self.history.append({"role": "user", "content": user_text})
         tools = self.tool_specs if (self.tool_executor and self.provider.supports_tools) else None
 
-        for _round in range(MAX_TOOL_ROUNDS + 1):
+        # Rounds 0..MAX-1 execute tools. Round MAX refuses its calls with a
+        # "limit reached" result, and round MAX+1 is the model's chance to
+        # answer from what it has. Without that last round the refusal was
+        # recorded but never sent back, so the turn ended with no answer.
+        for _round in range(MAX_TOOL_ROUNDS + 2):
             text_parts: list[str] = []
             final: Chunk | None = None
             try:
@@ -108,6 +112,9 @@ class AssistantSession:
                 self.history.append({"role": "tool", "tool_call_id": c.id,
                                      "name": c.name, "content": result})
                 yield ("tool_result", {"name": c.name, "result": result})
+        # Still calling tools after being told the budget was spent.
+        yield ("error", f"Stopped after {MAX_TOOL_ROUNDS} rounds of tool calls "
+                        "without a final answer.")
         yield ("done", None)
 
     def one_shot(self, instruction: str) -> Iterator[tuple[str, object]]:

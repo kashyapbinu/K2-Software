@@ -15,7 +15,7 @@ import threading
 
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 
-from ai.context import summarize_state, last_flight_summary
+from ai.context import summarize_state, last_flight_summary, liftoff_mass
 
 logger = logging.getLogger("K2.AI.Tools")
 
@@ -329,7 +329,7 @@ class ToolBridge(QObject):
             ws._load_real_curve(m.get("motor_id", ""), m["total_impulse"])
             ws._update_display()
         s = self.mw.engine.state
-        liftoff = s.dry_mass + s.propellant_mass_initial
+        liftoff = liftoff_mass(s)
         return {"installed": m["designation"], "manufacturer": m.get("manufacturer"),
                 "total_impulse_Ns": m["total_impulse"], "avg_thrust_N": m["avg_thrust"],
                 "thrust_to_weight": round(s.motor_avg_thrust / (liftoff * 9.80665), 2) if liftoff else None,

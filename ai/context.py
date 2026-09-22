@@ -20,6 +20,18 @@ def _f(v, nd=3):
     return round(v, nd)
 
 
+def liftoff_mass(state) -> float:
+    """Pad mass: airframe + motor casing + full propellant load.
+
+    The casing (``motor_dry_mass``) rides along the whole flight and on a
+    high-power motor weighs about as much as the propellant (median 0.95× for
+    the catalog's L motors). Leaving it out overstated thrust-to-weight by 14%
+    for an L1090W on a 6 kg airframe.
+    """
+    return ((state.dry_mass or 0.0) + (getattr(state, "motor_dry_mass", 0.0) or 0.0)
+            + (state.propellant_mass_initial or state.propellant_mass or 0.0))
+
+
 def _stability_verdict(margin_cal: float) -> str:
     if margin_cal is None:
         return "unknown"
@@ -57,7 +69,7 @@ def summarize_state(state, assembly=None) -> dict:
     mass = {
         "dry_mass_kg": _f(state.dry_mass),
         "propellant_mass_kg": _f(state.propellant_mass_initial or state.propellant_mass),
-        "liftoff_mass_kg": _f((state.dry_mass or 0) + (state.propellant_mass_initial or state.propellant_mass or 0)),
+        "liftoff_mass_kg": _f(liftoff_mass(state)),
         "cg_from_nose_m": _f(state.cg),
         "cp_from_nose_m": _f(state.cp),
         "stability_margin_cal": margin,
@@ -72,7 +84,7 @@ def summarize_state(state, assembly=None) -> dict:
         "burn_time_s": _f(state.motor_burn_time, 2),
         "isp_s": _f(state.motor_isp, 1),
     }
-    liftoff = (state.dry_mass or 0) + (state.propellant_mass_initial or 0)
+    liftoff = liftoff_mass(state)
     if liftoff > 0 and state.motor_avg_thrust:
         motor["thrust_to_weight"] = _f(state.motor_avg_thrust / (liftoff * 9.80665), 2)
 
