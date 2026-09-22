@@ -1,11 +1,23 @@
-PyQt6>=6.5
+# ── Pinned: the frozen build's native/ABI-coupled stack ──────────────────────
+# These ship as compiled extension modules inside the PyInstaller bundle and
+# must agree with each other at the C level. They were unpinned until 0.1.10,
+# so every CI build re-resolved them: v0.1.9 shipped numpy 2.4.6 + vtk 9.7.0 +
+# pyvista 0.49.0 -- none of them the versions this app is developed and
+# validated against -- and the installed app rendered every 3D viewport black.
+# Bump these deliberately, together, and re-run tests/validation after.
+PyQt6>=6.8,<6.9
 # Cinematic flight view (three.js in QWebEngineView). The Qt6 runtime wheels
 # must version-match the PyQt6 wheels (keep both on the same 6.x line).
-PyQt6-WebEngine>=6.5
-pyvista>=0.43
-pyvistaqt>=0.11
-numpy>=1.24
-scipy>=1.10
+PyQt6-WebEngine>=6.8,<6.9
+pyvista==0.48.0
+pyvistaqt==0.11.4
+# Pulled in transitively by pyvista, but pinned explicitly: leaving it implicit
+# is what let CI drift to vtk 9.7.0 while development ran on 9.6.1.
+vtk==9.6.1
+# numpy 2 removed np.trapz (physics/propulsion.py) and changes the ABI that the
+# vtk/scipy wheels above are built against. Staying on the 1.x line.
+numpy>=1.24,<2
+scipy>=1.10,<2
 scikit-learn>=1.3
 matplotlib>=3.7
 qtawesome>=1.3

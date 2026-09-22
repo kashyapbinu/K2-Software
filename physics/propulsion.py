@@ -5,6 +5,13 @@ import math, numpy as np, logging
 from core.constants import G_EARTH
 logger = logging.getLogger("K2.Propulsion")
 
+# numpy 2 renamed trapz -> trapezoid and dropped the old name. requirements.txt
+# pins numpy<2, so this only matters the day that pin moves; resolve it once
+# here rather than leaving an AttributeError waiting in the thrust-curve path.
+# Public: the propulsion workspace integrates its own thrust curves with it.
+trapezoid = getattr(np, "trapezoid", None) or np.trapz
+
+
 def compute_isp(total_impulse, propellant_mass):
     return total_impulse / (propellant_mass * G_EARTH) if propellant_mass > 0 else 0.0
 
@@ -34,7 +41,7 @@ def generate_thrust_curve(avg_thrust, max_thrust, burn_time, num_points=200):
     f_interp = np.interp(t_interp, t, f)
     # Normalize to the true total impulse (avg_thrust × burn_time); the raw
     # trapezoid integrates ~8% high when max_thrust = 1.4 × avg_thrust.
-    impulse = np.trapz(f_interp, t_interp)
+    impulse = trapezoid(f_interp, t_interp)
     if impulse > 0:
         f_interp *= (avg_thrust * burn_time) / impulse
     return t_interp, f_interp

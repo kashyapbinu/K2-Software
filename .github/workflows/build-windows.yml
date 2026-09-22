@@ -30,7 +30,10 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.11"
+          # Match the development environment (3.12). CI built 0.1.9 on 3.11
+          # while dev ran 3.12, so the installer dropped cp311 extension
+          # modules beside the cp312 ones an earlier release had left behind.
+          python-version: "3.12"
 
       - name: Install deps
         run: |

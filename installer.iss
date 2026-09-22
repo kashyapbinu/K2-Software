@@ -8,7 +8,7 @@
 ; user gets a normal "installed application that opens as an app" experience.
 
 #define MyAppName "K2 AeroSim"
-#define MyAppVersion "0.1.9"
+#define MyAppVersion "0.1.10"
 #define MyAppPublisher "K2 AeroSim"
 #define MyAppURL "https://github.com/kashyapbinu/K2-Software"
 #define MyAppExeName "K2.exe"
@@ -44,6 +44,19 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"
+
+[InstallDelete]
+; Wipe the previous bundle before copying the new one. Without this, Inno only
+; OVERWRITES files and never removes ones the new build no longer ships, so every
+; release layered on top of the last: 0.1.9 shipped python311.dll next to an old
+; python312.dll, 179 cp311 .pyd files next to 229 cp312 ones, and three versions
+; each of vtk and pyvista. The frozen app then loaded extension modules built for
+; two different Python versions, VTK failed to initialise, and every 3D viewport
+; rendered black.
+;
+; _internal holds the whole PyInstaller payload, so clearing it is enough; user
+; data lives in %LOCALAPPDATA%, not {app}, and is untouched.
+Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
 ; Pull in the entire one-dir bundle produced by PyInstaller.

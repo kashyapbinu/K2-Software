@@ -9,7 +9,8 @@ from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QGroupBox,
     QPushButton, QDoubleSpinBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from ui.widgets.plot_widget import PlotWidget
-from physics.propulsion import compute_isp, compute_mass_flow_rate, estimate_chamber_pressure, generate_thrust_curve
+from physics.propulsion import (compute_isp, compute_mass_flow_rate, estimate_chamber_pressure,
+                                generate_thrust_curve, trapezoid)
 from core.staging import build_stages_config
 
 # Motor parameter keys stored per-stage (mirror of the scalar state fields).
@@ -20,6 +21,7 @@ _MOTOR_KEYS = ("motor_designation", "motor_avg_thrust", "motor_max_thrust",
 from ui import theme
 
 logger = logging.getLogger("K2.PropulsionWS")
+
 
 
 class ValueLabel(QLabel):
@@ -366,7 +368,7 @@ class PropulsionWorkspace(QWidget):
 
         # Integrate for total impulse; average = impulse/burn (exact, not
         # sample-mean which depends on time spacing)
-        total_impulse = float(np.trapz(f, t))
+        total_impulse = float(trapezoid(f, t))
         avg_thrust = total_impulse / burn_time if burn_time > 0 else 0.0
         prop_mass = float(sim_data.get("prop_mass", 0.5))
 
