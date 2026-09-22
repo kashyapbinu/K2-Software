@@ -28,8 +28,8 @@ import numpy as np
 
 from core.constants import G_EARTH, gravity_at_altitude
 from environment.atmosphere_model import Atmosphere
-from core.flight_dynamics import (resolve_aero_frame, wrap_angle,
-                                  yaw_euler_rate)
+from core.flight_dynamics import (attitude_step_limit, resolve_aero_frame,
+                                  wrap_angle, yaw_euler_rate)
 from core.flight_phases import FlightPhase, PhaseManager
 from core.integrators import get_integrator
 from physics.aerodynamics import AeroModel, compute_pitching_moment_coefficient
@@ -105,6 +105,11 @@ class BatchSimConfig:
     dry_cg: float = 0.0
     cp: float = 0.0
     cd: float = 0.45
+    # The unperturbed value `cd` was drawn around. With a geometry aero model
+    # the drag comes from the model, and only the ratio cd / cd_nominal (a
+    # Monte Carlo or optimizer perturbation) is applied on top of it.
+    # 0 = no reference: the model's drag is used unscaled.
+    cd_nominal: float = 0.0
     motor_position: float = 0.0
     motor_length: float = 0.0
 
@@ -170,6 +175,7 @@ class BatchSimConfig:
             dry_cg=getattr(state, "dry_cg", 0.0),
             cp=state.cp,
             cd=getattr(state, "cd", 0.45),
+            cd_nominal=getattr(state, "cd", 0.45),
             motor_position=getattr(state, "motor_position", 0.0),
             motor_length=getattr(state, "motor_length", 0.0),
             # Motor
@@ -359,20 +365,19 @@ def run_batch_simulation(
         aero_model = None
 
     # ── Cd scale factor for MC perturbation ───────────────────────
-    # AeroModel computes Cd from geometry (skin friction, base drag, etc.)
-    # and ignores config.cd. To propagate Cd perturbations from Monte Carlo,
-    # we compute the ratio config.cd / aero_baseline_cd and scale all
-    # drag forces by this factor.
+    # AeroModel computes Cd from geometry (skin friction, base drag, etc.),
+    # exactly as the interactive engine does. config.cd only carries a
+    # perturbation, applied as its ratio to the value it was drawn around.
+    #
+    # This used to divide by the model's own Cd at M0.3, which re-normalised
+    # EVERY run — perturbed or not — to config.cd: the RocketState default
+    # 0.45, which nothing keeps in step with the geometry. The canonical
+    # rocket's drag came out ×0.905 (apogee +5.4% against the interactive
+    # sim), and every optimizer candidate's subsonic Cd was pinned to 0.45
+    # whatever its fins, nose or length.
     cd_scale = 1.0
-    if aero_model is not None and config.cd > 0.01:
-        try:
-            # Get baseline Cd at Mach 0.3 (representative subsonic flight)
-            aero_baseline = aero_model.compute(0.0, 0.3, 1000.0, 0.0, 100.0, config.cg)
-            aero_cd0 = aero_baseline.get("cd", 0)
-            if aero_cd0 > 0.01:
-                cd_scale = config.cd / aero_cd0
-        except Exception:
-            cd_scale = 1.0
+    if aero_model is not None and config.cd_nominal > 0.0:
+        cd_scale = config.cd / config.cd_nominal
 
     # ── Wind (proper pink-noise model, seeded for reproducibility) ─
     wind_seed = int(rng.integers(0, 2**31)) if seed is not None else None
@@ -426,6 +431,9 @@ def run_batch_simulation(
     # running max across ALL derivative evaluations — RK4 calls _derivatives
     # 4× per step, so capturing only the last stage missed the true peak.
     _peak_force_accel = 0.0
+    # Attitude stiffness inputs from the latest derivative evaluation, for the
+    # step-size limit in the main loop (as SimulationEngine keeps _last_aero).
+    _attitude = {"cn_alpha": 0.0, "q_dyn": 0.0, "margin": 0.0}
 
     result = BatchSimResult()
 
@@ -525,6 +533,9 @@ def run_batch_simulation(
             cn_total = aero.get("cn_total", 2.0)
             cmq = aero.get("cmq", -1.0)
             cp_now = aero["cp"]
+            _attitude["cn_alpha"] = cn_total
+            _attitude["q_dyn"] = q_dyn
+            _attitude["margin"] = cp_now - cg
             # Pitch and yaw built from one bearing-independent CNα plus the
             # body-frame incidence angles, each with rate damping. The old yaw
             # term was `-cm·sin(β)`; since the pitch `cm` already carries
@@ -698,6 +709,16 @@ def run_batch_simulation(
             # Growth limiter only during powered flight (coast can jump immediately)
             if in_powered_phase:
                 dt_candidates.append(1.5 * prev_dt)
+            # Limit by the attitude (weathercock) mode, ω_n·dt ≤ 0.5 — the same
+            # rule the interactive engine applies. The 5× coast step is only
+            # "smooth" once q has fallen: just after burnout it put ω·dt past
+            # RK4's stable range and the numerical tumble moved the landing
+            # point by up to 5× at the default dt.
+            if aero_model is not None:
+                dt_candidates.append(attitude_step_limit(
+                    _attitude["cn_alpha"], _attitude["q_dyn"], ref_area,
+                    _attitude["margin"],
+                    _estimate_inertia(state_vec[12], body_length)))
             # Minimum step floor
             dt_min = dt_base / 20.0
             adaptive_dt = max(dt_min, min(dt_candidates))

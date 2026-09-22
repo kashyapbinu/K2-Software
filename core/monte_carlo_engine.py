@@ -522,9 +522,12 @@ class MonteCarloEngine(QObject):
         cfg.dry_mass = max(0.05, base.dry_mass + _cg(rng, dm_sigma))
         params["dry_mass"] = cfg.dry_mass
 
-        # Drag coefficient: σ = base * pct / 100
+        # Drag coefficient: σ = base * pct / 100. The flight applies it as a
+        # ratio to base.cd on top of the geometry drag (cd_nominal), so the
+        # unperturbed run flies exactly the nominal sim's drag.
         cd_sigma = max(base.cd * mc.drag_coeff_uncertainty_pct / 100.0, 0.001)
         cfg.cd = max(0.05, min(2.0, base.cd + _cg(rng, cd_sigma)))
+        cfg.cd_nominal = base.cd
         params["cd"] = cfg.cd
 
         # Launch angle: σ = deg

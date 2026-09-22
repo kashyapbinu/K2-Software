@@ -10,6 +10,9 @@ Callers
 - ``core.batch_simulation.run_batch_simulation._derivatives`` (Monte Carlo,
   DOE, sensitivity, trade study, optimizer)
 
+Both integrators' adaptive step control also takes its attitude-mode limit
+from here (``attitude_step_limit``).
+
 Why this module exists
 ----------------------
 Both integrators used to resolve the relative wind like this::
@@ -60,13 +63,43 @@ from __future__ import annotations
 import math
 from typing import NamedTuple
 
-__all__ = ["AeroFrame", "resolve_aero_frame", "yaw_euler_rate", "wrap_angle"]
+__all__ = ["AeroFrame", "resolve_aero_frame", "yaw_euler_rate", "wrap_angle",
+           "attitude_step_limit"]
 
 
 # Floor on |cos(pitch)| in the yaw kinematic relation. The relation is exact;
 # this only bounds the integrand at the pole. 1e-6 measures isotropic to 0.1%
 # and is stable from dt = 1e-2 down to 5e-4.
 _YAW_KIN_EPS = 1e-6
+
+# Largest phase advance (rad) of the attitude oscillation per integration step.
+# RK4 goes unstable on an undamped oscillator at ω·dt ≈ 2.8 and is only
+# accurate well below that; 0.5 keeps the weathercock mode resolved.
+_ATTITUDE_PHASE_PER_STEP = 0.5
+
+
+def attitude_step_limit(cn_alpha: float, q_dyn: float, ref_area: float,
+                        static_margin_m: float, pitch_inertia: float) -> float:
+    """Largest time step (s) that keeps the weathercock (pitch/yaw) mode
+    resolved:
+
+        ω_n = √(CNα · q · A · |x_CP − x_CG| / I),      dt ≤ 0.5 / ω_n
+
+    The mode reaches ~75 rad/s at high q. A step past RK4's stable range for
+    it (ω·dt ≳ 2.8) makes the attitude oscillation grow numerically — a
+    tumble no physics asked for, which a stray gust is enough to start.
+
+    The batch integrator lacked this limit while stretching its coast step to
+    5× dt (50 ms at the default 10 ms): ω·dt ≈ 3–4 at burnout, and the
+    resulting numerical oscillation moved the landing point by up to 5×
+    (85° launch, no wind: 89 m against a converged 476 m).
+
+    Returns ``inf`` — no limit — when there is no restoring stiffness.
+    """
+    k = cn_alpha * q_dyn * ref_area * abs(static_margin_m)
+    if k <= 0.0 or pitch_inertia <= 0.0:
+        return math.inf
+    return _ATTITUDE_PHASE_PER_STEP / math.sqrt(k / pitch_inertia)
 
 
 def yaw_euler_rate(yaw_body_rate: float, pitch: float) -> float:

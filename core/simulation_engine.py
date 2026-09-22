@@ -31,8 +31,8 @@ from environment.atmosphere_model import Atmosphere
 from core.flight_phases import FlightPhase, PhaseManager
 from core.integrators import get_integrator
 from core.event_manager import EventManager, SimEvent
-from core.flight_dynamics import (resolve_aero_frame, wrap_angle,
-                                  yaw_euler_rate)
+from core.flight_dynamics import (attitude_step_limit, resolve_aero_frame,
+                                  wrap_angle, yaw_euler_rate)
 from core.history_manager import HistoryManager
 from physics.aerodynamics import (AeroModel, compute_drag_coefficient,
                                   compute_drag_force,
@@ -814,10 +814,10 @@ class SimulationEngine(QObject):
         # Limit growth to 1.5x previous step
         dt_candidates.append(1.5 * self._prev_dt)
         # Limit by the attitude (weathercock) oscillation period at the current
-        # dynamic pressure: ω_n = √(CNα·q·A·|CP−CG| / I). The pitch mode reaches
-        # ~75 rad/s at high q; a coarse user dt (e.g. 0.05 s) gives ω·dt≈3.8,
-        # beyond RK4's stable range → numerical tumbling that a stray gust
-        # triggers. Cap dt so ω_n·dt ≤ 0.5 (mode stays well-resolved).
+        # dynamic pressure, ω_n·dt ≤ 0.5 — shared with the batch integrator
+        # (core.flight_dynamics.attitude_step_limit). A coarse user dt (e.g.
+        # 0.05 s) otherwise gives ω·dt≈3.8 at high q, beyond RK4's stable
+        # range → numerical tumbling that a stray gust triggers.
         aero = getattr(self, "_last_aero", {})
         q_dyn = aero.get("q_dyn", 0.0)
         if q_dyn > 0 and self.aero_model is not None:
@@ -836,11 +836,8 @@ class SimulationEngine(QObject):
                 I_est = self.stage_mgr.pitch_inertia()
             else:
                 I_est = max(self._state_vec[12] * s.length ** 2 / 12.0, 1e-6)
-            K = cna * q_dyn * A_ref * margin
-            if K > 0:
-                wn = math.sqrt(K / I_est)
-                if wn > 0:
-                    dt_candidates.append(0.5 / wn)
+            dt_candidates.append(
+                attitude_step_limit(cna, q_dyn, A_ref, margin, I_est))
         # Minimum step floor
         dt_min = dt / 50.0
         adaptive_dt = max(dt_min, min(dt_candidates))
