@@ -285,6 +285,27 @@ def _geom_value(variables: dict, base, key: str, default: float) -> float:
         return default
 
 
+def design_value(design, key: str, fallback=None):
+    """A parameter of an evaluated design, whether or not it was optimised.
+
+    ``design.variables`` holds only the quantities the optimiser varied. The
+    rest of the rocket is on ``design.batch_config``, the configuration that
+    candidate was actually flown with. Reading ``variables`` alone made the
+    results panel report a 0 m diameter and "Motor N/A" for any run that did
+    not happen to vary them.
+
+    *fallback* (an object with the same attribute names, normally the rocket
+    state) covers a design that was never evaluated and so has no config.
+    Returns None when the value is not known anywhere.
+    """
+    value = (getattr(design, "variables", None) or {}).get(key)
+    if value is None:
+        value = getattr(getattr(design, "batch_config", None), key, None)
+    if value is None and fallback is not None:
+        value = getattr(fallback, key, None)
+    return value
+
+
 def validate_candidate(variables: dict, design_vars: list, base=None) -> tuple:
     """Validate that a candidate design is physically realisable.
 

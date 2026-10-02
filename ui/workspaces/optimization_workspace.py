@@ -1863,12 +1863,12 @@ class OptimizationWorkspace(QWidget):
         px, py = pick["x"][idx], pick["y"][idx]
         m = ax.scatter([px], [py], s=180, facecolors="none",
                        edgecolors=theme.ACCENT, linewidths=2.0, zorder=6)
-        v = design.variables
         mc = design.mc_stats or {}
         txt = (f"{pick['k1'].replace('_', ' ')}: {px:.2f}\n"
                f"{pick['k2'].replace('_', ' ')}: {py:.2f}\n"
-               f"Ø {v.get('diameter', 0):.3f} m · L {v.get('length', 0):.2f} m\n"
-               f"mass {v.get('dry_mass', 0):.2f} kg · "
+               f"Ø {self._design_text(design, 'diameter', '{:.3f} m')} · "
+               f"L {self._design_text(design, 'length', '{:.2f} m')}\n"
+               f"mass {self._design_text(design, 'dry_mass', '{:.2f} kg')} · "
                f"apogee {mc.get('mean_apogee', 0):.0f} m")
         ann = ax.annotate(txt, (px, py), textcoords="offset points", xytext=(12, 12),
                           fontsize=8, color=theme.TEXT_BRIGHT,
@@ -2343,7 +2343,10 @@ class OptimizationWorkspace(QWidget):
             "max_mach": mc.get("mean_mach", design.objectives.get("max_mach", 0)),
             "stability": mc.get("mean_stability", design.objectives.get("max_stability_margin", 0)),
             "landing": mc.get("mean_landing_dist", design.objectives.get("min_landing_distance", 0)),
-            "mass": design.variables.get("dry_mass", 0),
+            # Dry + propellant, the same mass _on_add_trade_config reports for
+            # the current rocket; this row is compared against that one.
+            "mass": (float(self._design_value(design, "dry_mass") or 0.0)
+                     + float(self._design_value(design, "propellant_mass") or 0.0)),
             "success": mc.get("success_rate", 0) * 100,
         }
         self.trade_configs.append(metrics)
@@ -2475,15 +2478,16 @@ class OptimizationWorkspace(QWidget):
         if hasattr(self, "btn_apply_design"):
             self.btn_apply_design.setEnabled(True)
 
-        # Parameters
-        self.lbl_best_diameter.setText(f"{v.get('diameter', 0):.4f} m")
-        self.lbl_best_length.setText(f"{v.get('length', 0):.3f} m")
-        self.lbl_best_nose.setText(f"{v.get('nose_length', 0):.3f} m")
-        self.lbl_best_fin_span.setText(f"{v.get('fin_span', 0):.4f} m")
-        self.lbl_best_fin_root.setText(f"{v.get('fin_root_chord', 0):.4f} m")
-        self.lbl_best_fin_tip.setText(f"{v.get('fin_tip_chord', 0):.4f} m")
-        self.lbl_best_mass.setText(f"{v.get('dry_mass', 0):.3f} kg")
-        self.lbl_best_motor.setText(f"{v.get('motor_designation', 'N/A')}")
+        # Parameters. Only the optimised ones are in `variables`; the rest are
+        # the rocket's own and come from the design's flown configuration.
+        self.lbl_best_diameter.setText(self._design_text(design, "diameter", "{:.4f} m"))
+        self.lbl_best_length.setText(self._design_text(design, "length", "{:.3f} m"))
+        self.lbl_best_nose.setText(self._design_text(design, "nose_length", "{:.3f} m"))
+        self.lbl_best_fin_span.setText(self._design_text(design, "fin_span", "{:.4f} m"))
+        self.lbl_best_fin_root.setText(self._design_text(design, "fin_root_chord", "{:.4f} m"))
+        self.lbl_best_fin_tip.setText(self._design_text(design, "fin_tip_chord", "{:.4f} m"))
+        self.lbl_best_mass.setText(self._design_text(design, "dry_mass", "{:.3f} kg"))
+        self.lbl_best_motor.setText(self._design_motor_text(design))
 
         # Performance
         apogee = mc.get("mean_apogee", o.get("max_apogee", o.get("apogee", 0)))
@@ -2515,6 +2519,37 @@ class OptimizationWorkspace(QWidget):
 
         # Constraint status
         self._update_constraint_status(design)
+
+    def _design_value(self, design, key):
+        """A design's parameter, optimised or not (None if unknown)."""
+        if design is None:
+            return None     # no result: do not pass the current rocket off as one
+        from core.optimization_engine import design_value
+        return design_value(design, key, fallback=self.engine.state)
+
+    def _design_text(self, design, key, fmt):
+        value = self._design_value(design, key)
+        if value is None:
+            return "—"
+        try:
+            return fmt.format(float(value))
+        except (TypeError, ValueError):
+            return "—"
+
+    def _design_motor_text(self, design):
+        """Motor of a design. The catalog name alone would misdescribe a
+        design whose impulse, burn time or propellant the optimiser changed,
+        so those carry the impulse they were evaluated at."""
+        name = self._design_value(design, "motor_designation")
+        if not name or name == "None":
+            name = "Custom" if self._design_value(design, "custom_thrust_curve") else None
+        varied = design.variables or {}
+        if any(k in varied for k in ("motor_total_impulse", "motor_burn_time",
+                                     "propellant_mass")):
+            impulse = self._design_value(design, "motor_total_impulse")
+            if impulse:
+                return f"{name or 'Motor'} (modified: {float(impulse):.0f} N·s)"
+        return name or "—"
 
     def _update_constraint_status(self, design):
         """Update constraint status indicators."""
@@ -2567,9 +2602,10 @@ class OptimizationWorkspace(QWidget):
             self.btn_sol_reliability.setEnabled(True)
             self._pareto_best_reliability = designs[best_idx]
 
-        # Best Mass (lowest)
-        masses = [d.variables.get("dry_mass", 999) for d in designs]
-        if masses:
+        # Best Mass (lowest). inf, not a made-up mass, for a design with none.
+        masses = [float(m) if m is not None else float("inf")
+                  for m in (self._design_value(d, "dry_mass") for d in designs)]
+        if masses and min(masses) < float("inf"):
             best_idx = int(np.argmin(masses))
             self.btn_sol_mass.setText(f"Best Mass: {masses[best_idx]:.2f} kg")
             self.btn_sol_mass.setEnabled(True)
@@ -2850,10 +2886,10 @@ class OptimizationWorkspace(QWidget):
             ("Pareto-front size", len(r.pareto_front or [])),
             ("Best fitness", f"{bd.fitness:.3f}" if bd else "—"),
             ("Best apogee", f"{mc.get('mean_apogee', 0):.1f} m"),
-            ("Best diameter", f"{v.get('diameter', 0):.4f} m"),
-            ("Best length", f"{v.get('length', 0):.3f} m"),
-            ("Best dry mass", f"{v.get('dry_mass', 0):.3f} kg"),
-            ("Best total impulse", f"{v.get('motor_total_impulse', 0):.0f} N·s"),
+            ("Best diameter", self._design_text(bd, "diameter", "{:.4f} m")),
+            ("Best length", self._design_text(bd, "length", "{:.3f} m")),
+            ("Best dry mass", self._design_text(bd, "dry_mass", "{:.3f} kg")),
+            ("Best total impulse", self._design_text(bd, "motor_total_impulse", "{:.0f} N·s")),
             ("Success rate", f"{mc.get('success_rate', 0) * 100:.1f} %"),
         ]
         figs = [getattr(self, a).figure for a in
