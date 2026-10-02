@@ -1466,38 +1466,9 @@ class CalculiXSolver(FEMSolver):
         result.resonance_warnings = warnings
 
         # ── Flutter ─────────────────────────────────────────────────
-        if fin_info is not None:
-            cr, ct = fin_info["root_chord"], fin_info["tip_chord"]
-            span, t_fin = fin_info["span"], fin_info["thickness"]
-            AR_fin = span**2 / (0.5 * (cr + ct) * span) if (cr + ct) > 0 else 2.0
-            tc_ratio = t_fin / (0.5 * (cr + ct)) if (cr + ct) > 0 else 0.05
-            lam = ct / cr if cr > 0 else 0.5
-            try:
-                P_atm, _, _ = isa_conditions(lc.altitude_m if lc.altitude_m > 0 else 3000)
-            except Exception:
-                P_atm = 70000.0
-            # Full NACA TN-4197 form incl. taper term (matches workstation.py)
-            denom = (1.337 * AR_fin**3 * P_atm * (lam + 1)) / \
-                    (2 * (AR_fin + 2) * max(tc_ratio, 0.01)**3)
-            V_flutter = a_sound * math.sqrt(G / denom) if denom > 0 and G > 0 else 9999.0
-            flutter_margin = V_flutter / max(V_flight, 1.0)
-            if flutter_margin >= 2.0:
-                verdict = "✓ SAFE (margin ≥ 2.0)"
-            elif flutter_margin >= 1.25:
-                verdict = "ADEQUATE (margin 1.25–2.0)"
-            elif flutter_margin >= 1.0:
-                verdict = "MARGINAL (margin < 1.25)"
-            else:
-                verdict = "✕ FLUTTER RISK (V_flight > V_flutter)"
-            result.flutter_assessment = {
-                "critical_speed_m_s": round(V_flutter, 1),
-                "flutter_margin": round(flutter_margin, 2),
-                "max_flight_speed_m_s": round(V_flight, 1),
-                "verdict": verdict,
-                "method": "NACA empirical (preliminary)",
-                "fin_AR": round(AR_fin, 2),
-                "fin_t_c": round(tc_ratio, 4),
-            }
+        assessment = _flutter_assessment(fin_info, V_flight)
+        if assessment:
+            result.flutter_assessment = assessment
 
         logger.info(f"Modal post-process: {len(result.mode_classifications)} classified, "
                      f"{len(warnings)} resonance warnings")
@@ -1757,53 +1728,10 @@ class CalculiXSolver(FEMSolver):
                 )
         result.resonance_warnings = warnings
 
-        # ── Fin flutter assessment (preliminary — NACA empirical) ────────
-        # V_flutter = a × sqrt(G_panel / (1.337 × AR³ × P∞ / (t/c)³))
-        # Reference: NACA TN-4197 / Bisplinghoff "Aeroelasticity"
-        if fin_info is not None:
-            cr = fin_info["root_chord"]
-            ct = fin_info["tip_chord"]
-            span = fin_info["span"]
-            t_fin = fin_info["thickness"]
-
-            AR_fin = span**2 / (0.5 * (cr + ct) * span) if (cr + ct) > 0 else 2.0
-            tc_ratio = t_fin / (0.5 * (cr + ct)) if (cr + ct) > 0 else 0.05
-            lam = ct / cr if cr > 0 else 0.5
-            G_panel = G  # use airframe shear modulus as proxy
-
-            try:
-                P_atm, T_atm, rho_atm = isa_conditions(lc.altitude_m if lc.altitude_m > 0 else 3000)
-            except Exception:
-                P_atm = 70000.0
-
-            # NACA flutter parameter — full TN-4197 form incl. taper term
-            # (matches workstation.py fin_analysis)
-            denom = (1.337 * AR_fin**3 * P_atm * (lam + 1)) / \
-                    (2 * (AR_fin + 2) * max(tc_ratio, 0.01)**3)
-            if denom > 0 and G_panel > 0:
-                V_flutter = a_sound * math.sqrt(G_panel / denom)
-            else:
-                V_flutter = 9999.0
-
-            flutter_margin = V_flutter / max(V_flight, 1.0)
-            if flutter_margin >= 2.0:
-                verdict = "✓ SAFE (margin ≥ 2.0)"
-            elif flutter_margin >= 1.25:
-                verdict = "ADEQUATE (margin 1.25–2.0)"
-            elif flutter_margin >= 1.0:
-                verdict = "MARGINAL (margin < 1.25)"
-            else:
-                verdict = "✕ FLUTTER RISK (V_flight > V_flutter)"
-
-            result.flutter_assessment = {
-                "critical_speed_m_s": round(V_flutter, 1),
-                "flutter_margin": round(flutter_margin, 2),
-                "max_flight_speed_m_s": round(V_flight, 1),
-                "verdict": verdict,
-                "method": "NACA empirical (preliminary)",
-                "fin_AR": round(AR_fin, 2),
-                "fin_t_c": round(tc_ratio, 4),
-            }
+        # ── Fin flutter assessment ───────────────────────────────────────
+        assessment = _flutter_assessment(fin_info, V_flight)
+        if assessment:
+            result.flutter_assessment = assessment
 
         result.converged = True
         logger.info(
@@ -1844,6 +1772,7 @@ def _find_fin_info(comp, L: float, d: float) -> Optional[dict]:
             "root_chord": getattr(comp, 'root_chord', L * 0.12),
             "tip_chord": getattr(comp, 'tip_chord', L * 0.04),
             "thickness": getattr(comp, 'thickness', 0.003),
+            "material": getattr(comp, 'material', ''),
         }
     for child in getattr(comp, 'children', []):
         info = _find_fin_info(child, L, d)
@@ -1851,6 +1780,48 @@ def _find_fin_info(comp, L: float, d: float) -> Optional[dict]:
             return info
     return None
 
+
+def _flutter_assessment(fin_info: Optional[dict], v_flight: float) -> dict:
+    """Fin flutter for the modal panel, or {} when there is no fin to assess.
+
+    The speed is dynamics.flutter_analysis.governing_flutter_speed for the
+    fin's own material, the number the Dynamics workspace and the fin tab
+    quote. This panel used to re-derive the NACA formula on the mean chord
+    with the AIRFRAME's shear modulus, and so gave a third flutter speed.
+    """
+    if not fin_info:
+        return {}
+    from dynamics.flutter_analysis import governing_flutter_speed
+
+    cr, ct = fin_info["root_chord"], fin_info["tip_chord"]
+    span, t_fin = fin_info["span"], fin_info["thickness"]
+    fin_mat = get_structural_material(fin_info.get("material") or "Plywood (Birch)")
+    v_flutter, v_naca, _pk = governing_flutter_speed(
+        span, cr, ct, t_fin, fin_mat.E, fin_mat.G, fin_mat.density,
+        max_flight_speed=max(v_flight, 1.0))
+    if not math.isfinite(v_flutter):
+        return {}
+
+    flutter_margin = v_flutter / max(v_flight, 1.0)
+    if flutter_margin >= 2.0:
+        verdict = "✓ SAFE (margin ≥ 2.0)"
+    elif flutter_margin >= 1.25:
+        verdict = "ADEQUATE (margin 1.25–2.0)"
+    elif flutter_margin >= 1.0:
+        verdict = "MARGINAL (margin < 1.25)"
+    else:
+        verdict = "✕ FLUTTER RISK (V_flight > V_flutter)"
+    area = 0.5 * (cr + ct) * span
+    return {
+        "critical_speed_m_s": round(v_flutter, 1),
+        "flutter_margin": round(flutter_margin, 2),
+        "max_flight_speed_m_s": round(v_flight, 1),
+        "verdict": verdict,
+        "method": ("p-k (2-DOF)" if v_flutter < v_naca else "NACA TN-4197")
+                  + f", {fin_mat.name}",
+        "fin_AR": round(span ** 2 / area, 2) if area > 0 else 0.0,
+        "fin_t_c": round(t_fin / cr, 4) if cr > 0 else 0.0,
+    }
 
 
 def _ordinal(n: int) -> str:

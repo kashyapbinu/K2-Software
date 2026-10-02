@@ -622,7 +622,7 @@ class StructuresWorkspace(QWidget):
         self.lbl_flutter_verdict = QLabel("—")
         self.lbl_flutter_verdict.setStyleSheet("font-weight:600;font-size:12px;padding:4px;")
         ffl.addRow("Verdict:", self.lbl_flutter_verdict)
-        self.lbl_flutter_method = QLabel("NACA empirical")
+        self.lbl_flutter_method = QLabel("—")
         self.lbl_flutter_method.setStyleSheet(f"color:{theme.TEXT_FAINT};font-size:10px;font-style:italic;")
         ffl.addRow("", self.lbl_flutter_method)
         gfl.setLayout(ffl); lay.addWidget(gfl)
@@ -1527,6 +1527,16 @@ class StructuresWorkspace(QWidget):
 
     # ── Per-tab populators ────────────────────────────────────────────────────
     def _populate_fin(self, fa):
+        if not getattr(fa, "present", True):
+            # A finless rocket has no fin results; zeros would read as real ones.
+            for lbl in (self.lbl_fin_bend, self.lbl_fin_shear, self.lbl_fin_defl,
+                        self.lbl_fin_freq, self.lbl_fin_flutter, self.lbl_fin_margin,
+                        self.lbl_fin_force, self.lbl_fin_loaded):
+                lbl.setText("—")
+            self.lbl_fin_sf.setText("No fins")
+            self.lbl_fin_sf.setStyleSheet(theme.value_qss(fa.status_color, 18))
+            self._tab_fin.setCurrentIndex(1)
+            return
         self.lbl_fin_bend.setText(f"{fa.root_bending_MPa:.1f} MPa")
         self.lbl_fin_shear.setText(f"{fa.root_shear_MPa:.1f} MPa")
         self.lbl_fin_defl.setText(f"{fa.tip_deflection_mm:.2f} mm")

@@ -340,7 +340,8 @@ def pk_flutter_analysis(span: float, root_chord: float, tip_chord: float,
                         density_mat: float, altitude_m: float = 0.0,
                         V_max_factor: float = 1.5,
                         max_flight_speed: float = 300.0,
-                        n_steps: int = 120):
+                        n_steps: int = 120,
+                        V_scan_max: float = None):
     """2-DOF p-k flutter solver for a trapezoidal cantilever fin.
 
     Solves the bending-torsion aeroelastic eigenvalue problem at each
@@ -367,6 +368,12 @@ def pk_flutter_analysis(span: float, root_chord: float, tip_chord: float,
     V_max_factor : float    Scan up to V_max_factor × max_flight_speed
     max_flight_speed : float  Design max flight speed (m/s)
     n_steps : int           Number of velocity steps
+    V_scan_max : float      Highest speed searched for a damping crossing (m/s).
+                            Default: V_max_factor × max_flight_speed. A flutter
+                            point above it is reported as not found, so pass
+                            this when the answer must not depend on the flight
+                            speed. envelope_status always compares against
+                            max_flight_speed.
 
     Returns
     -------
@@ -436,7 +443,8 @@ def pk_flutter_analysis(span: float, root_chord: float, tip_chord: float,
     r_alpha_sq = I_alpha / (m_bar * b ** 2) if (m_bar > 0 and b > 0) else 1.0
     omega_ratio_sq = (omega_h / omega_a) ** 2
 
-    V_scan_max = max(max_flight_speed * V_max_factor, 50.0)
+    if V_scan_max is None:
+        V_scan_max = max(max_flight_speed * V_max_factor, 50.0)
 
     vg_data = []       # (V, g, mode_label)
     vf_data = []       # (V, f, mode_label)
@@ -655,6 +663,47 @@ def flutter_speed(span: float, root_chord: float, tip_chord: float,
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  GOVERNING FLUTTER SPEED (one fin, one altitude)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def governing_flutter_speed(span: float, root_chord: float, tip_chord: float,
+                            thickness: float, E: float, G: float,
+                            density_mat: float, altitude_m: float = 0.0,
+                            max_flight_speed: float = 300.0):
+    """Flutter speed of one fin at one altitude: the lower of the NACA TN-4197
+    correlation and the 2-DOF p-k solve.
+
+    Every flutter number K2 shows comes through here. The Dynamics workspace,
+    the Structures fin tab and the Structures modal panel each used to carry
+    their own version (min of both methods at sea level; NACA alone on the
+    root chord; NACA alone on the MEAN chord with the airframe's shear
+    modulus), so one fin had three flutter speeds.
+
+    E, G and density_mat are the FIN material's. The p-k search runs up to the
+    NACA speed: a crossing above it cannot govern, and one below it must be
+    found whatever ``max_flight_speed`` is, which only sets the solver's
+    envelope_status.
+
+    At the default altitude (sea level) this is the flutter speed K2 quotes
+    for a fin. Both methods give a true-airspeed onset that rises with
+    altitude, so the sea-level value is the lowest the fin will see.
+
+    Returns ``(speed, naca_speed, pk)`` with ``pk`` the pk_flutter_analysis
+    dict. A fin with no span, chord or thickness has no flutter speed (inf).
+    """
+    v_naca = flutter_speed(span, root_chord, tip_chord, thickness, G, altitude_m)
+    if not math.isfinite(v_naca):
+        return float('inf'), v_naca, _empty_pk_result(max_flight_speed, 0.0)
+    pk = pk_flutter_analysis(
+        span=span, root_chord=root_chord, tip_chord=tip_chord,
+        thickness=thickness, E=E, G=G, density_mat=density_mat,
+        altitude_m=altitude_m, max_flight_speed=max_flight_speed,
+        V_scan_max=max(max_flight_speed * 1.5, 50.0, v_naca),
+    )
+    return min(v_naca, pk["flutter_speed_mps"]), v_naca, pk
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN ANALYSIS ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -704,11 +753,17 @@ def flutter_analysis(assembly, max_flight_speed: float = 300.0,
     altitudes = [float(a) for a in range(0, 15001, 1000)]
 
     # ── Analyse each fin ────────────────────────────────────────────────────
-    global_min_flutter = float('inf')
+    # The flutter speed at any altitude is the lower of the NACA TN-4197
+    # correlation and the p-k solve, for the most critical fin. The altitude
+    # sweep used to hold the NACA value alone while the headline speed took
+    # the lower of the two at sea level, so the plotted boundary sat well
+    # above the number in the results panel (452 against 282 m/s for a 4 mm
+    # plywood fin) and the envelope check could pass a flight the panel
+    # called unsafe.
     global_best_pk = None
-    global_worst_alt = 0.0
-    global_worst_margin = float('inf')
+    best_sea_level = float('inf')
     best_fin_name = ""
+    governing = {}      # altitude -> (flutter speed, fin name), lowest over fins
 
     for fin in fins:
         fin_name = getattr(fin, 'name', 'Fin Set')
@@ -717,83 +772,66 @@ def flutter_analysis(assembly, max_flight_speed: float = 300.0,
         E = mat.E
         density_mat = mat.density
 
-        # ── NACA TN-4197 at sea level (legacy) ──────────────────────────
-        V_f_naca = flutter_speed(
-            span=fin.height,
-            root_chord=fin.root_chord,
-            tip_chord=fin.tip_chord,
-            thickness=fin.thickness,
-            shear_modulus=G,
-            altitude_m=0.0,
-        )
-
-        # ── p-k solver at sea level ─────────────────────────────────────
-        pk_sea = pk_flutter_analysis(
-            span=fin.height,
-            root_chord=fin.root_chord,
-            tip_chord=fin.tip_chord,
-            thickness=fin.thickness,
-            E=E, G=G,
-            density_mat=density_mat,
-            altitude_m=0.0,
-            max_flight_speed=max_flight_speed,
-        )
-
-        # Use the more conservative (lower) of NACA or p-k
-        V_f_pk = pk_sea["flutter_speed_mps"]
-        V_f_use = min(V_f_naca, V_f_pk)
-
-        # Store per-fin results
-        fin_result = {
-            "fin_name": fin_name,
-            "naca_flutter_speed_mps": V_f_naca,
-            "pk_flutter_speed_mps": V_f_pk,
-            "pk_flutter_freq_hz": pk_sea["flutter_frequency_hz"],
-            "pk_critical_mode": pk_sea["critical_mode_name"],
-            "pk_envelope_status": pk_sea["envelope_status"],
-        }
-        result.per_fin_results.append(fin_result)
-
-        # Track global minimum
-        if V_f_use < global_min_flutter:
-            global_min_flutter = V_f_use
-            global_best_pk = pk_sea
-            best_fin_name = fin_name
-
-        # ── Altitude sweep ──────────────────────────────────────────────
         for alt in altitudes:
-            # NACA TN-4197 at this altitude
-            V_f_alt = flutter_speed(fin.height, fin.root_chord, fin.tip_chord,
-                                    fin.thickness, G, alt)
+            # The default p-k window stops at 1.5 × max flight speed, which
+            # made the reported flutter speed of a fin depend on how fast the
+            # rocket was said to fly; governing_flutter_speed searches up to
+            # the NACA speed instead.
+            V_f_use, V_f_naca, pk = governing_flutter_speed(
+                fin.height, fin.root_chord, fin.tip_chord, fin.thickness,
+                E, G, density_mat, altitude_m=alt,
+                max_flight_speed=max_flight_speed)
+            V_f_pk = pk["flutter_speed_mps"]
 
-            P, T, _ = isa_conditions(alt)
-            a_sound = math.sqrt(GAMMA_AIR * R_AIR * T)
-            M_f = V_f_alt / a_sound if a_sound > 0 else 0.0
-            margin_alt = V_f_alt / max_flight_speed if max_flight_speed > 0 else float('inf')
+            if alt not in governing or V_f_use < governing[alt][0]:
+                governing[alt] = (V_f_use, fin_name)
 
-            result.altitude_sweep.append((alt, V_f_alt, M_f, fin_name))
+            if alt == altitudes[0]:
+                # Sea level: per-fin detail, and the fin whose p-k curves the
+                # result carries.
+                result.per_fin_results.append({
+                    "fin_name": fin_name,
+                    "naca_flutter_speed_mps": V_f_naca,
+                    "pk_flutter_speed_mps": V_f_pk,
+                    "pk_flutter_freq_hz": pk["flutter_frequency_hz"],
+                    "pk_critical_mode": pk["critical_mode_name"],
+                    "pk_envelope_status": pk["envelope_status"],
+                })
+                if V_f_use < best_sea_level:
+                    best_sea_level = V_f_use
+                    global_best_pk = pk
+                    best_fin_name = fin_name
 
-            if margin_alt < global_worst_margin:
-                global_worst_margin = margin_alt
-                global_worst_alt = alt
+    # ── Altitude sweep: one governing point per altitude ────────────────────
+    global_min_flutter = float('inf')
+    global_worst_alt = altitudes[0]
+    for alt in altitudes:
+        V_f_alt, fin_name = governing[alt]
+        _, T, _ = isa_conditions(alt)
+        a_sound = math.sqrt(GAMMA_AIR * R_AIR * T)
+        M_f = V_f_alt / a_sound if (a_sound > 0 and
+                                    math.isfinite(V_f_alt)) else 0.0
+        margin_alt = V_f_alt / max_flight_speed if max_flight_speed > 0 else float('inf')
 
-            # Mach sweep entry
-            result.mach_sweep.append((M_f, margin_alt, fin_name))
+        result.altitude_sweep.append((alt, V_f_alt, M_f, fin_name))
+        result.mach_sweep.append((M_f, margin_alt, fin_name))
+
+        if V_f_alt < global_min_flutter:
+            global_min_flutter = V_f_alt
+            global_worst_alt = alt
+            result.flutter_mach = M_f
 
     # ── Populate result from global worst case ──────────────────────────────
+    # The headline speed is the lowest point of the sweep, so the number in
+    # the panel and the boundary on the plot are the same quantity.
     result.flutter_speed_mps = global_min_flutter
-
-    _, T0, _ = isa_conditions(0)
-    a0 = math.sqrt(GAMMA_AIR * R_AIR * T0)
-    result.flutter_mach = global_min_flutter / a0 if (a0 > 0 and
-                          global_min_flutter < float('inf')) else 0.0
     result.flutter_margin = (global_min_flutter / max_flight_speed
                              if max_flight_speed > 0 else float('inf'))
     result.safe = result.flutter_margin > 1.0
 
     # Worst-case altitude
     result.worst_case_altitude_m = global_worst_alt
-    result.worst_case_margin = global_worst_margin
+    result.worst_case_margin = result.flutter_margin
 
     # ── p-k specific results from most critical fin ─────────────────────────
     if global_best_pk is not None:

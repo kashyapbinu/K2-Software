@@ -220,15 +220,18 @@ def generate_structural_report(path, state, rep, material_name="Aluminum 6061-T6
     # ── Fin Analysis ──
     fa = rep.fin
     story.append(Paragraph("Fin Analysis", ss["K2H"]))
-    story.append(_kv_table([
-        ["Root Bending Stress", f"{fa.root_bending_MPa:.1f} MPa"],
-        ["Root Shear Stress", f"{fa.root_shear_MPa:.1f} MPa"],
-        ["Tip Deflection", f"{fa.tip_deflection_mm:.2f} mm"],
-        ["Natural Frequency", f"{fa.natural_frequency_Hz:.0f} Hz"],
-        ["Flutter Speed", f"{fa.flutter_speed_m_s:.0f} m/s"],
-        ["Flutter Margin", f"{fa.flutter_margin:.2f}×"],
-        ["Safety Factor", f"{fa.safety_factor:.2f}  ({fa.status})"],
-    ]))
+    if not getattr(fa, "present", True):
+        story.append(_kv_table([["Fins", "None on this rocket"]]))
+    else:
+        story.append(_kv_table([
+            ["Root Bending Stress", f"{fa.root_bending_MPa:.1f} MPa"],
+            ["Root Shear Stress", f"{fa.root_shear_MPa:.1f} MPa"],
+            ["Tip Deflection", f"{fa.tip_deflection_mm:.2f} mm"],
+            ["Natural Frequency", f"{fa.natural_frequency_Hz:.0f} Hz"],
+            ["Flutter Speed", f"{fa.flutter_speed_m_s:.0f} m/s"],
+            ["Flutter Margin", f"{fa.flutter_margin:.2f}×"],
+            ["Safety Factor", f"{fa.safety_factor:.2f}  ({fa.status})"],
+        ]))
 
     # ── Temperature ──
     tp = rep.thermal

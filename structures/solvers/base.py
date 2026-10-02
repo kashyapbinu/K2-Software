@@ -397,13 +397,13 @@ class ModalResult:
     motor_2p_hz: float = 0.0                                    # Motor combustion 2P
     aero_buffet_band: tuple = (0.0, 0.0)                        # (low_Hz, high_Hz) Strouhal buffeting
 
-    # ── Flutter assessment (preliminary) ──
+    # ── Flutter assessment (dynamics.flutter_analysis.governing_flutter_speed) ──
     flutter_assessment: dict = field(default_factory=lambda: {
         "critical_speed_m_s": 0.0,
         "flutter_margin": 0.0,
         "max_flight_speed_m_s": 0.0,
         "verdict": "—",
-        "method": "NACA empirical (preliminary)",
+        "method": "—",
     })
 
     # ── Solver metadata ──

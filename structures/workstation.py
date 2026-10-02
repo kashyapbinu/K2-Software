@@ -523,6 +523,14 @@ class FinAnalysis:
     status: str = "—"
     status_color: str = "#8b949e"
     deflection_profile: list = field(default_factory=list)  # [(span_frac, defl_mm)]
+    present: bool = True       # False: the rocket has no fins to analyse
+
+    @classmethod
+    def no_fins(cls) -> "FinAnalysis":
+        """Result for a finless rocket: nothing to fail, nothing to report."""
+        return cls(present=False, safety_factor=float("inf"),
+                   flutter_margin=float("inf"), highest_loaded_fin="—",
+                   status="NO FINS")
 
 
 def _fin_material_name(assembly, fallback: str) -> str:
@@ -549,21 +557,26 @@ def _fin_material_name(assembly, fallback: str) -> str:
 
 def fin_analysis(state, flight: FlightLoads, material_name: str) -> FinAnalysis:
     """Cantilever-plate fin analysis: root bending/shear, tip deflection,
-    fundamental frequency, and NACA flutter margin.
+    fundamental frequency, and flutter margin.
 
     ``material_name`` should be the FIN material (see _fin_material_name),
-    not the airframe's, when the two differ."""
-    fa = FinAnalysis()
+    not the airframe's, when the two differ.
+
+    The fins analysed are the ones on the state. Missing dimensions used to
+    be filled in from the body (root 0.1 L, span 0.6 D, three fins), so a
+    finless rocket was reported with a fin stress, a flutter speed and a
+    FAILURE status for fins it does not have, and a delta fin (tip chord 0)
+    was analysed with a tip of half its root."""
     mat = get_structural_material(material_name)
 
-    root = getattr(state, "fin_root_chord", 0.0) or state.length * 0.1
-    tip = getattr(state, "fin_tip_chord", 0.0) or root * 0.5
-    span = getattr(state, "fin_span", 0.0) or getattr(state, "fin_height", 0.0) \
-        or state.diameter * 0.6
+    root = getattr(state, "fin_root_chord", 0.0) or 0.0
+    tip = getattr(state, "fin_tip_chord", 0.0) or 0.0
+    span = getattr(state, "fin_span", 0.0) or getattr(state, "fin_height", 0.0) or 0.0
     thick = getattr(state, "fin_thickness", 0.003) or 0.003
-    n_fins = getattr(state, "fin_count", 3) or 3
-    if span <= 0 or root <= 0 or thick <= 0:
-        return fa
+    count = getattr(state, "fin_count", None)
+    if (count is not None and count <= 0) or span <= 0 or root <= 0:
+        return FinAnalysis.no_fins()
+    fa = FinAnalysis()
 
     # ── Aerodynamic normal force per fin at max-Q ──
     q = flight.max_dynamic_pressure
@@ -602,21 +615,21 @@ def fin_analysis(state, flight: FlightLoads, material_name: str) -> FinAnalysis:
         fa.natural_frequency_Hz = (1.875 ** 2 / (2 * math.pi)) * \
             math.sqrt(EI / (m_per_len * span ** 4))
 
-    # ── NACA TN-4197 flutter velocity ──
-    # Delegated to dynamics.flutter_analysis rather than re-derived here: this
-    # was a second copy of the same equation, and the two drifted (it used the
-    # root chord for t/c, the other the mean chord), so the Structures and
-    # Dynamics tabs disagreed by up to 2.15x on the same fin.
-    from dynamics.flutter_analysis import flutter_speed
-    alt_flutter = flight.maxq_altitude or 3000.0
-    _P, T, _rho = isa(alt_flutter)
+    # ── Flutter velocity ──
+    # The same number the Dynamics workspace reports for this fin: the lower
+    # of NACA TN-4197 and the p-k solve, at sea level, from one shared
+    # function. This tab used the NACA value alone, at the max-Q altitude,
+    # and so quoted a higher flutter speed than Dynamics for the same fin
+    # (452 against 282 m/s for a 4 mm plywood fin).
+    from dynamics.flutter_analysis import governing_flutter_speed
+    _P, T, _rho = isa(flight.maxq_altitude or 3000.0)
     a_sound = speed_of_sound(T)
     G_shear = mat.G if mat.G > 0 else mat.E / (2 * (1 + mat.nu))
-    v_f = flutter_speed(span=span, root_chord=root, tip_chord=tip,
-                        thickness=thick, shear_modulus=G_shear,
-                        altitude_m=alt_flutter)
-    fa.flutter_speed_m_s = v_f if math.isfinite(v_f) else 0.0
     v_max = flight.max_velocity or (flight.max_mach * a_sound)
+    v_f, _v_naca, _pk = governing_flutter_speed(
+        span, root, tip, thick, mat.E, G_shear, mat.density,
+        max_flight_speed=v_max if v_max > 0 else 300.0)
+    fa.flutter_speed_m_s = v_f if math.isfinite(v_f) else 0.0
     fa.flutter_margin = fa.flutter_speed_m_s / v_max if v_max > 0 else float("inf")
 
     # ── Safety factor: bending vs yield ──
@@ -1006,6 +1019,8 @@ def failure_map(state, body_sf: float, fin: FinAnalysis,
     for name in _SUBSYSTEMS:
         sf, detail = rows[name]
         st, col = _status_from_sf(sf)
+        if name == "Fins" and not fin.present:
+            st, col, detail = "N/A", "#8b949e", "No fins on this rocket"
         fm.components.append(ComponentStatus(
             name=name, subsystem=name, margin=sf,
             status=st, color=col, detail=detail,

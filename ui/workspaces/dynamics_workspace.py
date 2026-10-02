@@ -48,6 +48,27 @@ def _verdict(margin_pct):
     return "UNSAFE", theme.ERR
 
 
+def _envelope_verdict(margins, crosses):
+    """Verdict for the flight-envelope plot, on the results panel's scale.
+
+    *margins* is [(boundary, margin %)] for each boundary assessed, the same
+    percentages the panel shows; *crosses* names the boundaries the flown
+    trajectory actually reaches. Returns (verdict, reason), with verdict None
+    when nothing was assessed.
+
+    The plot used to say SAFE unless the trajectory crossed a boundary, and
+    so read SAFE next to a panel reading UNSAFE at a +2 % margin, and SAFE
+    with no trajectory and no result at all.
+    """
+    if crosses:
+        return "UNSAFE", f"crosses {', '.join(crosses)}"
+    if not margins:
+        return None, ""
+    name, pct = min(margins, key=lambda m: m[1])
+    verdict = _verdict(pct)[0]
+    return verdict, ("" if verdict == "SAFE" else f"{name} margin {pct:+.1f}%")
+
+
 def _mode_tag(marker_name, i):
     """Short label for an FRF peak: the modal-result mode number(s) it was
     matched to ("Mode 1+2"), or "Peak k" when it matched no mode."""
@@ -581,8 +602,12 @@ class DynamicsWorkspace(QWidget):
             ax.fill_between(alts_a, vf_a / 1.2, vf_a / 1.1, color=theme.WARN, alpha=0.12)
             ax.fill_between(alts_a, vf_a / 1.1, vf_a, color=theme.ERR, alpha=0.12)
             ax.plot(alts_a, vf_a, color=theme.ACCENT, linewidth=2.0, label="Flutter boundary")
-            ax.axhline(min(vf), color=theme.ERR, linestyle=":", linewidth=1.2,
-                       label=f"Flutter onset {min(vf):.0f} m/s")
+            # The onset line is the panel's Flutter Velocity, not a second
+            # reading of the sweep: the two once disagreed by 60%.
+            if r.flutter_speed_mps < 1e6:
+                ax.axhline(r.flutter_speed_mps, color=theme.ERR, linestyle=":",
+                           linewidth=1.2,
+                           label=f"Flutter onset {r.flutter_speed_mps:.0f} m/s")
 
         # Actual flight max-velocity profile vs altitude
         tr = self._trajectory()
@@ -898,7 +923,6 @@ class DynamicsWorkspace(QWidget):
         vdiv = (self._aero_result.divergence_speed_mps
                 if self._aero_result and self._aero_result.divergence_speed_mps < 1e6 else None)
 
-        verdict, vcol = "SAFE", theme.OK
         crosses = []
 
         # Boundaries
@@ -923,20 +947,34 @@ class DynamicsWorkspace(QWidget):
                     crosses.append("flutter")
             if vdiv is not None and tr["vmax"] >= vdiv:
                 crosses.append("divergence")
-            if crosses:
-                verdict, vcol = "UNSAFE", theme.ERR
         else:
             ax.text(0.5, 0.5, "No simulation trajectory.\nRun a simulation, then re-open Dynamics.",
                     transform=ax.transAxes, ha="center", va="center", color=theme.TEXT_DIM, fontsize=10)
 
+        verdict, reason = _envelope_verdict(self._boundary_margins(), crosses)
         if tr or vf_sw or vdiv is not None:
-            ax.set_title(
-                f"Flight Envelope — {verdict}"
-                + (f" (crosses {', '.join(crosses)})" if crosses else ""),
-                color=vcol, fontsize=12, fontweight="bold", pad=10)
+            if verdict is None:     # a trajectory, but no boundary to judge it by
+                title, vcol = "Flight Envelope", theme.TEXT
+            else:
+                vcol = {"SAFE": theme.OK, "CAUTION": theme.WARN, "UNSAFE": theme.ERR}[verdict]
+                title = f"Flight Envelope — {verdict}" + (f" ({reason})" if reason else "")
+            ax.set_title(title, color=vcol, fontsize=12, fontweight="bold", pad=10)
             ax.legend(facecolor=theme.PANEL, edgecolor=theme.LINE, labelcolor=theme.TEXT, fontsize=8, loc="best")
             self._env_plot.figure.tight_layout(); self._env_plot.canvas.draw()
         self._envelope_verdict = verdict
+
+    def _boundary_margins(self):
+        """[(boundary, margin %)] against Max Flight Speed: the percentages
+        the Flutter and Divergence panels show."""
+        vmax = self.sp_vmax.value()
+        margins = []
+        if vmax > 0:
+            fr, ar = self._flutter_result, self._aero_result
+            if fr and fr.flutter_speed_mps < 1e6:
+                margins.append(("flutter", (fr.flutter_speed_mps - vmax) / vmax * 100.0))
+            if ar and ar.divergence_speed_mps < 1e6:
+                margins.append(("divergence", (ar.divergence_speed_mps - vmax) / vmax * 100.0))
+        return margins
 
     # ===============================================================
     # Engineering assessment
