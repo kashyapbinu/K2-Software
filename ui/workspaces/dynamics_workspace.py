@@ -48,6 +48,14 @@ def _verdict(margin_pct):
     return "UNSAFE", theme.ERR
 
 
+def _mode_tag(marker_name, i):
+    """Short label for an FRF peak: the modal-result mode number(s) it was
+    matched to ("Mode 1+2"), or "Peak k" when it matched no mode."""
+    if marker_name.startswith("Mode"):
+        return marker_name.split(" — ")[0]
+    return f"Peak {i + 1}"
+
+
 class DynThread(QThread):
     finished = pyqtSignal(object, str)
     errored = pyqtSignal(str)
@@ -386,7 +394,7 @@ class DynamicsWorkspace(QWidget):
         assembly = self._get_assembly()
         if not assembly:
             self._status.setText("No rocket assembly available."); return
-        from dynamics.vibration_analysis import random_vibration_response
+        from dynamics.vibration_analysis import vibration_from_modal
 
         # Reuse a modal result we (or the Structures workspace) already have.
         modal = self._modal_result or self._shared_modal_result()
@@ -396,8 +404,10 @@ class DynamicsWorkspace(QWidget):
         self._busy(True)
         if freqs:
             self._synth_freqs = False
-            self._thread = DynThread(random_vibration_response,
-                (freqs, self.sp_damp.value(), self.sp_psd.value()), "vibration")
+            # Weighted by CalculiX's own effective masses — the list-position
+            # cantilever Γ drew peaks at modes that carry no mass.
+            self._thread = DynThread(vibration_from_modal,
+                (modal, self.sp_damp.value(), self.sp_psd.value()), "vibration")
         else:
             # No modal data yet. Run CalculiX and the vibration response
             # together IN THE WORKER — calling fem.modal_analysis() here ran a
@@ -414,19 +424,17 @@ class DynamicsWorkspace(QWidget):
     def _modal_then_vibration(self, assembly, damping, psd):
         """Worker-thread helper: solve the modes, then the random response."""
         from structures.fem_interface import FEMInterface
-        from dynamics.vibration_analysis import random_vibration_response
-        freqs = []
+        from dynamics.vibration_analysis import (random_vibration_response,
+                                                 vibration_from_modal)
         try:
             modal = FEMInterface().modal_analysis(assembly)
-            freqs = [f for f in (modal.frequencies_hz or []) if f > 1.0]
-            if freqs:
+            if any(f > 1.0 for f in (modal.frequencies_hz or [])):
                 self._modal_result = modal
                 self._synth_freqs = False
+                return vibration_from_modal(modal, damping, psd)
         except Exception as e:
             logger.warning(f"modal solve for vibration failed: {e}")
-        if not freqs:
-            freqs = [50, 120, 250, 400, 600]
-        return random_vibration_response(freqs, damping, psd)
+        return random_vibration_response([50, 120, 250, 400, 600], damping, psd)
 
     def _run_aeroelastic(self):
         assembly = self._get_assembly()
@@ -605,7 +613,8 @@ class DynamicsWorkspace(QWidget):
             ax.plot(xs, ys, color=theme.ACCENT, linewidth=1.4)
             for i, (f, mag, name) in enumerate(r.modal_markers):
                 ax.plot(f, mag, "o", color=theme.ERR, markersize=5)
-                ax.annotate(f"M{i+1}\n{f:.0f}Hz", (f, mag), textcoords="offset points",
+                tag = _mode_tag(name, i).replace("Mode ", "M").replace("Peak ", "P")
+                ax.annotate(f"{tag}\n{f:.0f}Hz", (f, mag), textcoords="offset points",
                             xytext=(0, 8), ha="center", fontsize=8, color=theme.TEXT)
             self._frf_plot.figure.tight_layout(); self._frf_plot.canvas.draw()
 
@@ -623,9 +632,13 @@ class DynamicsWorkspace(QWidget):
             if risk == "High":
                 n_high += 1
             driver = f"{src} (SR {sr:.2f})"
-            cells = [f"Mode {i+1}", f"{f:.1f}", f"{mag:.1f}", risk, driver]
+            # Same "Mode k" numbering as the Mode Shapes tab (was the peak's
+            # rank, so "Mode 2" here and there were different modes).
+            cells = [_mode_tag(name, i), f"{f:.1f}", f"{mag:.1f}", risk, driver]
             for c, val in enumerate(cells):
                 it = QTableWidgetItem(val)
+                if c == 0:
+                    it.setToolTip(name)
                 if c == 3:
                     it.setForeground(QColor({"Low": theme.OK, "Medium": theme.WARN, "High": theme.ERR}[risk]))
                 self._res_table.setItem(i, c, it)
@@ -743,20 +756,22 @@ class DynamicsWorkspace(QWidget):
                              f"margin={self.lbl_divmargin.text()}")
 
     def _render_modal(self, r):
-        import pathlib, numpy as np
         if not getattr(self, '_modal_plot', None) or not hasattr(self._modal_plot, 'load_cylinder'):
             return
         self.mode_combo.blockSignals(True)
         self.mode_combo.clear()
         freqs = list(getattr(r, "frequencies_hz", []) or [])
         descs = list(getattr(r, "descriptions", []) or [])
-        inp = pathlib.Path("fem_run/modal/structure_mesh.inp")
-        have_fem = bool(getattr(r, "mode_shapes", None)) and inp.is_file()
+        # The FE mesh travels with the result. The old relative
+        # "fem_run/modal/structure_mesh.inp" never existed in installed builds
+        # (FEM output lives in the per-user data folder), so every installed
+        # run fell through to the synthetic cylinder below.
+        load = getattr(self._modal_plot, "load_result_mesh", None)
+        have_fem = bool(getattr(r, "mode_shapes", None)) and bool(load and load(r))
 
         if have_fem:
             # Real FEM mesh + mode shapes
             self._modal_is_synth = False
-            self._modal_plot.load_mesh(str(inp))
             for i, f in enumerate(freqs):
                 d = descs[i] if i < len(descs) else f"Mode {i+1}"
                 self.mode_combo.addItem(f"Mode {i+1}: {f:.1f} Hz — {d}", userData=i)
@@ -771,9 +786,7 @@ class DynamicsWorkspace(QWidget):
         self._modal_is_synth = True
         L, R = self._rocket_dims()
         self._modal_plot.load_cylinder(length=L, radius=R)
-        # First 3 frequencies: use FEM freqs if present, else nominal estimates
-        nominal = [52.0, 145.0, 270.0]
-        f3 = [(freqs[i] if i < len(freqs) and freqs[i] > 0 else nominal[i]) for i in range(3)]
+        f3 = self._synthetic_mode_freqs(r)
         self._synth_modes = [
             ("First Bending",  "bend1", f3[0]),
             ("Second Bending", "bend2", f3[1]),
@@ -786,6 +799,29 @@ class DynamicsWorkspace(QWidget):
         self._apply_synthetic_mode(0)
         self._status.setText(f"Modal (analytic): 3 mode shapes, f1={f3[0]:.0f} Hz "
                              "(FEM shapes unavailable — synthetic visualization)")
+
+    @staticmethod
+    def _synthetic_mode_freqs(r):
+        """1st bending, 2nd bending and 1st torsion frequencies for the
+        synthetic shapes, picked by mode TYPE. Taking the first three list
+        entries labelled the second plane of the FIRST bending mode (same
+        frequency) as "Second Bending", and a shell mode as "First Torsion"."""
+        freqs = list(getattr(r, "frequencies_hz", []) or []) if r is not None else []
+        kinds = list(getattr(r, "mode_classifications", []) or []) if r is not None else []
+        bending, torsion = [], None
+        for i, f in enumerate(freqs):
+            if f <= 0:
+                continue
+            kind = kinds[i] if i < len(kinds) else "Bending"   # unknown: assume beam
+            if kind.startswith("Bending"):
+                if not bending or f > bending[-1] * 1.02:     # skip the twin plane
+                    bending.append(f)
+            elif kind == "Torsional" and torsion is None:
+                torsion = f
+        nominal = [52.0, 145.0, 270.0]
+        return [bending[0] if bending else nominal[0],
+                bending[1] if len(bending) > 1 else nominal[1],
+                torsion if torsion else nominal[2]]
 
     def _rocket_dims(self):
         asm = self._get_assembly()

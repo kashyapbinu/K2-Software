@@ -5,8 +5,8 @@ Professional displacement contour visualization for modal analysis.
 Renders animated mode shapes with ANSYS/Abaqus-style color mapping.
 
 Features:
-  - Displacement magnitude contour mapping (turbo colormap)
-  - Scalar bar with engineering units (mm)
+  - Relative mode-amplitude contour |φ|/|φ|max (turbo colormap) — a mode
+    shape has no physical amplitude, so no length unit is shown
   - Undeformed wireframe ghost overlay (reference shape)
   - Mode info text overlay
   - Sinusoidal animation at natural frequency
@@ -23,6 +23,12 @@ import logging
 from ui import theme
 
 logger = logging.getLogger("K2.ModeShapeViewer")
+
+# A mode shape has no physical amplitude — CalculiX mass-normalises it
+# (φᵀMφ = 1) — so the contour is |φ| relative to its own peak, 0…1. It used
+# to be labelled "Displacement (mm)" and showed the eigenvector ×1000
+# (~834 "mm" on a 1 m rocket).
+_AMP = "Mode amplitude (relative)"
 
 
 class ModeShapeViewer(QWidget):
@@ -93,12 +99,26 @@ class ModeShapeViewer(QWidget):
             self.timer.start(50)
             self.btn_play.setText("⏸ Pause")
 
-    def load_mesh(self, inp_path: str):
+    def load_result_mesh(self, result) -> bool:
+        """Load the mesh a ModalResult's shapes were solved on.
+
+        The mesh travels with the result. Reading a fixed relative path
+        ("fem_run/modal/structure_mesh.inp") failed in installed builds, where
+        FEM output lives in the per-user data folder, so the viewer never got
+        a mesh; and a file on disk can belong to a later run anyway."""
+        nodes = getattr(result, "mesh_nodes", None)
+        elements = getattr(result, "mesh_elements", None)
+        if nodes and elements:
+            return self.load_mesh_data(nodes, elements)
+        path = getattr(result, "mesh_path", None)
+        return self.load_mesh(str(path)) if path else False
+
+    def load_mesh(self, inp_path: str) -> bool:
         """Load base mesh from CalculiX .inp file."""
         import pathlib
         path = pathlib.Path(inp_path)
         if not path.is_file():
-            return
+            return False
 
         nodes = {}
         elements = []
@@ -121,13 +141,17 @@ class ModeShapeViewer(QWidget):
                 if len(en) == 4:
                     elements.append(en)
 
+        return self.load_mesh_data(nodes, elements)
+
+    def load_mesh_data(self, nodes: dict, elements: list) -> bool:
+        """Build the viewer mesh from {node_id: (x, y, z)} + quad connectivity."""
         if not nodes or not elements:
-            return
+            return False
 
         node_ids = sorted(nodes.keys())
         self.id_to_idx = {nid: i for i, nid in enumerate(node_ids)}
 
-        pts = np.array([nodes[nid] for nid in node_ids])
+        pts = np.array([nodes[nid] for nid in node_ids], dtype=float)
         self.base_points = pts.copy()
 
         cells = []
@@ -140,8 +164,9 @@ class ModeShapeViewer(QWidget):
         self._grid = pv.UnstructuredGrid(cells, np.array(cell_types), pts.copy())
         self._ghost_grid = pv.UnstructuredGrid(cells, np.array(cell_types), pts.copy())
 
-        # Initial zero displacement contour
-        self._grid["Displacement (mm)"] = np.zeros(len(pts))
+        # Initial zero-amplitude contour
+        self._grid[_AMP] = np.zeros(len(pts))
+        self.mode_shape = None
 
         self.plotter.clear_actors()
 
@@ -155,14 +180,14 @@ class ModeShapeViewer(QWidget):
         # Deformed contour mesh
         self._mesh_actor = self.plotter.add_mesh(
             self._grid,
-            scalars="Displacement (mm)",
+            scalars=_AMP,
             cmap="turbo",
             show_edges=True,
             edge_color=theme.PANEL,
             line_width=0.5,
             clim=[0, 1],
             scalar_bar_args={
-                "title": "Displacement (mm)",
+                "title": _AMP,
                 "title_font_size": 11,
                 "label_font_size": 10,
                 "color": theme.TEXT,
@@ -170,12 +195,13 @@ class ModeShapeViewer(QWidget):
                 "position_y": 0.1,
                 "width": 0.08,
                 "height": 0.7,
-                "fmt": "%.3f",
+                "fmt": "%.2f",
             },
         )
 
         self.plotter.reset_camera()
         logger.info(f"Mode shape viewer: loaded {len(nodes)} nodes, {len(elements)} elements")
+        return True
 
     def load_cylinder(self, length=1.0, radius=0.05, n_z=26, n_theta=14):
         """Build a simple cylindrical rocket wireframe for analytic mode-shape
@@ -202,16 +228,17 @@ class ModeShapeViewer(QWidget):
 
         self._grid = pv.UnstructuredGrid(cells, np.array(ctypes), pts.copy())
         self._ghost_grid = pv.UnstructuredGrid(cells, np.array(ctypes), pts.copy())
-        self._grid["Displacement (mm)"] = np.zeros(len(pts))
+        self._grid[_AMP] = np.zeros(len(pts))
+        self.mode_shape = None      # sized for the previous mesh
 
         self.plotter.clear_actors()
         self._ghost_actor = self.plotter.add_mesh(
             self._ghost_grid, style="wireframe", color=theme.LINE_STRONG,
             line_width=1, opacity=0.35)
         self._mesh_actor = self.plotter.add_mesh(
-            self._grid, scalars="Displacement (mm)", cmap="turbo",
+            self._grid, scalars=_AMP, cmap="turbo",
             show_edges=True, edge_color=theme.PANEL, line_width=0.5, clim=[0, 1],
-            scalar_bar_args={"title": "Displacement", "title_font_size": 11,
+            scalar_bar_args={"title": _AMP, "title_font_size": 11,
                              "label_font_size": 10, "color": theme.TEXT,
                              "position_x": 0.85, "position_y": 0.1,
                              "width": 0.08, "height": 0.7, "fmt": "%.2f"})
@@ -282,19 +309,11 @@ class ModeShapeViewer(QWidget):
         # Update deformed geometry
         self._grid.points = self.base_points + disp_visual
 
-        # Contour shows normalized displacement magnitude (0–100%)
-        # so color mapping always shows the full shape pattern
+        # Contour: |φ| relative to the mode's own peak (0…1) — the colour map
+        # always shows the full shape pattern on the fixed 0–1 scale bar.
         raw_mags = np.linalg.norm(self.mode_shape, axis=1)
         mags_normalized = (raw_mags / max_raw * abs(sin_phase)) if max_raw > 1e-15 else raw_mags
-        self._grid["Displacement (mm)"] = mags_normalized * max_raw * 1000.0
-
-        if max_raw > 0:
-            # The plotter may have been cleared (e.g. New Project) between timer
-            # ticks, leaving no active mapper — skip rather than crash in a loop.
-            try:
-                self.plotter.update_scalar_bar_range([0, max_raw * 1000.0])
-            except Exception:
-                pass
+        self._grid[_AMP] = mags_normalized
 
     def clear(self):
         """Reset the viewer to empty state."""

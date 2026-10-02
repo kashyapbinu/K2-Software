@@ -148,11 +148,16 @@ class LoadCase:
     angle_of_attack_deg: float = 0.0
     # Recovery-specific
     recovery_shock_g: float = 0.0       # G-load for recovery shock
-    dynamic_amplification: float = 1.0  # DAF for transient loads
-    stress_concentration: float = 1.0   # Kt at attachment points
-    vehicle_mass_kg: float = 5.0        # For recovery force calculation
+    dynamic_amplification: float = 1.0  # DAF: scales the transient LOAD (gust, shock)
+    stress_concentration: float = 1.0   # Kt of details the mesh lacks (joints, slots)
+    vehicle_mass_kg: float = 5.0        # total vehicle mass at this condition
     # Tensile flag (recovery loads are tensile, not compressive)
     is_tensile: bool = False
+    # Vehicle model for the FE load set (structures.fe_loads)
+    motor_aft_m: float = 0.0            # motor aft end from the nose tip (0 = unknown)
+    motor_length_m: float = 0.0
+    drag_coefficient: float = 0.0       # CD of the drag load (0 → 0.5)
+    drag_force_N: float = 0.0           # drag from CFD; overrides q·A·CD when > 0
 
     @classmethod
     def max_thrust(cls, thrust: float, accel_g: float = 5.0,
@@ -177,14 +182,17 @@ class LoadCase:
             angle_of_attack_deg=angle_of_attack_deg,
             mach=mach, altitude_m=altitude_m,
             dynamic_pressure=q_dyn, is_tensile=False,
+            stress_concentration=1.8,       # couplers, fin slots, rail buttons
         )
 
     @classmethod
     def max_q(cls, thrust: float, q_dyn: float, mach: float,
               alt: float, aoa: float = 2.0) -> "LoadCase":
+        # Gust DAF 1.3 on the aerodynamic load; Kt 1.8 for unmeshed details.
         return cls(name="Max-Q", axial_force=thrust, dynamic_pressure=q_dyn,
                    mach=mach, altitude_m=alt, angle_of_attack_deg=aoa,
-                   acceleration_g=3.0)
+                   acceleration_g=3.0, dynamic_amplification=1.3,
+                   stress_concentration=1.8)
 
     @classmethod
     def recovery(cls, vehicle_mass_kg: float = 5.0,
@@ -262,6 +270,25 @@ class FEMConfig:
 # ── Results ───────────────────────────────────────────────────────────────────
 
 @dataclass
+class FEField:
+    """CalculiX nodal result on both wall surfaces of the expanded shell.
+    Mesh frame: z from the nose tip (m). Arrays are per result node."""
+    points: object                  # (N, 3) m
+    cells: object                   # (M, 8) hexahedra, rows into points
+    von_mises: object               # (N,) Pa
+    axial: object                   # (N,) Pa — σ along the body axis (fins: chordwise)
+    hoop: object                    # (N,) Pa — σ_θθ (fins: 0)
+    shear: object                   # (N,) Pa — |τ| in the wall plane
+    displacement: object            # (N, 3) m, rigid-body motion removed
+    yield_pa: object                # (N,) Pa — yield of the node's material
+    is_fin: object                  # (N,) bool
+    cell_is_fin: object = None      # (M,) bool
+    kt: float = 1.0                 # detail factor inside the safety factor
+    thermal: bool = False           # the stress is purely thermal
+    length: float = 0.0             # airframe length (m)
+
+
+@dataclass
 class FEMResult:
     """Results returned after a structural FEM analysis."""
     # Stress (Pa)
@@ -304,6 +331,13 @@ class FEMResult:
     # VTK output for PyVista rendering
     result_vtk: Optional[Path] = None
 
+    # CalculiX nodal field (static runs). The panel values, the stress
+    # profile, the 3D stress contour and the deformation view are all read
+    # from it, so they cannot disagree.
+    fe_field: Optional["FEField"] = None
+    kt_detail: float = 1.0          # Kt of unmeshed details, applied in safety_factor
+    applied_loads: dict = field(default_factory=dict)   # load-set summary
+
     # Comprehensive safety assessment (populated post-solve)
     safety_assessment: Optional['SafetyAssessment'] = None
 
@@ -327,16 +361,30 @@ class ModalResult:
     num_modes: int = 0
     frequencies_hz: list = field(default_factory=list)     # Natural frequencies
     mode_shapes: list = field(default_factory=list)        # [{node_id: (dx,dy,dz)}, ...]
-    descriptions: list = field(default_factory=list)       # ["1st Lateral Bending", ...]
+    descriptions: list = field(default_factory=list)       # ["1st Lateral Bending (X)", ...]
+    mode_numbers: list = field(default_factory=list)       # CalculiX mode no. of each entry
 
-    # ── Energy-based mode classification ──
-    mode_classifications: list = field(default_factory=list)   # ["Bending-Y", "Torsional", "Axial", "Coupled B-T"]
-    strain_energy_fractions: list = field(default_factory=list)  # [{"bending": 0.85, "torsion": 0.10, "axial": 0.05}, ...]
+    # ── FE mesh the mode shapes are defined on ──
+    # Carried with the result so a viewer never pairs these shapes with a mesh
+    # file that a later run (or a different working directory) replaced.
+    mesh_path: Optional[Path] = None
+    mesh_nodes: dict = field(default_factory=dict)         # {node_id: (x, y, z)}, Z = body axis
+    mesh_elements: list = field(default_factory=list)      # [(n1, n2, n3, n4), ...]
+
+    # ── Mode classification ──
+    mode_classifications: list = field(default_factory=list)   # ["Bending-X", "Bending-Y", "Axial", "Torsional", "Shell", "Fin"]
+    # FE modes: share of |φ|² per motion type (bending / torsion / axial /
+    # shell / fin) from the mode shape itself; analytical fallback: estimates.
+    strain_energy_fractions: list = field(default_factory=list)
 
     # ── Participation factors & effective modal mass ──
-    participation_factors: list = field(default_factory=list)   # [{"x": Γx, "y": Γy, "z": Γz}, ...]
-    effective_modal_mass: list = field(default_factory=list)    # [{"x": %, "y": %, "z": %}, ...] as fraction of total
-    generalized_mass: list = field(default_factory=list)       # [m_gen_1, m_gen_2, ...] kg
+    # FE modes: CalculiX's own tables, FE mesh frame (x, y lateral; z = body
+    # axis; rz = roll). |Γ| in √kg (mass-normalised modes); mass in % of total.
+    participation_factors: list = field(default_factory=list)   # [{"x": Γx, "y": Γy, "z": Γz, "rz": Γrz}, ...]
+    effective_modal_mass: list = field(default_factory=list)    # [{"x": %, "y": %, "z": %, "rz": %}, ...]
+    effective_mass_kg: list = field(default_factory=list)       # raw ccx rows (X, Y, Z, RX, RY, RZ) per mode
+    total_effective_mass_kg: tuple = ()                         # ccx TOTAL EFFECTIVE MASS (X, Y, Z, RX, RY, RZ)
+    generalized_mass: list = field(default_factory=list)       # [m_gen_1, m_gen_2, ...] kg (unit max |φ|)
     total_mass_kg: float = 0.0                                  # for normalization
 
     # ── Damping ──

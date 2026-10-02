@@ -5,7 +5,8 @@ Implements FEMSolver using the CalculiX open-source FEA suite (ccx).
 ccx binary must be in the K2 bin/ folder or on PATH.
 
 Physics:
-  - Static linear elastic (shell elements S4R)
+  - Static linear elastic, S4 shells (→ C3D8I, bending through the wall),
+    inertia-relieved free body on a 3-2-1 support (structures.fe_loads)
   - Modal eigenvalue analysis (Lanczos)
   - Linear buckling (eigenvalue)
   - Steady-state thermal
@@ -15,6 +16,8 @@ Mirrors the SU2 solver architecture (cfd/solvers/su2_solver.py).
 from __future__ import annotations
 import csv, logging, math, os, re, shutil, subprocess, sys, time
 from pathlib import Path
+
+import numpy as np
 
 # Suppress the console window when launching ccx (a console app) from the
 # windowed frozen build — otherwise a terminal flashes on every Run.
@@ -58,24 +61,40 @@ class CalculiXSolver(FEMSolver):
     # ── Mesh ─────────────────────────────────────────────────────────────────
 
     def generate_mesh(self, assembly=None) -> Path:
-        """Generate structural mesh via K2 meshing module."""
-        from structures.meshing import build_structural_mesh
+        """Generate the structural mesh (and its MeshInfo) via structures.meshing."""
+        from structures.meshing import build_structural_mesh_info
         cfg = self.config
         assembly = assembly or cfg.assembly
         if assembly is None:
             raise ValueError("No assembly provided for meshing.")
         out = cfg.work_dir / "structure_mesh.inp"
-        build_structural_mesh(
+        out, info = build_structural_mesh_info(
             assembly, out, cfg.mesh_refinement, cfg.element_type,
             custom_circum=cfg.custom_circum,
             custom_axial_per_cal=cfg.custom_axial_per_cal,
         )
+        if len(info.pieces) > 1:
+            raise ValueError(
+                f"The structural model falls apart into {len(info.pieces)} unconnected "
+                "pieces (" + " | ".join(", ".join(p) for p in info.pieces) + "). "
+                "Components must meet end to end — check their positions and diameters.")
         self._mesh_path = out
+        self._mesh_info = info
         self._material = get_structural_material(cfg.material_name)
         logger.info(f"Mesh: {out}")
         return out
 
     # ── Case Generation ──────────────────────────────────────────────────────
+
+    def _section_materials(self) -> dict:
+        """{section name: StructuralMaterial}. The airframe takes the material
+        chosen for the analysis; a fin set keeps its own component material,
+        as structures.workstation.fin_analysis does."""
+        default = get_structural_material(self.config.material_name)
+        info = getattr(self, "_mesh_info", None)
+        return {sec.name: (get_structural_material(sec.material)
+                           if sec.kind == "fin" and sec.material else default)
+                for sec in (info.sections if info else [])}
 
     def generate_case(self) -> Path:
         """Write the complete CalculiX .inp input deck."""
@@ -88,34 +107,33 @@ class CalculiXSolver(FEMSolver):
         mesh_text = ""
         if self._mesh_path and self._mesh_path.is_file():
             mesh_text = self._mesh_path.read_text(encoding="ascii", errors="replace")
+        self._sec_mat = self._section_materials()
+        info = getattr(self, "_mesh_info", None)
 
         with open(inp, "w", encoding="ascii", errors="replace") as f:
-            f.write("** K2 AeroSim — CalculiX Analysis\n**\n")
-            # Include mesh
+            f.write("** K2 AeroSim - CalculiX Analysis\n**\n")
             f.write(mesh_text + "\n")
-            # Shell section — assign thickness + material to all elements
-            wt = 0.002
-            if cfg.assembly:
-                # Try to get wall thickness from first body tube
-                from core.components import BodyTube, NoseCone
-                for stage in cfg.assembly.stages:
-                    for comp in stage.children:
-                        if isinstance(comp, NoseCone):
-                            wt = getattr(comp, 'wall_thickness', 0.002)
-                            break
-                        elif isinstance(comp, BodyTube):
-                            wt = (comp.outer_diameter_val - comp.inner_diameter) / 2
-                            break
-
-            f.write(f"*SHELL SECTION, ELSET=EALL, MATERIAL=MAT1\n")
-            f.write(f"{wt:.6f}\n")
-            # Material definition
-            f.write(f"*MATERIAL, NAME=MAT1\n")
-            f.write(f"*ELASTIC\n{mat.E:.6e}, {mat.nu:.4f}\n")
-            f.write(f"*DENSITY\n{mat.density:.2f}\n")
-            if cfg.analysis_type == "thermal" or lc.delta_T != 0:
-                f.write(f"*EXPANSION\n{mat.cte:.6e}\n")
-                f.write(f"*CONDUCTIVITY\n{mat.thermal_conductivity:.4f}\n")
+            # One card per distinct material and one shell section per
+            # component, each with that component's own wall thickness. A
+            # single section used to give every element the nose-cone wall
+            # thickness (4 mm fins were analysed as 2.5 mm plates).
+            mat_id = {}
+            for m in [mat] + list(self._sec_mat.values()):
+                if m.name in mat_id:
+                    continue
+                mat_id[m.name] = f"MAT{len(mat_id) + 1}"
+                f.write(f"*MATERIAL, NAME={mat_id[m.name]}\n")
+                f.write(f"*ELASTIC\n{m.E:.6e}, {m.nu:.4f}\n")
+                f.write(f"*DENSITY\n{m.density:.2f}\n")
+                f.write(f"*EXPANSION\n{m.cte:.6e}\n")
+                f.write(f"*CONDUCTIVITY\n{m.thermal_conductivity:.4f}\n")
+            if info and info.sections:
+                for sec in info.sections:
+                    f.write(f"*SHELL SECTION, ELSET={sec.name}, "
+                            f"MATERIAL={mat_id[self._sec_mat[sec.name].name]}\n")
+                    f.write(f"{sec.thickness:.6f}\n")
+            else:
+                f.write(f"*SHELL SECTION, ELSET=EALL, MATERIAL={mat_id[mat.name]}\n0.002000\n")
 
             # Analysis-specific cards
             if cfg.analysis_type == "static":
@@ -132,43 +150,46 @@ class CalculiXSolver(FEMSolver):
         return inp
 
     def _write_static_step(self, f, lc: LoadCase, cfg: FEMConfig):
-        """Write a static analysis step."""
-        f.write("**\n** STATIC ANALYSIS\n**\n")
-        # Boundary conditions — constrain aft ring nodes
-        # Find aft node set from mesh, or use NAFT if generated by mesher
-        f.write("** Boundary: fix aft end\n")
-        f.write("*BOUNDARY\n")
-        # Constrain nodes in NAFT set (generated by mesher) or fall back to node 1
-        f.write("NAFT, 1, 3, 0.0\n")  # fix translations at aft ring
-        f.write("NAFT, 4, 6, 0.0\n")  # fix rotations at aft ring
-        # Prevent rigid body rotation at nose
-        f.write("NFWD, 2, 3, 0.0\n")
+        """Static step: the condition's whole load set on a free body.
 
-        # *INITIAL CONDITIONS must appear BEFORE *STEP (CCX requirement)
-        if lc.delta_T != 0:
-            f.write("*INITIAL CONDITIONS, TYPE=TEMPERATURE\nNALL, 293.15\n")
-
+        structures.fe_loads builds thrust, drag, the aerodynamic normal force,
+        the recovery harness load, pressure and temperature, balanced by the
+        vehicle's own inertia, on a statically determinate 3-2-1 support whose
+        reactions are round-off. The old deck loaded only the shell's own
+        weight, clamped the tail AND pinned the nose tip (the pin made the
+        raw peak sit at the nose), and left every flight load to hand
+        formulas added after the solve."""
+        from structures.fe_loads import FEMesh, T_REF, build_static_loads
+        mesh = FEMesh.read(self._mesh_path)
+        sec_mat = self._sec_mat
+        lm = build_static_loads(
+            mesh, self._mesh_info, cfg.assembly, lc,
+            density_of=lambda sec: sec_mat.get(sec.name, self._material).density,
+            cfd_pressure=self._cfd_element_pressures(cfg, mesh))
+        self._fe_mesh, self._load_model = mesh, lm
+        A, B, C = lm.support
+        f.write("**\n** STATIC ANALYSIS - inertia-relieved free body\n**\n")
+        f.write(f"*NSET, NSET=NSUPPORT\n{A}, {B}, {C}\n")
+        f.write(f"*BOUNDARY\n{A}, 1, 3\n{B}, 2, 3\n{C}, 3, 3\n")
+        if lm.temperatures is not None:
+            f.write(f"*INITIAL CONDITIONS, TYPE=TEMPERATURE\nNALL, {T_REF:.2f}\n")
         f.write("*STEP\n*STATIC\n")
-        # Loads
-        if lc.axial_force != 0:
-            f.write(f"** Axial force via body acceleration: {lc.axial_force:.1f} N\n")
-            f.write(f"*DLOAD\nEALL, GRAV, {abs(lc.acceleration_g * 9.81):.4f}, 0., 0., -1.\n")
-        if lc.internal_pressure != 0:
-            f.write(f"** Internal pressure: {lc.internal_pressure:.1f} Pa\n")
-            f.write(f"*DLOAD\nEALL, P, {-lc.internal_pressure:.4f}\n")
-        if lc.delta_T != 0:
-            f.write(f"** Thermal load: dT = {lc.delta_T:.1f} K\n")
-            f.write(f"*TEMPERATURE\nNALL, {293.15 + lc.delta_T:.2f}\n")
-
-        # Mapped CFD surface-pressure field (per-element *DLOAD P)
-        self._write_cfd_pressure(f, cfg)
-
-        # Output requests
-        f.write("*NODE FILE\nU\n")
-        f.write("*EL FILE\nS, E\n")
-        f.write("*NODE PRINT, NSET=NALL, TOTALS=YES\nU\n")
-        f.write("*EL PRINT, ELSET=EALL, TOTALS=YES\nS\n")
+        fmax = float(np.abs(lm.forces).max()) if lm.forces.size else 0.0
+        lines = [f"{nid}, {dof + 1}, {lm.forces[k, dof]:.10e}\n"
+                 for k, nid in enumerate(mesh.ids) for dof in range(3)
+                 if abs(lm.forces[k, dof]) > 1e-12 * fmax]
+        if lines:
+            f.write("*CLOAD\n")
+            f.writelines(lines)
+        if lm.temperatures is not None:
+            f.write("*TEMPERATURE\n")
+            f.writelines(f"{nid}, {lm.temperatures[k]:.4f}\n" for k, nid in enumerate(mesh.ids))
+        f.write("*NODE FILE\nU\n*EL FILE\nS\n")
+        f.write("*NODE PRINT, NSET=NSUPPORT, TOTALS=ONLY\nRF\n")
         f.write("*END STEP\n")
+        logger.info("Load set: " + ", ".join(
+            f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}"
+            for k, v in lm.summary.items()))
 
     def _write_modal_step(self, f, cfg: FEMConfig):
         """Write a modal (frequency) analysis step.
@@ -246,132 +267,69 @@ class CalculiXSolver(FEMSolver):
         p11 = P0 * (1.0 - L * 11000.0 / T0) ** (g / (R * L))
         return p11 * math.exp(-g * (h - 11000.0) / (R * 216.65))
 
-    def _build_fem_stations(self):
-        """Parse the structural mesh into per-element stations for pressure
-        mapping: ``(elem_id, axial, area_m2, outward_axial_normal)``.
+    def _cfd_element_pressures(self, cfg: FEMConfig, mesh):
+        """{element id: gauge pressure (Pa)} from a CFD surface file, or None.
 
-        The body axis is Z in the mesh, but ``pressure_mapping``'s IDW metric
-        treats the *second* tuple slot as the axis ('x'), so the axial (z)
-        coordinate is placed there. Returns ``[]`` if the mesh is unavailable.
-        """
-        import numpy as np
-        mesh = getattr(self, "_mesh_path", None)
-        if not mesh or not mesh.is_file():
-            return []
-        nodes, elements = {}, []
-        in_nodes = in_elems = False
-        for line in mesh.read_text(encoding="ascii", errors="replace").splitlines():
-            s = line.strip()
-            if s.startswith("*NODE"):
-                in_nodes, in_elems = True, False; continue
-            if s.startswith("*ELEMENT"):
-                in_elems, in_nodes = True, False; continue
-            if s.startswith("*"):
-                in_nodes = in_elems = False; continue
-            parts = [p for p in s.split(",") if p.strip() != ""]
-            if in_nodes and len(parts) >= 4:
-                nodes[int(parts[0])] = (float(parts[1]), float(parts[2]), float(parts[3]))
-            elif in_elems and len(parts) >= 5:
-                elements.append((int(parts[0]), [int(p) for p in parts[1:5]]))
-        if not nodes or not elements:
-            return []
-        stations = []
-        for eid, en in elements:
-            try:
-                p = [np.asarray(nodes[n], dtype=float) for n in en]
-            except KeyError:
-                continue
-            # Newell normal (magnitude = 2·area) + centroid
-            nrm = np.zeros(3)
-            for i in range(len(p)):
-                a, b = p[i], p[(i + 1) % len(p)]
-                nrm[0] += (a[1] - b[1]) * (a[2] + b[2])
-                nrm[1] += (a[2] - b[2]) * (a[0] + b[0])
-                nrm[2] += (a[0] - b[0]) * (a[1] + b[1])
-            mag = float(np.linalg.norm(nrm))
-            area = 0.5 * mag
-            centroid = sum(p) / len(p)
-            if mag <= 1e-15:
-                continue
-            unit = nrm / mag
-            # Only body-of-revolution elements can take the mapped pressure:
-            # the IDW field is azimuthally averaged and the outward-normal
-            # disambiguation below needs a radial normal. Fin faces (normal
-            # circumferential) and base plates (normal axial, radial dot ~0)
-            # get an arbitrary sign and meaningless magnitude — skip them so
-            # they keep the analytic loads instead.
-            r_c = math.hypot(float(centroid[0]), float(centroid[1]))
-            if r_c < 1e-9:
-                continue
-            radial_dot = (unit[0] * centroid[0] + unit[1] * centroid[1]) / r_c
-            if abs(radial_dot) < 0.35:
-                continue
-            # Outward = away from the Z body axis (radial in x,y)
-            if radial_dot < 0.0:
-                unit = -unit
-            n_axial = float(unit[2])
-            stations.append((eid, float(centroid[2]), area, n_axial))
-        return stations
-
-    def _write_cfd_pressure(self, f, cfg: FEMConfig):
-        """Map a CFD surface-pressure field onto the mesh and emit per-element
-        ``*DLOAD ... P`` cards. No-op when no VTK is configured or parsing
-        yields nothing — the solve falls back to lumped/analytic loads.
-        """
+        pressure_mapping's IDW treats the second slot of a station as the axis,
+        so the axial z goes there; the result is azimuthally averaged, so only
+        body-of-revolution elements take it — fins, steps and on-axis elements
+        keep the analytic loads (an undefined outward normal gave fins ±17 kPa
+        of arbitrary sign). SU2 writes ABSOLUTE pressure: it is converted to
+        gauge, or a Cp field is scaled by q. fe_loads balances the mapped
+        load's net force like every other load."""
         vtk = getattr(cfg, "cfd_surface_vtk", None)
         if not vtk:
-            return
-        from pathlib import Path
+            return None
         vtk = Path(vtk)
         if not vtk.is_file():
             logger.warning("CFD surface VTK not found: %s — skipping pressure map", vtk)
-            return
+            return None
         try:
             from structures.pressure_mapping import (
-                _parse_vtu_points_and_pressure, map_pressures_idw,
-                generate_dload_cards)
+                _parse_vtu_points_and_pressure, map_pressures_idw)
             cfd_pts, cfd_pres = _parse_vtu_points_and_pressure(vtk)
             if not cfd_pts or not cfd_pres:
                 logger.warning("CFD VTK has no usable pressure data — skipping map")
-                return
-            # Remap body axis (z) into the x slot to match the IDW metric.
+                return None
             cfd_pts = [(z, x, y) for (x, y, z) in cfd_pts]
-            # SU2 writes absolute static pressure; the airframe only feels
-            # the gauge component (interior vented to ambient). A Cp field
-            # (values near 0) must not have p_amb subtracted, so only treat
-            # the data as absolute when it sits near atmospheric magnitude.
             lc = getattr(cfg, "load_case", None) or LoadCase()
             p_amb = self._isa_pressure(getattr(lc, "altitude_m", 0.0))
             med = sorted(cfd_pres)[len(cfd_pres) // 2]
             if med > 0.5 * p_amb:
                 cfd_pres = [p - p_amb for p in cfd_pres]
-                logger.info("CFD pressure converted to gauge (p_amb=%.0f Pa "
-                            "at %.0f m)", p_amb, getattr(lc, "altitude_m", 0.0))
+                logger.info("CFD pressure converted to gauge (p_amb=%.0f Pa)", p_amb)
             elif max(abs(p) for p in cfd_pres) < 50.0:
                 q = getattr(lc, "dynamic_pressure", 0.0)
-                if q > 0.0:
-                    cfd_pres = [p * q for p in cfd_pres]
-                    logger.info("CFD Cp field scaled by q=%.0f Pa", q)
-                else:
-                    logger.warning("CFD field looks like Cp but no dynamic "
-                                   "pressure in load case — skipping map")
-                    return
-            stations = self._build_fem_stations()
+                if q <= 0.0:
+                    logger.warning("CFD field looks like Cp but the load case has no "
+                                   "dynamic pressure — skipping map")
+                    return None
+                cfd_pres = [p * q for p in cfd_pres]
+                logger.info("CFD Cp field scaled by q=%.0f Pa", q)
+            info = self._mesh_info
+            body = {e for sec in info.sections if sec.kind not in ("fin", "step")
+                    for e in mesh.elsets.get(sec.name, ())}
+            stations = []
+            for k, eid in enumerate(mesh.elem_ids):
+                if int(eid) not in body:
+                    continue
+                c, nrm = mesh.centroid[k], mesh.normal[k]
+                r_c = math.hypot(float(c[0]), float(c[1]))
+                if r_c < 1e-9 or abs((nrm[0] * c[0] + nrm[1] * c[1]) / r_c) < 0.35:
+                    continue
+                stations.append((int(eid), float(c[2]), float(mesh.area[k]), float(nrm[2])))
             if not stations:
-                logger.warning("No FEM stations built — skipping CFD pressure map")
-                return
-            result = map_pressures_idw(cfd_pts, cfd_pres, stations)
-            if not result.element_pressures:
-                logger.warning("CFD pressure map produced no element loads")
-                return
-            f.write("**\n** Mapped CFD surface pressure (IDW)\n")
-            f.write(generate_dload_cards(result))
-            self._cfd_mapping = result
-            ps = [p for _, p in result.element_pressures]
-            logger.info("CFD pressure mapped onto %d elements (%.0f..%.0f Pa)",
-                        result.num_fem_elements, min(ps), max(ps))
+                logger.warning("No airframe elements to map CFD pressure onto")
+                return None
+            mapped = dict(map_pressures_idw(cfd_pts, cfd_pres, stations).element_pressures)
+            if mapped:
+                ps = list(mapped.values())
+                logger.info("CFD pressure mapped onto %d elements (%.0f..%.0f Pa)",
+                            len(ps), min(ps), max(ps))
+            return mapped or None
         except Exception as exc:
             logger.error("CFD pressure mapping failed: %s", exc)
+            return None
 
     # ── Run ──────────────────────────────────────────────────────────────────
 
@@ -436,392 +394,166 @@ class CalculiXSolver(FEMSolver):
     # ── Parse Results ────────────────────────────────────────────────────────
 
     def parse_results(self) -> FEMResult:
-        """Parse CalculiX .frd/.dat output and return FEMResult."""
+        """Read the CalculiX nodal field (.frd) into an FEMResult.
+
+        Every value the Structures panel shows is read off this one field, and
+        the stress profile, the 3D contour and the deformation view draw the
+        same field, so none of them can disagree. The old path parsed a
+        self-weight-only solve and then replaced ~99 % of the answer with hand
+        formulas (raw 0.2 MPa shown as 21.6 MPa)."""
         result = FEMResult()
-        result.material_name = self._material.name if self._material else ""
-        result.yield_strength = self._material.yield_strength if self._material else 276e6
         mat = self._material or get_structural_material("Aluminum 6061-T6")
+        result.material_name = mat.name
+        result.yield_strength = mat.yield_strength
+        result.load_case_name = self.config.load_case.name
 
-        # Try to parse .dat file for stress/displacement summary
-        dat_path = self.config.work_dir / "analysis.dat"
         frd_path = self.config.work_dir / "analysis.frd"
-
-        if dat_path.is_file():
-            result = self._parse_dat(dat_path, result, mat)
-            # CalculiX only sees axial_force + internal_pressure from the LoadCase.
-            # Aerodynamic bending, fin root loads, and thermal stresses are NOT
-            # in the FEM model — superimpose them analytically onto the FEM result.
-            result = self._superimpose_aero_loads(result, mat)
-        elif not self._ccx_exe:
-            # Analytical fallback
-            result = self._analytical_fallback(result, mat)
-
-        if frd_path.is_file():
+        if frd_path.is_file() and getattr(self, "_load_model", None) is not None:
+            self._results_from_frd(frd_path, result)
             result.result_vtk = frd_path
+            result.converged = True
+            return result
 
-        # Compute safety metrics
+        if not self._ccx_exe:
+            result = self._analytical_fallback(result, mat)
         if result.max_von_mises > 0:
             result.safety_factor = mat.yield_strength / result.max_von_mises
             result.yield_utilization = result.max_von_mises / mat.yield_strength
-            sf_req = self.config.safety_factor_required
-            result.margin_of_safety = (result.safety_factor / sf_req) - 1.0
+            result.margin_of_safety = (result.safety_factor
+                                       / self.config.safety_factor_required) - 1.0
         else:
             result.safety_factor = float('inf')
             result.margin_of_safety = float('inf')
             result.yield_utilization = 0.0
-
         result.converged = True
-        result.load_case_name = self.config.load_case.name
         logger.info(
-            f"FEM Results: \u03c3_vm={result.max_von_mises/1e6:.1f} MPa, "
-            f"SF={result.safety_factor:.2f}, MoS={result.margin_of_safety:.2f}"
+            f"FEM Results (analytical): σ_vm={result.max_von_mises/1e6:.1f} MPa, "
+            f"SF={result.safety_factor:.2f}"
         )
         return result
 
-    def _get_element_z(self) -> dict:
-        """Parse mesh file to get Z-coordinate for each element."""
-        z_map = {}
-        try:
-            inp_path = self.config.work_dir / "structure_mesh.inp"
-            if not inp_path.is_file(): return z_map
-            nodes = {}; in_nodes = False; in_elems = False
-            for line in inp_path.read_text(encoding="utf-8").splitlines():
-                if line.startswith("*NODE"): in_nodes = True; in_elems = False; continue
-                if line.startswith("*ELEMENT"): in_elems = True; in_nodes = False; continue
-                if line.startswith("*"): in_nodes = in_elems = False; continue
-                
-                parts = line.split(",")
-                if in_nodes and len(parts) >= 4:
-                    nodes[int(parts[0])] = float(parts[3])
-                elif in_elems and len(parts) >= 5:
-                    eid = int(parts[0])
-                    nz = [nodes.get(int(n), 0.0) for n in parts[1:] if n.strip()]
-                    if nz: z_map[eid] = sum(nz) / len(nz)
-        except Exception:
-            pass
-        return z_map
-
-    def _parse_dat(self, dat_path: Path, result: FEMResult, mat) -> FEMResult:
-        """Parse CalculiX .dat text output for stress/displacement values."""
-        try:
-            text = dat_path.read_text(encoding="utf-8", errors="replace")
-            # Find maximum stress values from element output
-            stresses = []  # list of (eid, vm)
-            disp_vals = []
-            in_stress = False
-            in_disp = False
-            for line in text.splitlines():
-                ll = line.strip().lower()
-                if "stresses" in ll and "elem" in ll:
-                    in_stress = True; in_disp = False; continue
-                if "displacements" in ll and ("vx" in ll or "set" in ll):
-                    in_disp = True; in_stress = False; continue
-                # Section break: new step/increment header (NOT empty lines!)
-                if "s t e p" in ll or "increment" in ll:
-                    in_stress = in_disp = False; continue
-                # Skip blank lines within data sections
-                if not line.strip():
-                    continue
-
-                parts = line.split()
-                # CalculiX stress format: elem integ_pt sxx syy szz sxy sxz syz [label]
-                if in_stress and len(parts) >= 8:
-                    try:
-                        eid = int(parts[0])
-                        sxx = float(parts[2])
-                        syy = float(parts[3])
-                        szz = float(parts[4])
-                        sxy = float(parts[5])
-                        sxz = float(parts[6])
-                        syz = float(parts[7])
-                        vm = math.sqrt(0.5 * ((sxx-syy)**2 + (syy-szz)**2 + (szz-sxx)**2
-                                              + 6*(sxy**2 + sxz**2 + syz**2)))
-                        # Store full tensor components per element
-                        stresses.append((eid, vm, sxx, syy, szz, sxy, sxz, syz))
-                    except (ValueError, IndexError):
-                        pass
-                # CalculiX displacement format: node_id vx vy vz
-                elif in_disp and len(parts) >= 4:
-                    try:
-                        dx = float(parts[1])
-                        dy = float(parts[2])
-                        dz = float(parts[3])
-                        disp_vals.append(math.sqrt(dx**2 + dy**2 + dz**2))
-                    except (ValueError, IndexError):
-                        pass
-
-            if stresses:
-                raw_vms = [s[1] for s in stresses]
-                result.max_von_mises = max(raw_vms)
-
-                # ── Extract ACTUAL stress components from FEM tensor ──────
-                # For thin-walled shells in cylindrical coords:
-                #   axial ≈ szz (along body axis)
-                #   hoop  ≈ sxx or syy (circumferential, depends on orientation)
-                #   shear ≈ max(|sxy|, |sxz|, |syz|)
-                # We take the maximum of each component across all elements
-                max_axial = 0.0
-                max_hoop = 0.0
-                max_shear = 0.0
-                for entry in stresses:
-                    _, _, sxx, syy, szz, sxy, sxz, syz = entry
-                    # For axisymmetric shell: szz is along body axis (axial)
-                    # sxx/syy are in-plane (hoop/radial)
-                    max_axial = max(max_axial, abs(szz))
-                    max_hoop = max(max_hoop, abs(sxx), abs(syy))
-                    max_shear = max(max_shear, abs(sxy), abs(sxz), abs(syz))
-
-                result.max_axial_stress = max_axial
-                result.max_hoop_stress = max_hoop
-                result.max_shear_stress = max_shear
-                logger.info(
-                    f"Stress decomposition from FEM tensor: "
-                    f"σ_axial={max_axial/1e6:.1f} MPa, "
-                    f"σ_hoop={max_hoop/1e6:.1f} MPa, "
-                    f"τ_max={max_shear/1e6:.1f} MPa"
-                )
-
-                # Map to Z-coordinates and smooth/envelope stresses
-                elem_z = self._get_element_z()
-                z_stations = {}
-                for entry in stresses:
-                    eid, vm = entry[0], entry[1]
-                    z = elem_z.get(eid, float(eid))
-                    z_round = round(z, 3)
-                    if z_round not in z_stations:
-                        z_stations[z_round] = []
-                    z_stations[z_round].append(vm)
-                
-                # Envelope: max stress at each Z-station
-                smoothed = [(z, max(vms)) for z, vms in sorted(z_stations.items())]
-                result.element_stresses = smoothed
-                logger.info(f"Parsed {len(stresses)} element stresses, smoothed to {len(smoothed)} stations, max σ_vm = {result.max_von_mises/1e6:.1f} MPa")
-            if disp_vals:
-                # Filter out unreasonable values (> 1m displacement = numerical artifact)
-                reasonable = [d for d in disp_vals if d < 1.0]
-                if reasonable:
-                    result.max_displacement_mm = max(reasonable) * 1000.0
-                else:
-                    # Use actual 95th percentile
-                    disp_sorted = sorted(disp_vals)
-                    idx_95 = int(len(disp_sorted) * 0.95)
-                    idx_95 = min(idx_95, len(disp_sorted) - 1)
-                    result.max_displacement_mm = disp_sorted[idx_95] * 1000.0
-                result.element_displacements = [(i, min(d, 1.0)*1000) for i, d in enumerate(disp_vals)]
-                logger.info(f"Parsed {len(disp_vals)} displacements, max = {result.max_displacement_mm:.4f} mm")
-
-        except Exception as e:
-            logger.warning(f"DAT parse error: {e}")
-        return result
-
-    def _superimpose_aero_loads(self, result: FEMResult, mat) -> FEMResult:
-        """Superimpose condition-specific loads that CalculiX doesn't model.
-
-        CalculiX only applies axial_force and internal_pressure from the LoadCase.
-        It does NOT model:
-        - Aerodynamic bending from angle of attack
-        - Fin root bending at fin-body junction
-        - Stress concentrations at couplers/joints/cutouts
-        - Dynamic amplification from gust response
-        - Thermal gradient stress
-
-        This method adds these analytically to the parsed FEM result.
-        """
+    def _results_from_frd(self, frd_path: Path, result: FEMResult):
+        """Fill ``result`` from the expanded-shell nodal field of the .frd."""
+        from structures.frd import read_frd
+        from structures.solvers.base import FEField
+        frd = read_frd(frd_path)
+        mesh, info, lm = self._fe_mesh, self._mesh_info, self._load_model
         lc = self.config.load_case
-        assembly = self.config.assembly
-        if assembly is None:
-            return result
+        sec_of = {e: sec for sec in info.sections for e in mesh.elsets.get(sec.name, ())}
+        S, U = frd.blocks.get("STRESS", {}), frd.blocks.get("DISP", {})
 
-        d_ref, r, total_L, wt, r_o, r_i, cross_area, I = self._get_geometry(mat)
-        vm_fem = result.max_von_mises  # base FEM stress
+        # Expanded hexahedron of shell element e: nodes 0-3 are the inner face,
+        # 4-7 the outer face, each in the order of the shell's own nodes.
+        ids, row, parent, cells, cell_fin = [], {}, {}, [], []
+        on_fin, on_body, yld = set(), set(), {}
+        for eid, (etype, conn) in frd.elements.items():
+            shell, sec = mesh.elements.get(eid), sec_of.get(eid)
+            if shell is None or sec is None or len(conn) != 8:
+                continue
+            ys = self._sec_mat[sec.name].yield_strength
+            for j, nid in enumerate(conn):
+                if nid not in row:
+                    row[nid] = len(ids)
+                    ids.append(nid)
+                parent[nid] = shell[j % 4]
+                (on_fin if sec.kind == "fin" else on_body).add(nid)
+                yld[nid] = min(yld.get(nid, ys), ys)
+            cells.append([row[n] for n in conn])
+            cell_fin.append(sec.kind == "fin")
+        if not ids:
+            raise RuntimeError(f"No shell results in {frd_path}")
+        P = np.array([frd.nodes[n] for n in ids], dtype=float)
+        sig = np.array([(S.get(n) or [0.0] * 6)[:6] for n in ids], dtype=float)
+        disp = np.array([(U.get(n) or [0.0] * 3)[:3] for n in ids], dtype=float)
+        sxx, syy, szz, sxy, syz, szx = sig.T
+        vm = np.sqrt(0.5 * ((sxx - syy) ** 2 + (syy - szz) ** 2 + (szz - sxx) ** 2)
+                     + 3.0 * (sxy ** 2 + syz ** 2 + szx ** 2))
+        fin = np.array([n in on_fin and n not in on_body for n in ids])
+        par = np.array([mesh.xyz[mesh.index[parent[n]]] for n in ids])
+        th = np.arctan2(par[:, 1], par[:, 0])
+        c, s = np.cos(th), np.sin(th)
+        # Wall-plane components: airframe in cylindrical (z, θ); a fin in its
+        # own plane (radial, z). The axial σ_zz is the stress along the body.
+        hoop = np.where(fin, 0.0, sxx * s * s + syy * c * c - 2.0 * sxy * s * c)
+        shear = np.where(fin, np.abs(szx * c + syz * s), np.abs(-szx * s + syz * c))
+        y_pa = np.array([yld[n] for n in ids])
+        u_el = disp - _rigid_body_fit(P, disp)
+        kt = max(float(lc.stress_concentration), 1.0)
+        thermal = lc.name == "Thermal"
 
-        Kt_detail = 1.8  # couplers, fin slots, rail buttons
+        # Per station (parent-node z): envelopes for the stress profile, and
+        # the ring decomposition of σ_zz into membrane + beam bending.
+        zkey = np.round(par[:, 2], 9)
+        order = np.argsort(zkey, kind="stable")
+        cuts = np.nonzero(np.diff(zkey[order]))[0] + 1
+        profile, defl, membrane, bending = [], [], 0.0, 0.0
+        for grp in np.split(order, cuts):
+            z = float(par[grp[0], 2])
+            profile.append((z, float(vm[grp].max())))
+            defl.append((z, float(np.linalg.norm(u_el[grp], axis=1).max() * 1000.0)))
+            b = grp[~fin[grp]]
+            if len(b) >= 6:
+                ring = szz[b]
+                membrane = max(membrane, abs(float(ring.mean())))
+                bending = max(bending, float(np.hypot(2 * np.mean(ring * c[b]),
+                                                      2 * np.mean(ring * s[b]))))
 
-        # Scale factor to scale base FEM stress (run under gravity load) to full thrust/shock load
-        scale_factor = 1.0
-        if lc.acceleration_g != 0:
-            mass = 5.0
-            if assembly:
-                if hasattr(assembly, 'total_mass'):
-                    mass = assembly.total_mass() if callable(assembly.total_mass) else assembly.total_mass
-            F_grav = abs(mass * lc.acceleration_g * 9.81)
-            if F_grav > 0:
-                scale_factor = abs(lc.axial_force) / F_grav
+        sf_node = np.where(vm > 0, y_pa / (kt * np.maximum(vm, 1e-30)), np.inf)
+        result.max_von_mises = float(vm.max())
+        result.max_axial_stress = float(np.abs(szz).max())
+        result.max_hoop_stress = float(np.abs(hoop).max())
+        result.max_shear_stress = float(shear.max())
+        result.max_bending_stress = bending
+        result.max_thermal_stress = float(vm.max()) if thermal else 0.0
+        result.max_displacement_mm = float(np.linalg.norm(u_el, axis=1).max() * 1000.0)
+        result.element_stresses = profile
+        result.element_displacements = defl
+        result.kt_detail = kt
+        result.safety_factor = float(sf_node.min())
+        result.yield_utilization = float((kt * vm / y_pa).max())
+        result.margin_of_safety = result.safety_factor / self.config.safety_factor_required - 1.0
+        for label, sel in (("Airframe", ~fin), ("Fins", fin)):
+            if sel.any():
+                result.component_results[label] = {
+                    "max_stress": float(vm[sel].max()), "sf": float(sf_node[sel].min())}
+        result.applied_loads = dict(lm.summary)
+        result.applied_loads["axial_membrane_Pa"] = membrane
+        R = self._support_reaction()
+        if R is not None:
+            result.applied_loads["support_reaction_N"] = R
+        result.fe_field = FEField(
+            points=P, cells=np.array(cells, dtype=np.int64), von_mises=vm, axial=szz,
+            hoop=hoop, shear=shear, displacement=u_el, yield_pa=y_pa, is_fin=fin,
+            cell_is_fin=np.array(cell_fin, dtype=bool),
+            kt=kt, thermal=thermal, length=float(mesh.xyz[:, 2].max()))
+        k = int(np.argmax(vm))
+        logger.info(
+            f"FEM Results: σ_vm={result.max_von_mises/1e6:.2f} MPa at z={par[k, 2]:.3f} m "
+            f"({'fin' if fin[k] else 'airframe'}), SF={result.safety_factor:.2f} (Kt {kt:g}), "
+            f"max defl {result.max_displacement_mm:.3f} mm, support reaction "
+            f"{R if R is not None else float('nan'):.2e} N")
 
-        vm_fem_scaled = vm_fem * scale_factor
-
-        if lc.name in ("Max Thrust", "Max-Q"):
-            # Compute aerodynamic bending stress
-            q_dyn = lc.dynamic_pressure
-            if q_dyn <= 0 and lc.mach > 0:
-                try:
-                    from cfd.solvers.base import isa_conditions
-                    P, T, rho = isa_conditions(lc.altitude_m)
-                    a_s = math.sqrt(1.4 * 287.05 * T)
-                    V = lc.mach * a_s
-                    q_dyn = 0.5 * rho * V ** 2
-                except Exception:
-                    V = lc.mach * 340.0
-                    q_dyn = 0.5 * 1.225 * V ** 2
-
-            aoa = lc.angle_of_attack_deg if lc.angle_of_attack_deg > 0 else 2.0
-            if lc.name == "Max-Q":
-                aoa = max(aoa, 3.0)  # Max-Q uses higher AoA
-            aoa_rad = math.radians(aoa)
-
-            # Body normal force (side-projected area)
-            A_body_side = d_ref * total_L
-            F_body_normal = q_dyn * 2.0 * aoa_rad * A_body_side
-
-            # Fin normal force (planform area)
-            fin_span = d_ref * 0.8
-            fin_chord = total_L * 0.12
-            A_fin_plan = fin_span * fin_chord
-            n_fins = 3
-            F_fins_normal = q_dyn * 4.0 * aoa_rad * A_fin_plan * n_fins
-            F_normal_total = F_body_normal + F_fins_normal
-            # CFD-derived lateral force (LoadCase.lateral_force) overrides the
-            # estimate when larger — conservative, mirrors the axial handling.
-            if lc.lateral_force > 0:
-                F_normal_total = max(F_normal_total, lc.lateral_force)
-
-            # Bending moment at critical section
-            M_bend = F_normal_total * total_L * 0.35
-            sigma_bend = M_bend * r_o / I if I > 0 else 0
-
-            # Fin root stress
-            F_per_fin = F_fins_normal / n_fins
-            M_fin = F_per_fin * fin_span / 3
-            fin_area = wt * fin_span * 0.5
-            sigma_fin_root = M_fin / (fin_area * wt) if fin_area > 0 else 0
-
-            # Dynamic amplification for Max-Q
-            DAF = 1.3 if lc.name == "Max-Q" else 1.0
-
-            # Combined: FEM axial + analytical bending, with detail factor
-            vm_combined = math.sqrt(
-                (vm_fem_scaled + sigma_bend)**2 + 3 * (F_normal_total / (2 * math.pi * r * wt))**2
-            ) if (r > 0 and wt > 0) else vm_fem_scaled + sigma_bend
-
-            vm_body = vm_combined * Kt_detail * DAF
-            vm_fin = sigma_fin_root * Kt_detail * DAF
-            result.max_von_mises = max(vm_body, vm_fin)
-            result.max_bending_stress = sigma_bend + sigma_fin_root
-
-            # Update individual stress components to be realistic and consistent
-            sigma_axial = abs(lc.axial_force) / cross_area if cross_area > 0 else 0.0
-            if lc.name == "Max-Q":
-                Cd = 0.5
-                A_ref = math.pi * r**2
-                F_drag = q_dyn * Cd * A_ref
-                F_net_axial = abs(lc.axial_force) + F_drag
-                sigma_axial = F_net_axial / cross_area if cross_area > 0 else 0.0
-
-            if lc.name == "Max-Q":
-                sigma_hoop = q_dyn * r / wt if wt > 0 else 0.0
-            else:
-                sigma_hoop = lc.internal_pressure * r / wt if wt > 0 else 0.0
-
-            result.max_axial_stress = sigma_axial
-            result.max_hoop_stress = sigma_hoop
-            result.max_shear_stress = F_normal_total / (2 * math.pi * r * wt) if (r > 0 and wt > 0) else 0.0
-            if lc.name == "Max Thrust":
-                result.max_shear_stress = abs(lc.axial_force) / (2 * math.pi * r * wt) if (r > 0 and wt > 0) else 0.0
-            result.max_thermal_stress = 0.0
-
-            # Update element stresses with bending envelope
-            if result.element_stresses:
-                updated = []
-                for z, vm_local in result.element_stresses:
-                    frac = z / total_L if total_L > 0 else 0
-                    # Cantilever bending envelope: 1st mode shape sin(π·frac/2)
-                    # Maximum at nose (free end), zero at motor mount (fixed end)
-                    local_bend = sigma_bend * math.sin(math.pi * frac / 2)
-                    # Scale local FEM stress from gravity to actual thrust
-                    vm_local_scaled = vm_local * scale_factor
-                    local_vm = math.sqrt((vm_local_scaled + local_bend)**2)
-                    local_vm *= Kt_detail * DAF
-                    if frac > 0.85:
-                        fin_contrib = sigma_fin_root * Kt_detail * DAF * ((frac - 0.85) / 0.15)
-                        local_vm = max(local_vm, fin_contrib)
-                    updated.append((z, local_vm))
-                result.element_stresses = updated
-
-            logger.info(f"Superimposed aero: bend={sigma_bend/1e6:.1f} MPa, "
-                        f"fin_root={sigma_fin_root/1e6:.1f} MPa, Kt={Kt_detail}, DAF={DAF}, "
-                        f"VM_total={result.max_von_mises/1e6:.1f} MPa")
-
-        elif lc.name in ("Thermal", "Aerodynamic Heating"):
-            # Add thermal stress to FEM result
-            mach = lc.mach if lc.mach > 0 else 3.0
-            try:
-                from cfd.solvers.base import isa_conditions
-                P, T_amb, rho = isa_conditions(lc.altitude_m)
-            except Exception:
-                T_amb = 223.15
-            T_recovery = T_amb * (1 + 0.89 * 0.2 * mach**2)  # r=0.89 turbulent
-            T_stag = T_amb * (1 + 0.2 * mach**2)  # isentropic stagnation
-            # Max ΔT is from whichever is higher: stagnation (nose) or recovery (body)
-            dT_max = max(T_stag, T_recovery) - 293.15
-            constraint = 0.55  # partial constraint for rocket structures
-            sigma_th = mat.E * mat.cte * abs(dT_max) / (1 - mat.nu) * constraint
-            
-            # Thermal gradient-induced bending
-            dT_gradient = abs(T_stag - T_recovery)
-            sigma_bend = mat.E * mat.cte * dT_gradient * wt / (2 * d_ref) * constraint if d_ref > 0 else 0.0
-            
-            result.max_axial_stress = 0.0
-            result.max_hoop_stress = 0.0
-            result.max_shear_stress = 0.0
-            result.max_bending_stress = sigma_bend
-            result.max_thermal_stress = sigma_th
-            # Proper von Mises for uniaxial thermal + bending
-            result.max_von_mises = math.sqrt((sigma_th + sigma_bend) ** 2)
-
-            logger.info(f"Superimposed thermal: dT={dT_max:.1f} K, "
-                        f"sigma_th={sigma_th/1e6:.1f} MPa")
-
-        elif lc.name == "Recovery Shock":
-            # Scale up to dynamic peak parachute load
-            shock_g = lc.recovery_shock_g if lc.recovery_shock_g > 0 else 15.0
-            daf = lc.dynamic_amplification if lc.dynamic_amplification > 1.0 else 1.8
-            kt = lc.stress_concentration if lc.stress_concentration > 1.0 else 2.5
-            mass = 5.0
-            if assembly:
-                if hasattr(assembly, 'total_mass'):
-                    mass = assembly.total_mass() if callable(assembly.total_mass) else assembly.total_mass
-            
-            F_recovery = mass * shock_g * 9.81 * daf
-            sigma_axial_base = F_recovery / cross_area if cross_area > 0 else 0.0
-            sigma_axial_peak = sigma_axial_base * kt
-            
-            eccentricity = 0.01 * d_ref
-            M_snapback = F_recovery * eccentricity
-            sigma_bend = M_snapback * r_o / I if I > 0 else 0.0
-            tau = F_recovery / (2 * math.pi * r * wt) * 0.3 if (r > 0 and wt > 0) else 0.0
-
-            result.max_axial_stress = sigma_axial_peak
-            result.max_hoop_stress = 0.0
-            result.max_bending_stress = sigma_bend
-            result.max_shear_stress = tau
-            result.max_thermal_stress = 0.0
-            result.max_von_mises = math.sqrt((sigma_axial_peak + sigma_bend)**2 + 3 * tau**2)
-
-            if result.element_stresses:
-                result.element_stresses = [(z, vm * scale_factor * Kt_detail) for z, vm in result.element_stresses]
-
-        else:
-            # Custom / other cases: scale up to actual axial force and pressure loads
-            result.max_von_mises = vm_fem_scaled
-            result.max_axial_stress = vm_fem_scaled * 0.8
-            result.max_hoop_stress = vm_fem_scaled * 0.3
-            result.max_shear_stress = vm_fem_scaled / math.sqrt(3)
-            result.max_bending_stress = 0.0
-            result.max_thermal_stress = 0.0
-            if result.element_stresses:
-                result.element_stresses = [(z, vm * scale_factor) for z, vm in result.element_stresses]
-
-        return result
+    def _support_reaction(self):
+        """|reaction| carried by the 3-2-1 support — round-off when the load
+        set balances (a check that nothing leaked into the support). CalculiX
+        prints RF as the nodes' total internal force, i.e. reaction PLUS the
+        load applied at those nodes, so the applied part is subtracted."""
+        dat = self.config.work_dir / "analysis.dat"
+        lm, mesh = getattr(self, "_load_model", None), getattr(self, "_fe_mesh", None)
+        if not dat.is_file() or lm is None or mesh is None:
+            return None
+        lines = dat.read_text(encoding="utf-8", errors="replace").splitlines()
+        for i, line in enumerate(lines):
+            if "total force" in line.lower() and "nsupport" in line.lower():
+                for nxt in lines[i + 1:i + 4]:
+                    try:
+                        rf = np.array([float(p) for p in nxt.split()[:3]])
+                    except ValueError:
+                        continue
+                    if len(rf) == 3:
+                        applied = lm.forces[mesh.rows(lm.support)].sum(axis=0)
+                        return float(np.linalg.norm(rf - applied))
+        return None
 
     def _analytical_fallback(self, result: FEMResult, mat) -> FEMResult:
         """Compute stresses analytically when ccx is not available.
@@ -946,9 +678,10 @@ class CalculiXSolver(FEMSolver):
             z = total_L * frac
             # Axial: uniform along body (thrust/inertia acts on entire section)
             local_axial = sigma_axial
-            # Bending: cantilever first mode — max at nose, zero at motor
-            local_bend = sigma_bend * math.sin(math.pi * frac / 2)
-            local_inertial = sigma_inertial * math.sin(math.pi * frac / 2)
+            # Bending: free-free envelope, peak mid-body (as the 3D contour)
+            env = 4.0 * frac * (1.0 - frac)
+            local_bend = sigma_bend * env
+            local_inertial = sigma_inertial * env
             local_hoop = sigma_hoop
             # Shear: max at support (aft), decreasing toward nose (beam theory)
             local_tau = tau * (1.0 - frac)
@@ -1042,8 +775,8 @@ class CalculiXSolver(FEMSolver):
         for i in range(n_stations + 1):
             frac = i / n_stations
             z = total_L * frac
-            # Cantilever bending: max at free end, zero at support
-            local_bend = sigma_bend * math.sin(math.pi * frac / 2)
+            # Bending: free-free envelope, peak mid-body (as the 3D contour)
+            local_bend = sigma_bend * 4.0 * frac * (1.0 - frac)
             local_axial = sigma_axial
             local_hoop = hp_ext
             # Shear distribution: max near support (aft), decreasing forward
@@ -1225,115 +958,297 @@ class CalculiXSolver(FEMSolver):
         finally:
             self.config.analysis_type = orig_type
 
-        # Always enrich with resonance/flutter/damping/classification
-        # _modal_analytical already populates these, but _parse_modal_results does not
-        if result.converged and not result.mode_classifications:
+        # Always enrich with damping / resonance / flutter (and, when the FE
+        # shapes could not name the modes, a frequency-based classification).
+        # _modal_analytical already populates all of it; the FE parser names
+        # the modes but leaves the rest — keying this on the classification
+        # would skip damping and resonance for every real FE result.
+        if result.converged and not result.damping_ratios:
             self._post_process_modal(result)
 
         return result
 
+    # ── Modal output parsing ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _dat_table(lines, title):
+        """Numeric rows of one CalculiX .dat table.
+
+        CalculiX letter-spaces its table titles ("P A R T I C I P A T I O N
+        F A C T O R S"), so *title* is given with the spaces removed
+        ("PARTICIPATIONFACTORS") and compared against each line the same way.
+        Rows are the consecutive all-numeric lines after the title: the column
+        header and blank lines before them are skipped, and the first blank or
+        text line after them ends the table. Returns [] if the title is absent.
+        """
+        start = next((i for i, l in enumerate(lines)
+                      if title in l.replace(" ", "")), None)
+        if start is None:
+            return []
+        rows = []
+        for line in lines[start + 1:]:
+            parts = line.split()
+            if not parts:
+                if rows:
+                    break
+                continue
+            try:
+                rows.append([float(p) for p in parts])
+            except ValueError:
+                if rows:
+                    break
+        return rows
+
+    @staticmethod
+    def _dat_mode_shapes(lines):
+        """{mode_no: {node_id: (ux, uy, uz)}} from a *FREQUENCY step's .dat.
+
+        Each displacement block is keyed by the "E I G E N V A L U E   N U M B E R
+        k" header CalculiX prints above it, so a shape can only ever be paired
+        with its own eigenvalue — never by the order the blocks happen to come in.
+        """
+        shapes, mode, in_block = {}, None, False
+        for line in lines:
+            squeezed = line.replace(" ", "")
+            if squeezed.startswith("EIGENVALUENUMBER"):
+                try:
+                    mode = int(squeezed[len("EIGENVALUENUMBER"):])
+                except ValueError:
+                    mode = None
+                in_block = False
+                continue
+            if squeezed.lower().startswith("displacements"):
+                in_block = mode is not None
+                if in_block:
+                    shapes.setdefault(mode, {})
+                continue
+            if not in_block or not squeezed:
+                continue
+            parts = line.split()
+            try:
+                shapes[mode][int(parts[0])] = (float(parts[1]), float(parts[2]),
+                                               float(parts[3]))
+            except (ValueError, IndexError):
+                in_block = False        # any other output ends the block
+        return shapes
+
+    def _read_mesh_sets(self):
+        """(nodes, quad connectivity, node sets) of the structural mesh file."""
+        nodes, elements, nsets = {}, [], {}
+        mesh = getattr(self, "_mesh_path", None)
+        if not mesh or not Path(mesh).is_file():
+            return nodes, elements, nsets
+        mode = cur = None
+        for line in Path(mesh).read_text(encoding="ascii", errors="replace").splitlines():
+            s = line.strip()
+            if not s or s.startswith("**"):
+                continue
+            if s.startswith("*"):
+                head = s.upper().replace(" ", "")
+                mode = None
+                if head.startswith("*NODE,") or head == "*NODE":
+                    mode = "node"
+                elif head.startswith("*ELEMENT"):
+                    mode = "elem"
+                elif head.startswith("*NSET"):
+                    m = re.search(r"NSET=([^,]+)", head)
+                    if m:
+                        cur = m.group(1)
+                        nsets.setdefault(cur, set())
+                        mode = "nset"
+                continue
+            parts = [p for p in s.split(",") if p.strip()]
+            try:
+                if mode == "node" and len(parts) >= 4:
+                    nodes[int(parts[0])] = (float(parts[1]), float(parts[2]),
+                                            float(parts[3]))
+                elif mode == "elem" and len(parts) >= 5:
+                    elements.append(tuple(int(p) for p in parts[1:5]))
+                elif mode == "nset":
+                    nsets[cur].update(int(p) for p in parts)
+            except ValueError:
+                continue
+        return nodes, elements, nsets
+
     def _parse_modal_results(self) -> ModalResult:
-        """Parse eigenfrequencies and mode shapes from ccx .dat output."""
-        result = ModalResult()
+        """Eigenfrequencies, mode shapes and CalculiX's own participation /
+        effective-mass tables from the modal .dat, all matched by mode number.
+
+        The line scanner this replaces never recognised the letter-spaced table
+        titles: participation-factor rows were read as extra "frequencies", the
+        rigid-mode offset counted them, and the shape list was sliced from the
+        wrong mode — on a real run "Mode 1, 62 Hz" animated mode 7 (469 Hz) and
+        modes 7-10 had no shape at all.
+        """
         dat_path = self.config.work_dir / "analysis.dat"
         if not dat_path.is_file():
             logger.warning("No .dat file for modal results")
             return self._modal_analytical()
         try:
-            text = dat_path.read_text(encoding="utf-8", errors="replace")
-            lines = text.splitlines()
-            freqs = []
-            in_eigen_section = False
-            mode_shapes_all = [] # List of dictionaries: {node_id: (dx, dy, dz)}
-            current_shape = {}
-            in_disp = False
-            
-            # 1. Parse Frequencies
-            for line in lines:
-                ll = line.strip().lower()
-                if "e i g e n v a l u e" in ll or ("mode no" in ll and "eigenvalue" in ll):
-                    in_eigen_section = True
-                    continue
-                if in_eigen_section and ("participation" in ll or "s t e p" in ll or "displacements" in ll or "e f f e c t i v e" in ll):
-                    in_eigen_section = False
-                    if "displacements" in ll:
-                        # we hit the first displacement block early
-                        in_disp = True
-                        if current_shape:
-                            mode_shapes_all.append(current_shape)
-                            current_shape = {}
-                    continue
-                if not line.strip() or "rad/time" in ll or "real part" in ll:
-                    continue
-                    
-                if in_eigen_section:
-                    parts = line.split()
-                    if len(parts) >= 4:
-                        try:
-                            mode_no = int(parts[0])
-                            eigenvalue = float(parts[1])
-                            freq_cycles = float(parts[3])  # Hz
-                            if freq_cycles > 0:
-                                freqs.append(freq_cycles)
-                        except (ValueError, IndexError):
-                            pass
-
-            offset = 0
-            if freqs:
-                # Filter out near-rigid-body modes (< 1 Hz typically)
-                structural_freqs = [f for f in freqs if f > 1.0]
-                if not structural_freqs:
-                    structural_freqs = freqs
-                result.frequencies_hz = structural_freqs[:self.config.num_modes]
-                result.num_modes = len(result.frequencies_hz)
-                result.converged = True
-                result.descriptions = _mode_descriptions(result.num_modes)
-                offset = len(freqs) - len(structural_freqs)
-            else:
-                return self._modal_analytical()
-
-            # 2. Parse Mode Shapes (Displacements)
-            for line in lines:
-                ll = line.strip().lower()
-                if "displacements" in ll and "vx" in ll:
-                    in_disp = True
-                    if current_shape:
-                        mode_shapes_all.append(current_shape)
-                        current_shape = {}
-                    continue
-                if in_disp and ("s t e p" in ll or "stresses" in ll):
-                    in_disp = False
-                    if current_shape:
-                        mode_shapes_all.append(current_shape)
-                        current_shape = {}
-                    continue
-                
-                if in_disp and line.strip():
-                    parts = line.split()
-                    if len(parts) >= 4:
-                        try:
-                            nid = int(parts[0])
-                            dx, dy, dz = float(parts[1]), float(parts[2]), float(parts[3])
-                            current_shape[nid] = (dx, dy, dz)
-                        except ValueError:
-                            pass
-                            
-            if current_shape:
-                mode_shapes_all.append(current_shape)
-                
-            # Filter the extracted mode shapes to match the filtered frequencies
-            if mode_shapes_all:
-                try:
-                    result.mode_shapes = mode_shapes_all[offset : offset + result.num_modes]
-                except Exception as e:
-                    logger.warning(f"Failed to slice mode shapes: {e}")
-                    
-            logger.info(f"Modal: {result.num_modes} structural modes parsed, {len(result.mode_shapes)} mode shapes extracted.")
-
+            lines = dat_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            eig = [r for r in self._dat_table(lines, "EIGENVALUEOUTPUT") if len(r) >= 4]
+            meff = {int(r[0]): r[1:7] for r in self._dat_table(lines, "EFFECTIVEMODALMASS")
+                    if len(r) >= 7}
+            gam = {int(r[0]): r[1:7] for r in self._dat_table(lines, "PARTICIPATIONFACTORS")
+                   if len(r) >= 7}
+            tot = self._dat_table(lines, "TOTALEFFECTIVEMASS")
+            shapes = self._dat_mode_shapes(lines)
         except Exception as e:
             logger.warning(f"Modal parse error: {e}")
             return self._modal_analytical()
+        if not eig:
+            return self._modal_analytical()
+
+        # Rigid-body modes (free-free BC) sit near 0 Hz — keep the elastic ones.
+        modes = [(int(r[0]), r[3]) for r in eig]
+        chosen = ([m for m in modes if m[1] > 1.0] or modes)[: self.config.num_modes]
+
+        result = ModalResult()
+        result.mode_numbers = [k for k, _ in chosen]
+        result.frequencies_hz = [f for _, f in chosen]
+        result.num_modes = len(chosen)
+        result.converged = True
+        if shapes:
+            result.mode_shapes = [shapes.get(k, {}) for k in result.mode_numbers]
+
+        total = tuple(tot[0][:6]) if tot and len(tot[0]) >= 6 else ()
+        result.total_effective_mass_kg = total
+        if total:
+            result.total_mass_kg = total[0]
+        for k in result.mode_numbers:
+            me, g = meff.get(k), gam.get(k)
+            result.effective_mass_kg.append(list(me) if me else [0.0] * 6)
+            # One entry per mode (possibly {}) so every list stays index-aligned
+            # with frequencies_hz.
+            result.participation_factors.append(
+                {d: round(abs(g[c]), 4) for d, c in _MODAL_DIRS} if g else {})
+            result.effective_modal_mass.append(
+                {d: (round(100.0 * me[c] / total[c], 1) if total[c] > 0 else 0.0)
+                 for d, c in _MODAL_DIRS} if (me and total) else {})
+
+        nodes, elements, nsets = self._read_mesh_sets()
+        result.mesh_path = self._mesh_path
+        result.mesh_nodes, result.mesh_elements = nodes, elements
+        try:
+            self._classify_fe_modes(result, nsets)
+        except Exception as e:      # naming is cosmetic — never lose the solve
+            logger.warning(f"Mode classification failed: {e}")
+
+        n_shapes = sum(1 for s in result.mode_shapes if s)
+        logger.info(f"Modal: {result.num_modes} modes parsed, {n_shapes} mode shapes "
+                    f"matched by mode number.")
         return result
+
+    def _classify_fe_modes(self, result: ModalResult, nsets: dict):
+        """Name each FE mode from its own shape, not by matching its frequency
+        against beam formulas.
+
+        At every axial station the airframe ring's motion is split (least
+        squares) into rigid translation — lateral (bending) and axial — rigid
+        roll about the body axis (torsion), rigid tilt of the section (the
+        rotation half of bending) and the remainder, which deforms the cross
+        section (shell / ovalling). Fin nodes are tallied on their own. The
+        largest share of |φ|² names the mode. Modes of one type within 2 % in
+        frequency share an order number: the two bending planes of an
+        axisymmetric airframe are ONE bending mode, not the 1st and the 2nd.
+        """
+        import numpy as np
+        nodes = result.mesh_nodes
+        if not nodes or not any(result.mode_shapes):
+            return
+        known = set(nodes)
+        fins = set(nsets.get("NFINS", ())) & known
+        body = set()
+        for name, members in nsets.items():
+            if name in ("NALL", "NAFT", "NFWD", "NFINS") or (fins and members <= fins):
+                continue
+            body |= members
+        body = (body & known) or (known - fins)
+        fin_only = sorted(fins - body)      # merged fin-root nodes stay airframe
+        ids = sorted(body)
+        P = np.array([nodes[n] for n in ids], dtype=float)
+
+        # Axial stations: airframe nodes sharing one z (the mesher merged the
+        # coincident end rings of adjacent components).
+        z = P[:, 2]
+        key = np.round((z - z.min()) / max(float(np.ptp(z)), 1e-12) * 1e6).astype(np.int64)
+        order = np.argsort(key, kind="stable")
+        rings = []
+        for g in np.split(order, np.nonzero(np.diff(key[order]))[0] + 1):
+            if len(g) < 3:
+                continue
+            x, y = P[g, 0], P[g, 1]
+            sxx, syy, sxy = float(x @ x), float(y @ y), float(x @ y)
+            rings.append((g, x, y, sxx + syy, sxx * syy - sxy * sxy, sxx, syy, sxy))
+
+        def split(U):
+            e = {"bending": 0.0, "axial": 0.0, "torsion": 0.0, "shell": 0.0}
+            cov = np.zeros((2, 2))
+            for g, x, y, r2, det, sxx, syy, sxy in rings:
+                u = U[g]
+                t = u.mean(axis=0)
+                d = u - t
+                phi = float(x @ d[:, 1] - y @ d[:, 0]) / r2 if r2 > 0 else 0.0
+                a = b = 0.0
+                if det > 0:
+                    zx, zy = float(x @ d[:, 2]), float(y @ d[:, 2])
+                    a = (zx * syy - zy * sxy) / det
+                    b = (zy * sxx - zx * sxy) / det
+                tilt = a * x + b * y
+                res = d.copy()
+                res[:, 0] += y * phi
+                res[:, 1] -= x * phi
+                res[:, 2] -= tilt
+                n = len(g)
+                e["bending"] += n * float(t[0] ** 2 + t[1] ** 2) + float(tilt @ tilt)
+                e["axial"] += n * float(t[2] ** 2)
+                e["torsion"] += phi * phi * r2
+                e["shell"] += float((res * res).sum())
+                cov += n * np.outer(t[:2], t[:2])
+            return e, cov
+
+        names = {"axial": ("Axial", "Axial"), "torsion": ("Torsional", "Torsional"),
+                 "shell": ("Shell", "Shell (Ovalling)"), "fin": ("Fin", "Fin Mode")}
+        groups = {}                 # kind -> (first frequency of group, order)
+        cls, descs, fracs, m_gen = [], [], [], []
+        for i, shape in enumerate(result.mode_shapes):
+            f = result.frequencies_hz[i]
+            if not shape:
+                cls.append("—"); descs.append(f"Mode {i + 1}"); fracs.append({})
+                m_gen.append(0.0)
+                continue
+            zero = (0.0, 0.0, 0.0)
+            U = np.array([shape.get(n, zero) for n in ids], dtype=float)
+            e, cov = split(U)
+            e["fin"] = float(sum(sum(c * c for c in shape.get(n, zero)) for n in fin_only))
+            total = sum(e.values())
+            peak = max((ux * ux + uy * uy + uz * uz for ux, uy, uz in shape.values()),
+                       default=0.0)
+            m_gen.append(round(1.0 / peak, 4) if peak > 0 else 0.0)
+            if total <= 0:
+                cls.append("—"); descs.append(f"Mode {i + 1}"); fracs.append({})
+                continue
+            kind = "fin" if e["fin"] > 0.5 * total else \
+                max(("bending", "axial", "torsion", "shell"), key=e.get)
+            f0, n = groups.get(kind, (None, 0))
+            if f0 is None or f > f0 * 1.02:
+                f0, n = f, n + 1
+            groups[kind] = (f0, n)
+            if kind == "bending":
+                w, v = np.linalg.eigh(cov)
+                lat = v[:, int(np.argmax(w))]
+                plane = "X" if abs(lat[0]) >= abs(lat[1]) else "Y"
+                cls.append(f"Bending-{plane}")
+                descs.append(f"{_ordinal(n)} Lateral Bending ({plane})")
+            else:
+                cls.append(names[kind][0])
+                descs.append(f"{_ordinal(n)} {names[kind][1]}")
+            fracs.append({k: round(v / total, 3) for k, v in e.items()})
+
+        result.mode_classifications = cls
+        result.descriptions = descs
+        result.strain_energy_fractions = fracs
+        result.generalized_mass = m_gen
 
     def _post_process_modal(self, result: ModalResult):
         """Enrich a parsed ModalResult with classification, participation,
@@ -1364,7 +1279,8 @@ class CalculiXSolver(FEMSolver):
         A = math.pi * (r_o**2 - r_i**2)
         m_per_L = mat.density * A
         total_mass = m_per_L * L
-        result.total_mass_kg = total_mass
+        if not result.total_mass_kg:        # FE results carry CalculiX's own total
+            result.total_mass_kg = total_mass
 
         lc = self.config.load_case
         G = mat.G if mat.G > 0 else mat.E / (2 * (1 + mat.nu))
@@ -1400,7 +1316,11 @@ class CalculiXSolver(FEMSolver):
         axial_n = 0
         torsion_n = 0
 
-        for i, freq in enumerate(result.frequencies_hz):
+        # Modes already named from their FE shapes (_classify_fe_modes) keep
+        # those names; matching frequencies to beam formulas is the fallback
+        # for results without shapes.
+        classify = not result.mode_classifications
+        for i, freq in enumerate(result.frequencies_hz if classify else []):
             # Find closest match among expected frequencies
             best_type = "bending"
             best_dist = float('inf')
@@ -1893,6 +1813,26 @@ class CalculiXSolver(FEMSolver):
         return result
 
 
+def _rigid_body_fit(P, U):
+    """Least-squares rigid-body motion t + ω × (p − p̄) of displacements U at
+    points P. Subtracting it leaves the elastic deformation — the 3-2-1
+    support fixes an arbitrary rigid position, not a physical one."""
+    d = P - P.mean(axis=0)
+    n = len(P)
+    A = np.zeros((3 * n, 6))
+    A[0::3, 0] = A[1::3, 1] = A[2::3, 2] = 1.0
+    A[0::3, 4], A[0::3, 5] = d[:, 2], -d[:, 1]
+    A[1::3, 3], A[1::3, 5] = -d[:, 2], d[:, 0]
+    A[2::3, 3], A[2::3, 4] = d[:, 1], -d[:, 0]
+    x = np.linalg.lstsq(A, U.reshape(-1), rcond=None)[0]
+    return (A @ x).reshape(n, 3)
+
+
+# CalculiX modal-table columns reported per mode: X, Y (lateral), Z (body
+# axis) and RZ (roll) of the six (X, Y, Z, RX, RY, RZ).
+_MODAL_DIRS = (("x", 0), ("y", 1), ("z", 2), ("rz", 5))
+
+
 def _find_fin_info(comp, L: float, d: float) -> Optional[dict]:
     """Find the first TrapezoidalFinSet on *comp* or its children (fins are
     normally nested under a BodyTube, not directly on the stage)."""
@@ -1910,6 +1850,7 @@ def _find_fin_info(comp, L: float, d: float) -> Optional[dict]:
         if info is not None:
             return info
     return None
+
 
 
 def _ordinal(n: int) -> str:

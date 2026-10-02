@@ -9,11 +9,14 @@ so the shape shown here is identical to the design view — ogive nose, real
 body tubes / transitions / fins / nozzle, correct stacking (nose tip at
 z = total_length, aft end at z = 0).
 
-A contour field for the selected stress measure is then painted on that mesh.
-Because the analytical engine returns *peak* values per stress component, the
-spatial distribution of those peaks is synthesized (bending peaks at the
-critical section, thermal at the nose, axial roughly uniform, etc.) so the
-contour reads like a real FE plot.
+Two sources of contour:
+  * a CalculiX static result — its own nodal field is drawn on its own mesh
+    (both wall surfaces of the expanded shell), so the contour, the peak
+    marker and the panel numbers are the same data;
+  * the quick analytical panel (no FE run yet) — the analytical engine only
+    returns *peak* values, so a smooth field is synthesized on the design
+    geometry (bending peaks mid-body, axial grows aft …) and pinned to the
+    panel σ_vm. That view is labelled as an estimate.
 
 Features
 --------
@@ -98,7 +101,7 @@ def build_rocket_regions(state, assembly):
     if not _PYVISTA:
         return {}, 0.0
     from visualization.viewer_3d import (
-        nose_profile, _make_surface_of_revolution, _make_tube, _make_frustum,
+        nose_profile, _make_surface_of_revolution, _make_frustum,
     )
     from core.components import (
         NoseCone, BodyTube, Transition, TrapezoidalFinSet, InnerTube,
@@ -151,7 +154,7 @@ def build_rocket_regions(state, assembly):
                 z_base = z_top - (L_nose + L_sh)
                 if L_sh > 0:
                     r_sh = getattr(comp, "shoulder_diameter", comp.diameter) / 2 or r * 0.95
-                    add(region, _make_tube(z_base, L_sh, r_sh))
+                    add(region, _axial_tube(z_base, L_sh, r_sh, total_len))
                 z_og = z_base + L_sh
                 pz, pr = nose_profile(
                     getattr(comp, "shape", "Ogive"), L_nose, r, n=40
@@ -162,7 +165,7 @@ def build_rocket_regions(state, assembly):
                 r = comp.outer_diameter_val / 2
                 L = comp.length
                 z_base = z_top - L
-                add(region, _make_tube(z_base, L, r))
+                add(region, _axial_tube(z_base, L, r, total_len))
                 for child in comp.children:
                     if isinstance(child, TrapezoidalFinSet):
                         for m in _fin_meshes(child, r, z_base):
@@ -192,7 +195,7 @@ def build_rocket_regions(state, assembly):
                 r = comp.outer_diameter_val / 2
                 L = comp.length
                 z_base = z_top - L
-                add(region, _make_tube(z_base, L, r))
+                add(region, _axial_tube(z_base, L, r, total_len))
 
             elif isinstance(comp, (Bulkhead, CenteringRing, EngineBlock)):
                 d = getattr(comp, "diameter", getattr(comp, "outer_diameter_val", 0.05))
@@ -212,6 +215,51 @@ def build_rocket_regions(state, assembly):
             m = m.merge(extra)
         merged[region] = m
     return merged, total_len
+
+
+def _axial_tube(z_base, length, radius, total_len):
+    """Capped tube with real axial stations for painting a field on.
+
+    viewer_3d._make_tube is a pv.Cylinder: one ring of points at each end and
+    nothing between. A field sampled on it is a straight ramp between its two
+    end values, so the mid-body bending peak could never appear — the contour
+    peaked at the nose/body joint instead. ~150 stations over the vehicle."""
+    from visualization.viewer_3d import _make_surface_of_revolution, RES
+    n = int(np.clip(round(150.0 * length / max(total_len, 1e-9)), 8, 150)) + 1
+    zs = np.linspace(z_base, z_base + length, n)
+    mesh = _make_surface_of_revolution(zs, np.full(n, float(radius)))
+    for z, nz in ((z_base, -1.0), (z_base + length, 1.0)):
+        mesh = mesh.merge(pv.Disc(center=(0, 0, z), inner=0.0, outer=max(radius, 1e-4),
+                                  normal=(0, 0, nz), r_res=1, c_res=RES))
+    return mesh
+
+
+def _sf_clim(sf):
+    """Colour range of a safety-factor field: from the minimum up to 5 (or
+    twice the minimum when even that is above 5) — the critical end resolved,
+    never an inverted range."""
+    lo = max(0.0, float(np.min(sf)))
+    hi = min(float(np.max(sf)), max(5.0, 2.0 * lo))
+    return [lo, hi if hi > lo else lo + 1e-6]
+
+
+def fe_grid(fe_field):
+    """pv.UnstructuredGrid of an FEField (hexahedra through the wall), in the
+    design-view frame: rotated 180° about x, so the nose tip is at the top
+    (z = length) as in every other 3D view."""
+    f = fe_field
+    L = f.length or float(np.max(f.points[:, 2]))
+    pts = np.column_stack([f.points[:, 0], -f.points[:, 1], L - f.points[:, 2]])
+    cells = np.hstack([np.full((len(f.cells), 1), 8, dtype=np.int64),
+                       np.asarray(f.cells, dtype=np.int64)]).ravel()
+    types = np.full(len(f.cells), pv.CellType.HEXAHEDRON, dtype=np.uint8)
+    return pv.UnstructuredGrid(cells, types, pts)
+
+
+def fe_displacement(fe_field):
+    """FE displacement (m) in the same frame as fe_grid."""
+    u = np.asarray(fe_field.displacement)
+    return np.column_stack([u[:, 0], -u[:, 1], -u[:, 2]])
 
 
 def _fin_meshes(comp, body_r, z_start):
@@ -240,14 +288,14 @@ def _fin_meshes(comp, body_r, z_start):
 def _build_parametric(state):
     """Fallback parametric build (mirrors viewer_3d._build_simple shape)."""
     from visualization.viewer_3d import (
-        _ogive_profile, _make_surface_of_revolution, _make_tube,
+        _ogive_profile, _make_surface_of_revolution,
     )
     r = max(getattr(state, "diameter", 0.1) / 2, 0.01)
     L = max(getattr(state, "length", 1.0), 0.2)
     body_len = L * 0.8
     nose_len = L * 0.2
     regions = {}
-    regions["airframe"] = _make_tube(0, body_len, r)
+    regions["airframe"] = _axial_tube(0, body_len, r, L)
     pz, pr = _ogive_profile(nose_len, r, n=40)
     regions["nose"] = _make_surface_of_revolution(pz + body_len, pr)
     n_fins = int(getattr(state, "fin_count", 3) or 3)
@@ -274,6 +322,8 @@ class StressViewer(QWidget):
         self._body_condition: dict = {}
         self._fin_stress_pa = 0.0     # fin root bending from fin_analysis
         self._yield_pa = 276e6
+        self._fe = None               # structures.solvers.base.FEField of the last FE run
+        self._fe_grid = None
         self._mode = "Von Mises Stress"
         self._component = "Entire Vehicle"
         self._setup_ui()
@@ -300,16 +350,9 @@ class StressViewer(QWidget):
         self.comp_combo.currentTextChanged.connect(self._on_component)
         bl.addWidget(self.comp_combo)
         bl.addStretch()
-        _basis = QLabel("⚠ Analytical estimate — smooth field, not nodal FEA")
-        _basis.setStyleSheet(f"color:{theme.WARN};font-size:10px;font-weight:600;")
-        _basis.setToolTip(
-            "This contour is a smooth analytical reconstruction from the closed-form "
-            "stress solution (axial / bending / hoop / shear distributed by beam-shape "
-            "functions), not a mesh-based FEA field. It does NOT resolve geometric stress "
-            "concentrations at fin roots, couplers, motor-mount or bulkhead interfaces — "
-            "those are accounted for as scalar stress-concentration factors (Kt) in the "
-            "reported safety factor, not shown spatially here.")
-        bl.addWidget(_basis)
+        self._basis = QLabel()
+        self._set_basis(fe=False)
+        bl.addWidget(self._basis)
         bl.addSpacing(10)
         self.btn_reset = QPushButton(icon("reset_view"), "Reset View")
         self.btn_reset.setStyleSheet(_CTRL_BTN)
@@ -337,6 +380,28 @@ class StressViewer(QWidget):
         self._empty.setStyleSheet(f"color:{theme.TEXT_FAINT};font-size:14px;background:transparent;")
         self._empty.setParent(self.plotter.interactor)
         self._empty.show()
+
+    def _set_basis(self, fe: bool):
+        if fe:
+            self._basis.setText("CalculiX nodal field")
+            self._basis.setStyleSheet(f"color:{theme.OK};font-size:10px;font-weight:600;")
+            self._basis.setToolTip(
+                "The CalculiX static solution itself, drawn on the FE mesh: S4 shells "
+                "expanded through the wall, so both the inner and the outer wall surface "
+                "carry their own stress. The panel values are read off this same field. "
+                "The safety factor also applies the Kt of details the mesh does not "
+                "model (couplers, fin slots, rail buttons).")
+        else:
+            self._basis.setText("⚠ Analytical estimate — smooth field, not nodal FEA")
+            self._basis.setStyleSheet(f"color:{theme.WARN};font-size:10px;font-weight:600;")
+            self._basis.setToolTip(
+                "This contour is a smooth analytical reconstruction from the closed-form "
+                "stress solution (axial / bending / hoop / shear distributed by beam-shape "
+                "functions), not a mesh-based FEA field. It does NOT resolve geometric stress "
+                "concentrations at fin roots, couplers, motor-mount or bulkhead interfaces — "
+                "those are accounted for as scalar stress-concentration factors (Kt) in the "
+                "reported safety factor, not shown spatially here. Run the static FEM "
+                "analysis for the CalculiX field.")
 
     def _tag(self, txt):
         l = QLabel(txt)
@@ -391,8 +456,9 @@ class StressViewer(QWidget):
 
         if mode == "Safety Factor":
             vm_local = self._vm_field(zf, theta, region, bc, mesh)
-            sf = np.where(vm_local > 1e3, self._yield_pa / np.maximum(vm_local, 1e3), 10.0)
-            return np.clip(sf, 0, 10)
+            # unclipped: a clip at 10 made the "Min SF" label disagree with
+            # the panel whenever SF > 10 (the colour range is set by clim)
+            return self._yield_pa / np.maximum(vm_local, 1e3)
         if mode == "Von Mises Stress":
             return self._vm_field(zf, theta, region, bc, mesh) / 1e6
         if region == "fins":
@@ -433,7 +499,32 @@ class StressViewer(QWidget):
                 fin_peak = bc.get("von_mises", 0.0) * 0.6
                 return np.full(len(zf), fin_peak)
             return fin_peak * (1.0 - self._fin_span_frac(mesh)) ** 2
+        return self._vm_body(zf, theta, bc) * self._airframe_pin(bc)
 
+    def _airframe_pin(self, bc):
+        """Scale factor that makes the airframe field's maximum equal the
+        panel σ_vm. The panel value is the critical section with every
+        component at its peak; the shape functions never coincide (axial peaks
+        aft, bending mid-body), so the field is pinned to it — with ONE factor
+        for the whole airframe. Pinning each region on its own made every
+        region (nose cone included) peak at the panel value, with a jump in
+        colour at every joint."""
+        target = bc.get("von_mises", 0.0)
+        if target <= 0:
+            return 1.0
+        L = max(self._total_len, 1e-9)
+        vmax = 0.0
+        for region, mesh in self._region_meshes.items():
+            if region == "fins" or mesh is None or not mesh.n_points:
+                continue
+            pts = mesh.points
+            zf = np.clip((L - pts[:, 2]) / L, 0, 1)
+            theta = np.arctan2(pts[:, 1], pts[:, 0])
+            vmax = max(vmax, float(self._vm_body(zf, theta, bc).max()))
+        return target / vmax if vmax > 0 else 1.0
+
+    def _vm_body(self, zf, theta, bc):
+        """Airframe von Mises shape (Pa, before pinning) at the given stations."""
         axial = bc.get("axial", 0.0) + bc.get("longitudinal", 0.0) + bc.get("thermal", 0.0)
         hoop = bc.get("hoop", 0.0)
         bend = bc.get("bending", 0.0); shear = bc.get("shear", 0.0)
@@ -452,16 +543,7 @@ class StressViewer(QWidget):
         sx = -axial * (0.2 + 0.8 * zf) - bend * bshape * np.cos(theta)
         sy = hoop * np.where((zf > 0.2) & (zf < 0.85), 1.0, 0.5)
         tau = shear * (0.4 + 0.6 * zf)
-        vm = amp * np.sqrt(np.abs(sx ** 2 - sx * sy + sy ** 2 + 3 * tau ** 2))
-        # The panel's σ_vm is the critical-section value with every component
-        # at its peak. The shape functions never coincide (axial peaks aft,
-        # bending mid-body), so pin the field maximum to the reported peak —
-        # the contour then agrees with the number on screen.
-        target = bc.get("von_mises", 0.0)
-        vmax = float(vm.max()) if len(vm) else 0.0
-        if target > 0 and vmax > 0:
-            vm = vm * (target / vmax)
-        return vm
+        return amp * np.sqrt(np.abs(sx ** 2 - sx * sy + sy ** 2 + 3 * tau ** 2))
 
     # ── Public API ────────────────────────────────────────────────────────
     def update_geometry(self, state, assembly=None):
@@ -470,15 +552,21 @@ class StressViewer(QWidget):
         self._region_meshes, self._total_len = build_rocket_regions(state, assembly)
 
     def set_result(self, state, assembly, body_condition: dict, yield_pa: float,
-                   fin_stress_pa: float = 0.0):
-        """``fin_stress_pa`` = fin root bending stress (Pa) from
-        structures.workstation.fin_analysis; drives the fin region's field."""
+                   fin_stress_pa: float = 0.0, fe_field=None):
+        """``fe_field`` — the CalculiX field of a static run
+        (structures.solvers.base.FEField); when given it is drawn as is.
+        Otherwise the analytical field is synthesized from ``body_condition``;
+        ``fin_stress_pa`` = fin root bending stress (Pa) from
+        structures.workstation.fin_analysis drives its fin region."""
         if not _PYVISTA or self.plotter is None:
             return
         self._region_meshes, self._total_len = build_rocket_regions(state, assembly)
         self._body_condition = body_condition or {}
         self._fin_stress_pa = float(fin_stress_pa or 0.0)
         self._yield_pa = yield_pa or 276e6
+        self._fe = fe_field
+        self._fe_grid = fe_grid(fe_field) if fe_field is not None else None
+        self._set_basis(fe=fe_field is not None)
         if hasattr(self, "_empty"):
             self._empty.hide()
         self._render()
@@ -499,8 +587,76 @@ class StressViewer(QWidget):
         return [r for r in self._region_meshes
                 if _REGION_GROUP.get(r) == self._component]
 
+    # ── CalculiX field ────────────────────────────────────────────────────
+    def _fe_values(self, mode):
+        """Nodal values of ``mode`` (MPa, or SF) from the FE field."""
+        f = self._fe
+        if mode == "Safety Factor":
+            # true SF — the colour scale is capped via clim, the values are not
+            # (clipping them at 10 made the "Min SF" label read 10.00 while the
+            # panel said 19)
+            return f.yield_pa / (f.kt * np.maximum(f.von_mises, 1e-3))
+        if mode == "Thermal Stress":
+            return (f.von_mises if f.thermal else np.zeros(len(f.von_mises))) / 1e6
+        return {"Von Mises Stress": f.von_mises, "Axial Stress": f.axial,
+                "Hoop Stress": f.hoop, "Shear Stress": f.shear}[mode] / 1e6
+
+    def _render_fe(self):
+        f, grid, mode = self._fe, self._fe_grid, self._mode
+        vals = self._fe_values(mode)
+        grid.point_data["value"] = vals
+        cells = np.arange(grid.n_cells)
+        fin_cells = np.asarray(f.cell_is_fin, dtype=bool) if f.cell_is_fin is not None \
+            else np.zeros(grid.n_cells, dtype=bool)
+        if self._component == "Fins" and fin_cells.any():
+            cells = cells[fin_cells]
+        elif self._component == "Airframe":
+            cells = cells[~fin_cells]
+        shown = grid.extract_cells(cells)
+        v = np.asarray(shown.point_data["value"])
+        signed = mode in ("Axial Stress", "Hoop Stress")
+        if mode == "Safety Factor":
+            k = int(np.argmin(v)); cmap = "jet_r"
+            clim = _sf_clim(v)
+            label = f"Min SF: {v[k]:.2f} (Kt {f.kt:g})"
+            title = "Safety Factor"
+        elif signed:
+            k = int(np.argmax(np.abs(v))); m = float(np.abs(v).max()) or 1.0
+            cmap, clim = "coolwarm", [-m, m]
+            label = f"Peak: {v[k]:+.2f} MPa"
+            title = mode + " (MPa, + tension)"
+        else:
+            k = int(np.argmax(v)); cmap = "jet"
+            clim = [0.0, float(v.max()) or 1.0]
+            label = f"Peak: {v[k]:.2f} MPa"
+            title = mode + " (MPa)"
+        orig = np.asarray(shown.point_data["vtkOriginalPointIds"])[k]
+        where = "Fins" if f.is_fin[orig] else "Airframe"
+        z_nose = f.length - float(shown.points[k, 2]) if f.length else 0.0
+        sbar = dict(title=title, title_font_size=12, label_font_size=10,
+                    color=theme.TEXT, position_x=0.86, position_y=0.12,
+                    width=0.06, height=0.7, fmt="%.2f", n_labels=6)
+        self.plotter.add_mesh(shown, scalars="value", cmap=cmap, clim=clim,
+                              smooth_shading=False, specular=0.2,
+                              scalar_bar_args=sbar, name="fe_field")
+        pk = shown.points[k]
+        self.plotter.add_mesh(pv.Sphere(radius=max(f.length, 0.2) * 0.012, center=pk),
+                              color=theme.TEXT_BRIGHT, name="max_marker")
+        self.plotter.add_point_labels(
+            [pk], [f"{label}\n{where}, {z_nose:.3f} m from nose"], font_size=12,
+            text_color=theme.TEXT_BRIGHT, point_color="#ff3b30", point_size=8,
+            shape_color=theme.PANEL, shape_opacity=0.7, always_visible=True,
+            name="max_label")
+
     def _render(self):
-        if not _PYVISTA or self.plotter is None or not self._region_meshes:
+        if not _PYVISTA or self.plotter is None:
+            return
+        if self._fe is not None and self._fe_grid is not None:
+            self.plotter.clear()
+            self._render_fe()
+            self._finish_render()
+            return
+        if not self._region_meshes:
             return
         self.plotter.clear()
         bc = self._body_condition
@@ -520,7 +676,7 @@ class StressViewer(QWidget):
             return
         cat = np.concatenate(all_vals)
         if mode == "Safety Factor":
-            clim = [max(0.0, float(cat.min())), min(5.0, float(cat.max()) or 5.0)]
+            clim = _sf_clim(cat)
             cmap = "jet_r"
         else:
             clim = [0.0, float(cat.max()) or 1.0]
@@ -562,7 +718,9 @@ class StressViewer(QWidget):
                 [peak_pt], [txt], font_size=12, text_color=theme.TEXT_BRIGHT,
                 point_color="#ff3b30", point_size=8, shape_color=theme.PANEL,
                 shape_opacity=0.7, always_visible=True, name="max_label")
+        self._finish_render()
 
+    def _finish_render(self):
         try:
             self.plotter.enable_point_picking(callback=self._on_pick,
                                               show_message=False, show_point=False)
@@ -580,8 +738,14 @@ class StressViewer(QWidget):
     def _on_pick(self, point):
         if point is None:
             return
+        text = self._mode
+        if self._fe is not None and self._fe_grid is not None:
+            # value of the picked FE node, not just the mode's name
+            k = int(np.argmin(np.linalg.norm(self._fe_grid.points - np.asarray(point), axis=1)))
+            v = float(self._fe_values(self._mode)[k])
+            text = f"SF {v:.2f}" if self._mode == "Safety Factor" else f"{v:+.2f} MPa"
         try:
-            self.plotter.add_point_labels([point], [self._mode], font_size=10,
+            self.plotter.add_point_labels([point], [text], font_size=10,
                                           text_color=theme.TEXT_BRIGHT, name="hover_label",
                                           always_visible=True)
         except Exception:

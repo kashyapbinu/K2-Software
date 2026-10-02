@@ -50,6 +50,7 @@ class StructuresWorkspace(QWidget):
         super().__init__(parent)
         self.engine = engine
         self._fem_result = None
+        self._fe_field = None     # CalculiX field behind the panel values, while current
         self._modal_result = None
         self._thermal_result = None
         self._thread = None
@@ -879,8 +880,11 @@ class StructuresWorkspace(QWidget):
         # Update status bar with condition name
         self._status.setText(f"Condition: {condition} — σ_vm={r['von_mises']/1e6:.1f} MPa, SF={sf:.2f}")
 
-        # Store body condition for 3D viewer + run workstation suite
+        # Store body condition for 3D viewer + run workstation suite. The panel
+        # now shows the analytical estimate, so a CalculiX field from an
+        # earlier run no longer describes it.
         self._last_bc = r
+        self._fe_field = None
         self._run_workstation(body_condition=r)
 
     # ── FEM Analysis Runs ────────────────────────────────────────────────────
@@ -940,6 +944,7 @@ class StructuresWorkspace(QWidget):
                 acceleration_g=5.0,
             )
 
+        self._vehicle_model(lc, condition)
         refinement, custom_circum, custom_axial = self._get_fem_custom_params()
         fem = FEMInterface()
         self._progress.setVisible(True); self.btn_static.setEnabled(False)
@@ -953,9 +958,10 @@ class StructuresWorkspace(QWidget):
             if getattr(s, 'cfd_converged', False):
                 lc.dynamic_pressure = s.cfd_dynamic_pressure
                 lc.mach = s.cfd_mach if s.cfd_mach > 0 else lc.mach
-                # Use CFD axial force if it's larger (more conservative)
+                # CFD axial force is the DRAG. It used to overwrite
+                # axial_force — the thrust — whenever it was larger.
                 if s.cfd_force_axial > 0:
-                    lc.axial_force = max(lc.axial_force, s.cfd_force_axial)
+                    lc.drag_force_N = s.cfd_force_axial
                 if s.cfd_force_normal > 0:
                     lc.lateral_force = s.cfd_force_normal
                 self._status.setText(
@@ -989,6 +995,40 @@ class StructuresWorkspace(QWidget):
         self._thread.finished.connect(self._on_result)
         self._thread.errored.connect(self._on_error)
         self._thread.start()
+
+    def _vehicle_model(self, lc, condition):
+        """Fill the vehicle side of the FE load set from the rocket state: the
+        mass at this flight phase and where the motor sits (the inertia that
+        reacts the loads), the drag coefficient at this Mach, and for recovery
+        the same harness tension the analytical panel uses."""
+        s = self.engine.state
+        try:
+            total = float(s.total_mass())
+            burnout = float(getattr(s, "dry_mass", 0.0) + getattr(s, "motor_dry_mass", 0.0))
+            # Max-Q and recovery come at / after burnout; thrust peaks near liftoff.
+            lc.vehicle_mass_kg = burnout if (condition in ("Max-Q", "Recovery Shock")
+                                             and burnout > 0) else total
+        except Exception:
+            pass
+        lc.motor_aft_m = float(getattr(s, "motor_position", 0.0) or 0.0)
+        lc.motor_length_m = float(getattr(s, "motor_length", 0.0) or 0.0)
+        if condition in ("Max Thrust", "Max-Q") and lc.mach > 0:
+            try:
+                from physics.aerodynamics import AeroModel
+                V = lc.mach * 340.0
+                lc.drag_coefficient = float(AeroModel.from_state(s).compute(
+                    math.radians(lc.angle_of_attack_deg), lc.mach,
+                    max(lc.dynamic_pressure, 1.0), 0.0, V, getattr(s, "cg", 0.0))["cd"])
+            except Exception as e:
+                logger.debug(f"drag coefficient for FE load set: {e}")
+        if condition == "Recovery Shock":
+            try:
+                harness = wks.recovery_loads(s, self._get_history()).harness_tension_N
+                if harness > 0:
+                    lc.axial_force = harness          # already dynamically amplified
+                    lc.dynamic_amplification = 1.0
+            except Exception:
+                pass
 
     def _run_modal(self):
         assembly = self._get_assembly()
@@ -1068,13 +1108,16 @@ class StructuresWorkspace(QWidget):
                     tys = [p[1] for p in result.station_temperatures]
                     self._temp_plot.update_plot(txs, tys, "Wall Temperature", "Position (m)", "T (K)", theme.ERR_DEEP)
 
-            # Feed FEM peak stresses into the 3D stress viewer + workstation suite
+            # Feed the FEM result into the 3D views + workstation suite. The
+            # CalculiX field itself is what the 3D stress and deformation
+            # views draw, so they show the numbers in this panel.
             self._last_bc = wks.body_condition_from_fem(result)
+            self._fe_field = getattr(result, "fe_field", None)
             self._run_workstation(body_condition=self._last_bc)
             self._update_stress3d()
 
             self._center_tabs.setCurrentIndex(0)
-            self._status.setText(f"{lc_name} analysis — \u03c3_vm={result.max_von_mises/1e6:.1f} MPa, SF={sf:.2f}")
+            self._status.setText(self._fem_status(result, lc_name))
 
         elif rtype == "modal":
             self._modal_result = result
@@ -1152,11 +1195,11 @@ class StructuresWorkspace(QWidget):
                 self.lbl_damping_range.setText(f"{zmin:.2f}% – {zmax:.2f}%")
 
             # Update ModeShapeViewer
-            if hasattr(self, '_modal_plot') and hasattr(self._modal_plot, 'load_mesh'):
-                import pathlib
-                inp_path = pathlib.Path("fem_run/modal/structure_mesh.inp")
-                if inp_path.is_file():
-                    self._modal_plot.load_mesh(str(inp_path))
+            if hasattr(self, '_modal_plot') and hasattr(self._modal_plot, 'load_result_mesh'):
+                # The mesh comes with the result: a relative "fem_run/..." path
+                # never existed in installed builds (FEM output lives in the
+                # per-user data folder), so the viewer stayed blank there.
+                self._modal_plot.load_result_mesh(result)
 
                 self.mode_combo.clear()
                 if result.frequencies_hz:
@@ -1220,6 +1263,31 @@ class StructuresWorkspace(QWidget):
             self._center_tabs.setCurrentIndex(2)
             self._status.setText(f"Thermal: T_max={result.max_wall_temp_K:.0f} K, σ_th={result.max_thermal_stress/1e6:.1f} MPa")
 
+    @staticmethod
+    def _fem_status(result, lc_name):
+        """One line: what CalculiX found and what it was loaded with."""
+        if getattr(result, "fe_field", None) is None:
+            return (f"{lc_name} analysis — σ_vm={result.max_von_mises/1e6:.1f} MPa, "
+                    f"SF={result.safety_factor:.2f}")
+        L = result.applied_loads or {}
+        where = max(result.component_results.items(),
+                    key=lambda kv: kv[1].get("max_stress", 0.0))[0] \
+            if result.component_results else "airframe"
+        loads = []
+        if L.get("thrust_N"):
+            loads.append(f"thrust {L['thrust_N']:.0f} N")
+        if L.get("normal_force_N"):
+            loads.append(f"normal {L['normal_force_N']:.0f} N @ {L.get('alpha_deg', 0):g}°")
+        if L.get("recovery_force_N"):
+            loads.append(f"harness {L['recovery_force_N']:.0f} N")
+        if L.get("T_max_K"):
+            loads.append(f"T_max {L['T_max_K']:.0f} K")
+        if "accel_axial_g" in L:
+            loads.append(f"a {L['accel_axial_g']:+.1f} g axial, {L.get('accel_lateral_g', 0):.1f} g lateral")
+        return (f"{lc_name} (CalculiX): σ_vm={result.max_von_mises/1e6:.2f} MPa in the "
+                f"{where.lower()}, SF={result.safety_factor:.2f} incl. Kt {result.kt_detail:g}"
+                + (" | " + ", ".join(loads) if loads else ""))
+
     def _on_mode_select(self, index):
         if not hasattr(self, '_modal_result') or not self._modal_result:
             return
@@ -1280,6 +1348,7 @@ class StructuresWorkspace(QWidget):
     def reset_workspace(self):
         """Blank all structural results + plots (called on New Project)."""
         self._fem_result = None
+        self._fe_field = None
         self._modal_result = None
         self._thermal_result = None
         self._wks_report = None
@@ -1444,7 +1513,9 @@ class StructuresWorkspace(QWidget):
             self.lbl_modal_warn.setStyleSheet(f"color:{theme.WARN};font-size:10px;padding:2px;font-weight:600;")
         else:
             self.lbl_modal_f1.setProperty("value", True)
-            self.lbl_modal_warn.setText(f"✓ {me.total_mass_kg:.2f} kg, cantilever beam estimate")
+            # modal_estimate is a FREE-FREE beam (flight); the CalculiX modal
+            # run is clamped at the aft end, so the two f1 differ by design.
+            self.lbl_modal_warn.setText(f"✓ {me.total_mass_kg:.2f} kg, free-free beam estimate")
             self.lbl_modal_warn.setStyleSheet(f"color:{theme.TEXT_FAINT};font-size:10px;padding:2px;")
 
     def _populate_thermal_tab(self, tp):
@@ -1585,6 +1656,22 @@ class StructuresWorkspace(QWidget):
 
     def _populate_deformation(self, rep):
         s = self.engine.state
+        exag = {0: 1, 1: 10, 2: 50, 3: 100}.get(self._exag_combo.currentIndex(), 10)
+        fe = getattr(self, "_fe_field", None)
+        if fe is not None and hasattr(self._defo_view, "set_fe_deflection"):
+            # The CalculiX displacement field itself (rigid-body motion removed).
+            try:
+                peak = self._defo_view.set_fe_deflection(fe, exaggeration=exag)
+                import numpy as np
+                k = int(np.argmax(np.linalg.norm(fe.displacement, axis=1)))
+                where = "fin" if fe.is_fin[k] else "airframe"
+                self._defl_summary.setText(
+                    f"Max Deflection: {peak:.3f} mm  ·  {where}, {fe.points[k, 2]:.3f} m from "
+                    f"nose  ·  CalculiX, rigid-body motion removed  ·  shape ×{exag} (auto-fit)")
+            except Exception as e:
+                logger.error(f"Deformation view failed: {e}")
+            self._tab_deform.setCurrentIndex(1)
+            return
         # Max deflection: take the larger of the FEM peak nodal displacement and
         # the analytical Euler-Bernoulli lateral bend. FEM static for an axial
         # load case only captures the tiny axial shortening (~0.00 mm), which
@@ -1599,7 +1686,6 @@ class StructuresWorkspace(QWidget):
             max_defl = beam_defl
             loc = rep.deflection.location
         tip_defl = rep.deflection.tip_deflection_mm or max_defl
-        exag = {0: 1, 1: 10, 2: 50, 3: 100}.get(self._exag_combo.currentIndex(), 10)
         self._defl_summary.setText(
             f"Max Deflection: {max_defl:.2f} mm  ·  Tip: {tip_defl:.2f} mm  ·  "
             f"{loc}  ·  shape ×{exag} (auto-fit to view)")
@@ -1614,8 +1700,13 @@ class StructuresWorkspace(QWidget):
 
     def _apply_exaggeration(self):
         # Re-render deformation with chosen scale note
-        if hasattr(self, "_wks_report") and self._wks_report:
+        if self._deformation_available():
             self._populate_deformation(self._wks_report)
+
+    def _deformation_available(self):
+        """A CalculiX field, or a workstation report for the analytical bow."""
+        return (getattr(self, "_fe_field", None) is not None
+                or bool(getattr(self, "_wks_report", None)))
 
     def _refresh_active_3d(self):
         """Refresh whichever pyvista-heavy tab is currently visible."""
@@ -1623,7 +1714,7 @@ class StructuresWorkspace(QWidget):
         name = self._center_tabs.tabText(idx)
         if "3D Stress" in name:
             self._update_stress3d()
-        elif "Deformation" in name and hasattr(self, "_wks_report") and self._wks_report:
+        elif "Deformation" in name and self._deformation_available():
             self._populate_deformation(self._wks_report)
 
     def _on_tab_changed(self, idx):
@@ -1644,7 +1735,8 @@ class StructuresWorkspace(QWidget):
         fin_pa = rep.fin.root_bending_MPa * 1e6 if rep is not None else 0.0
         try:
             self._stress3d.set_result(self.engine.state, self._get_assembly(),
-                                      bc, mat.yield_strength, fin_stress_pa=fin_pa)
+                                      bc, mat.yield_strength, fin_stress_pa=fin_pa,
+                                      fe_field=getattr(self, "_fe_field", None))
         except Exception as e:
             logger.error(f"3D stress update failed: {e}")
 

@@ -474,3 +474,83 @@ def random_vibration_response(natural_freqs: list, damping_ratio: float = 0.02,
         f"peaks_validated={result.peaks_validated}"
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Public: FE modal result -> vibration inputs
+# ---------------------------------------------------------------------------
+def fem_modal_inputs(modal, merge_tol: float = 0.02, min_mass_frac: float = 1e-3):
+    """(frequencies, Γ, names) for random_vibration_response from a FE
+    ModalResult, weighted by CalculiX's own effective-mass table.
+
+    Γ_r = √(m_eff,r / M) — the quantity _DEFAULT_GAMMA tabulates for a uniform
+    cantilever (0.783² = 61 % of the mass in mode 1) — read from the FE model
+    instead of assumed by list position. Handing the index defaults a real FE
+    mode list gave Γ 0.254 / 0.182 to shell modes CalculiX says carry 0 % of
+    the mass (resonance peaks that do not exist) and Γ 0.434 to the second
+    plane of the FIRST bending mode.
+
+    * Lateral excitation: the X and Y fractions are averaged. How a degenerate
+      bending pair splits between the two planes is arbitrary; the pair's sum
+      is not.
+    * Modes within ``merge_tol`` in frequency merge into one entry — a
+      degenerate pair responds as one mode.
+    * Entries under ``min_mass_frac`` of the mass are dropped: base excitation
+      cannot drive them.
+
+    Returns None when the result carries no effective-mass data (analytical
+    fallback) or nothing participates — the caller then uses the default Γ.
+    """
+    freqs = list(getattr(modal, "frequencies_hz", None) or [])
+    meff = list(getattr(modal, "effective_mass_kg", None) or [])
+    total = tuple(getattr(modal, "total_effective_mass_kg", None) or ())
+    if (not freqs or len(meff) != len(freqs) or len(total) < 2
+            or total[0] <= 0.0 or total[1] <= 0.0):
+        return None
+    descs = list(getattr(modal, "descriptions", None) or [])
+
+    def lateral(m):
+        return 0.5 * (max(m[0], 0.0) / total[0] + max(m[1], 0.0) / total[1])
+
+    groups = []         # [first f, Σ w·f, Σ w, member indices]
+    for i, (f, m) in enumerate(zip(freqs, meff)):
+        if f <= 0.0:
+            continue
+        w = lateral(m)
+        if groups and f <= groups[-1][0] * (1.0 + merge_tol):
+            g = groups[-1]
+            g[1] += w * f
+            g[2] += w
+            g[3].append(i)
+        else:
+            groups.append([f, w * f, w, [i]])
+
+    out_f, out_g, out_n = [], [], []
+    for f0, fw, w, members in groups:
+        if w < min_mass_frac:
+            continue
+        out_f.append(fw / w)
+        out_g.append(math.sqrt(w))
+        lead = max(members, key=lambda i: lateral(meff[i]))
+        desc = descs[lead] if lead < len(descs) else ""
+        if len(members) > 1 and desc[-4:] in (" (X)", " (Y)"):
+            desc = desc[:-4]            # the entry covers both planes
+        tag = "+".join(str(i + 1) for i in members)
+        out_n.append(f"Mode {tag}" + (f" — {desc}" if desc else ""))
+    if not out_f:
+        return None
+    return out_f, out_g, out_n
+
+
+def vibration_from_modal(modal, damping_ratio: float = 0.02,
+                         input_psd_g2_hz: float = 0.04) -> VibrationResult:
+    """random_vibration_response for a FE ModalResult, weighted by the
+    result's own effective masses (see fem_modal_inputs). A result without
+    that data falls back to the default cantilever Γ by mode index."""
+    inputs = fem_modal_inputs(modal)
+    if inputs is None:
+        freqs = [f for f in (getattr(modal, "frequencies_hz", None) or []) if f > 1.0]
+        return random_vibration_response(freqs, damping_ratio, input_psd_g2_hz)
+    freqs, gammas, names = inputs
+    return random_vibration_response(freqs, damping_ratio, input_psd_g2_hz,
+                                     mode_names=names, participation_factors=gammas)

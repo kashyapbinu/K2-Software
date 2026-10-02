@@ -7,8 +7,11 @@ so the shape matches everywhere.
 
 Renders a translucent undeformed "ghost" plus the deformed body coloured by
 displacement magnitude (mm), with a user-selectable exaggeration factor.
-The deflection shape is a free-free bow (both ends bending relative to
-mid-body, as in flight) scaled to the analysed maximum displacement.
+
+After a CalculiX static run the displacement field is the solver's own
+(rigid-body motion removed), drawn on the FE mesh. Without one, the shape is
+a free-free bow (both ends bending relative to mid-body, as in flight)
+scaled to the analytical maximum deflection.
 """
 from __future__ import annotations
 
@@ -26,7 +29,7 @@ except Exception as e:  # pragma: no cover
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
 from PyQt6.QtCore import Qt
 
-from ui.widgets.stress_viewer import build_rocket_regions
+from ui.widgets.stress_viewer import build_rocket_regions, fe_displacement, fe_grid
 
 from ui import theme
 
@@ -98,6 +101,50 @@ class DeformationViewer(QWidget):
         if hasattr(self, "_empty"):
             self._empty.hide()
         self._render()
+
+    def set_fe_deflection(self, fe_field, exaggeration=10.0) -> float:
+        """Draw the CalculiX displacement field (rigid-body motion already
+        removed) on the FE mesh. Returns the peak deflection in mm."""
+        if not _PYVISTA or self.plotter is None or fe_field is None:
+            return 0.0
+        grid = fe_grid(fe_field)
+        u = fe_displacement(fe_field)
+        mag_mm = np.linalg.norm(u, axis=1) * 1000.0
+        peak = float(mag_mm.max()) if len(mag_mm) else 0.0
+        self._max_defl_mm, self._exag = peak, exaggeration
+        self._total_len = max(fe_field.length, 1e-6)
+        if hasattr(self, "_empty"):
+            self._empty.hide()
+        self.plotter.clear()
+        # same visual rule as the analytical view: true × exaggeration, with
+        # the shape auto-fitted to ≥ 6 % of the length so it stays visible
+        amp_m = peak / 1000.0 * exaggeration
+        min_visible = 0.06 * self._total_len
+        if peak > 1e-9 and amp_m < min_visible:
+            amp_m = min_visible
+        scale = amp_m / (peak / 1000.0) if peak > 1e-12 else 0.0
+        deformed = grid.copy()
+        deformed.points = grid.points + u * scale
+        deformed["Displacement (mm)"] = mag_mm
+        self.plotter.add_mesh(grid, color=theme.LINE, opacity=0.25,
+                              style="wireframe", line_width=1, name="ghost")
+        self.plotter.add_mesh(
+            deformed, scalars="Displacement (mm)", cmap="turbo", name="deformed",
+            scalar_bar_args=dict(title="Displacement (mm)", title_font_size=12,
+                                 label_font_size=10, color=theme.TEXT,
+                                 position_x=0.86, position_y=0.12,
+                                 width=0.06, height=0.7, fmt="%.3f", n_labels=6))
+        k = int(np.argmax(mag_mm))
+        self.plotter.add_point_labels(
+            [deformed.points[k]],
+            [f"Max: {peak:.3f} mm  (CalculiX, shape ×{exaggeration:.0f}, auto-fit)"],
+            font_size=11, text_color=theme.TEXT_BRIGHT, point_color="#ff3b30",
+            point_size=8, shape_color=theme.PANEL, shape_opacity=0.7,
+            always_visible=True, name="defl_label")
+        self._side_view()
+        self.plotter.reset_camera()
+        self.plotter.render()
+        return peak
 
     def _render(self):
         if self._base is None:
