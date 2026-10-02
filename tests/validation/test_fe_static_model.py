@@ -27,6 +27,13 @@ from validation.cases.rocket_canonical import canonical_assembly
 
 _ALU = get_structural_material("Aluminum 6061-T6")
 
+# Vehicle = airframe + motor. The total was a literal 2.63 kg, sized around an
+# airframe that weighed 1.13 kg only because its aluminium was being weighed
+# as cardboard. The real airframe is 3.98 kg, more than that total, which left
+# no mass for the motor at all.
+_MOTOR_KG = 1.5
+_VEHICLE_KG = canonical_assembly().total_mass() + _MOTOR_KG
+
 
 def _mesh(tmp_path, asm=None, refinement="medium"):
     asm = asm or canonical_assembly()
@@ -40,7 +47,7 @@ def _flight_case(name="Max-Q"):
     else:
         lc = LoadCase.max_thrust(thrust=1500.0, angle_of_attack_deg=2.0, mach=0.3,
                                  altitude_m=500.0)
-    lc.vehicle_mass_kg, lc.motor_aft_m, lc.motor_length_m = 2.63, 2.0, 0.30
+    lc.vehicle_mass_kg, lc.motor_aft_m, lc.motor_length_m = _VEHICLE_KG, 2.0, 0.30
     return lc
 
 
@@ -96,7 +103,7 @@ def test_diameter_steps_and_small_gaps_stay_connected(tmp_path):
 def test_load_set_is_a_balanced_free_body(tmp_path, case):
     asm, mesh, info, _ = _mesh(tmp_path)
     if case == "Recovery Shock":
-        lc = LoadCase.recovery(vehicle_mass_kg=2.6)
+        lc = LoadCase.recovery(vehicle_mass_kg=_VEHICLE_KG)
     elif case == "Pressure":
         lc = LoadCase(name="Custom", axial_force=300.0, internal_pressure=2e5)
     else:
@@ -116,9 +123,13 @@ def test_load_set_carries_the_design_loads(tmp_path):
     lm = build_static_loads(mesh, info, asm, lc, lambda s: _ALU.density)
     s = lm.summary
     assert s["thrust_N"] == 500.0
-    assert s["vehicle_mass_kg"] == pytest.approx(2.63, rel=1e-6)
+    assert s["vehicle_mass_kg"] == pytest.approx(_VEHICLE_KG, rel=1e-6)
+    # The motor is what the airframe does not account for. It is clamped at
+    # zero, so a total below the airframe mass would pass silently otherwise.
+    assert s["motor_mass_kg"] == pytest.approx(_MOTOR_KG, rel=1e-6)
     assert s["normal_force_N"] > 0 and s["daf"] == 1.3
-    assert s["accel_axial_g"] == pytest.approx((500.0 - s["drag_N"]) / (2.63 * 9.80665), rel=1e-6)
+    assert s["accel_axial_g"] == pytest.approx(
+        (500.0 - s["drag_N"]) / (_VEHICLE_KG * 9.80665), rel=1e-6)
     assert s["fin_normal_N"] > 0 and s["drag_N"] > 0
 
 

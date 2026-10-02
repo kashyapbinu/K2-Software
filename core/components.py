@@ -22,6 +22,36 @@ MATERIALS = {
     "Ripstop Nylon": {"density": 40, "color": "#ff6633"},
 }
 
+_unknown_materials_warned = set()
+
+
+def material_density(name: str) -> float:
+    """Density (kg/m³) for a component material name.
+
+    Looks in the Design list first, then in the structural library, whose
+    names ("Aluminum 6061-T6", "Steel 4130", ...) are what the FEM side and
+    the validation rockets use. An aluminium airframe named that way used to
+    fall through to Cardboard without a word: 680 instead of 2700 kg/m³, so
+    the rocket weighed a quarter of what it should and its CG moved with it.
+
+    A name in neither table still gets Cardboard, but says so once.
+    """
+    mat = MATERIALS.get(name)
+    if mat is not None:
+        return mat["density"]
+    # Imported here: structures pulls in the FEM stack, which core must not
+    # need just to describe a component.
+    from structures.solvers.base import STRUCTURAL_MATERIALS
+    structural = STRUCTURAL_MATERIALS.get(name)
+    if structural is not None:
+        return structural.density
+    if name not in _unknown_materials_warned:
+        _unknown_materials_warned.add(name)
+        logger.warning("Unknown material '%s' — using Cardboard density "
+                       "(%d kg/m³) for mass", name, MATERIALS["Cardboard"]["density"])
+    return MATERIALS["Cardboard"]["density"]
+
+
 NOSE_SHAPES = ["Conical", "Ogive", "Elliptical", "Parabolic", "Haack (LD)"]
 FIN_SHAPES = ["Trapezoidal", "Elliptical", "Swept"]
 TRANSITION_SHAPES = ["Conical", "Ogive", "Elliptical"]
@@ -55,8 +85,7 @@ class RocketComponent:
         ork_d = getattr(self, '_ork_density', None)
         if ork_d is not None and ork_d > 0:
             return ork_d
-        mat = MATERIALS.get(self.material, MATERIALS["Cardboard"])
-        return mat["density"]
+        return material_density(self.material)
 
     def computed_mass(self) -> float:
         if self.override_mass is not None:
@@ -511,9 +540,8 @@ class Parachute(RocketComponent):
         return self.packed_length
 
     def _calc_mass(self):
-        mat = MATERIALS.get(self.material, MATERIALS["Cardboard"])
         area = math.pi * (self.diameter / 2)**2
-        canopy = area * 0.00005 * mat["density"]
+        canopy = area * 0.00005 * material_density(self.material)
         lines = self.line_count * self.line_length * 0.001
         return canopy + lines
 

@@ -82,6 +82,12 @@ class ComponentEditor(QWidget):
             mat_combo = QComboBox()
             for m in MATERIALS:
                 mat_combo.addItem(m)
+            # A material from outside this list (structural names, imported
+            # projects) must still be shown as what it is. setCurrentText on a
+            # missing item does nothing, which left the combo on its first
+            # entry and reported an aluminium part as Cardboard.
+            if comp.material and mat_combo.findText(comp.material) < 0:
+                mat_combo.addItem(comp.material)
             mat_combo.setCurrentText(comp.material)
             mat_combo.currentTextChanged.connect(lambda t: self._set_prop(comp, "material", t))
             f1.addRow("Material:", mat_combo)
