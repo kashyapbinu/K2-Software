@@ -21,6 +21,7 @@ from PyQt6.QtCore import Qt, QTimer
 
 import logging
 from ui import theme
+from ui.widgets.viewport_gate import gate_hidden_rendering
 
 logger = logging.getLogger("K2.ModeShapeViewer")
 
@@ -51,9 +52,19 @@ class ModeShapeViewer(QWidget):
 
         self._setup_ui()
 
+        # 20 FPS, but only while the viewer is on screen: it used to start
+        # here and re-deform the whole mesh every 50 ms behind a hidden tab.
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._animate)
-        self.timer.start(50)  # 20 FPS
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self.btn_play.isChecked():       # checked = paused by the user
+            self.timer.start(50)
+
+    def hideEvent(self, event):
+        self.timer.stop()
+        super().hideEvent(event)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -62,6 +73,7 @@ class ModeShapeViewer(QWidget):
 
         # Plotter
         self.plotter = QtInteractor(self)
+        gate_hidden_rendering(self.plotter)
         self.plotter.set_background(theme.BG, top=theme.PANEL)
         self.plotter.add_axes(interactive=False, line_width=2)
         layout.addWidget(self.plotter.interactor, 1)

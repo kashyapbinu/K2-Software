@@ -59,6 +59,7 @@ except Exception:
     _ROCKET_MESH_OK = False
 
 from ui import theme
+from ui.widgets.viewport_gate import gate_hidden_rendering
 
 logger = logging.getLogger("K2.MissionViz")
 
@@ -383,6 +384,9 @@ class MissionVisualizerWorkspace(QWidget):
             try:
                 self._plotter = QtInteractor(view_frame)
                 vfl.addWidget(self._plotter.interactor)
+                # The workspace's own render tick already skips a hidden tab;
+                # pyvistaqt's 5 Hz auto-update did not.
+                gate_hidden_rendering(self._plotter)
                 self._plotter.set_background(theme.BG)
                 self._init_3d_scene()
                 self._scene_ready = True

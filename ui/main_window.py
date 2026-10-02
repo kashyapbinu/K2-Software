@@ -563,7 +563,11 @@ class MainWindow(QMainWindow):
             if self.sim_engine.is_running:
                 self.sim_engine.stop()
             self.mission_viz_ws.shutdown()
-            self.design_ws.closeEvent(event)
+            # The Design viewer is not closed by hand here. Closing its plotter
+            # while it was the tab on screen killed the process as the window
+            # went away (every time, with the AI panel closed). The call was
+            # there to stop the viewer redrawing during teardown; the viewport
+            # gate now stops a view drawing the moment it is hidden.
             event.accept()
         else:
             event.ignore()

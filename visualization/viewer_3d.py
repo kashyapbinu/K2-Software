@@ -214,6 +214,10 @@ class Viewer3D(QWidget):
         self.plotter = QtInteractor(frame)
         fl.addWidget(self.plotter.interactor)
         layout.addWidget(frame)
+        # Draw only while the Design tab is showing (lazy import: see
+        # _viewport_bg).
+        from ui.widgets.viewport_gate import gate_hidden_rendering
+        gate_hidden_rendering(self.plotter)
 
         bg, bg_top = _viewport_bg()
         self.plotter.set_background(bg, top=bg_top)

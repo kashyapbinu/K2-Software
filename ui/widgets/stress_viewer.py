@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 from ui.icons import icon
+from ui.widgets.viewport_gate import gate_hidden_rendering
 
 from ui import theme
 
@@ -369,6 +370,7 @@ class StressViewer(QWidget):
             return
 
         self.plotter = QtInteractor(self)
+        gate_hidden_rendering(self.plotter)
         self.plotter.set_background(theme.BG, top=theme.PANEL)
         # Orientation axes are added only once a result is rendered (see
         # _render). Showing them in the empty state put a stray gizmo + X/Y/Z

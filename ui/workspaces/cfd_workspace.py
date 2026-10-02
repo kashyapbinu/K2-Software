@@ -23,6 +23,7 @@ from pyvistaqt import QtInteractor
 from cfd.post_processing import field_percentiles
 
 from ui import theme
+from ui.widgets.viewport_gate import gate_hidden_rendering
 
 logger = logging.getLogger("K2.CFD.Workspace")
 
@@ -1378,6 +1379,9 @@ class CFDWorkspace(QWidget):
         fl = QVBoxLayout(frame)
         fl.setContentsMargins(0, 0, 0, 0)
         self._plotter = QtInteractor(frame, auto_update=False)
+        # No auto-update timer here, but a solve still repaints this view
+        # every 300 ms; skip that while the CFD tab is hidden.
+        gate_hidden_rendering(self._plotter)
         self._plotter.set_background(theme.BG)
         try:
             self._plotter.enable_ssao(radius=0.25, bias=0.002, kernel_size=512, blur=True)

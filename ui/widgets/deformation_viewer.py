@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
 from PyQt6.QtCore import Qt
 
 from ui.widgets.stress_viewer import build_rocket_regions, fe_displacement, fe_grid
+from ui.widgets.viewport_gate import gate_hidden_rendering
 
 from ui import theme
 
@@ -56,6 +57,7 @@ class DeformationViewer(QWidget):
             self.plotter = None
             return
         self.plotter = QtInteractor(self)
+        gate_hidden_rendering(self.plotter)
         self.plotter.set_background(theme.BG, top=theme.PANEL)
         self.plotter.add_axes(interactive=False, line_width=2)
         lay.addWidget(self.plotter.interactor, 1)
