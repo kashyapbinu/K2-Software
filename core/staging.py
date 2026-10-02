@@ -144,6 +144,11 @@ _NOSE_SHAPE_MAP = {
 }
 
 
+def aero_nose_type(shape) -> str:
+    """Aero-model nose type for a NoseCone.shape ("Haack (LD)" → "ogive")."""
+    return _NOSE_SHAPE_MAP.get(str(shape or "ogive").lower(), "ogive")
+
+
 def _extract_stage_geometry(stage) -> dict:
     """Pull StageConfig geometry fields from one assembly Stage (UI component)."""
     from core.components import NoseCone, TrapezoidalFinSet
@@ -156,8 +161,7 @@ def _extract_stage_geometry(stage) -> dict:
 
     nose = _find_child(stage, NoseCone)
     if nose is not None:
-        geom["nose_type"] = _NOSE_SHAPE_MAP.get(
-            str(getattr(nose, "shape", "ogive")).lower(), "ogive")
+        geom["nose_type"] = aero_nose_type(getattr(nose, "shape", "ogive"))
         geom["nose_length"] = nose.component_length()
 
     fins = _find_child(stage, TrapezoidalFinSet)

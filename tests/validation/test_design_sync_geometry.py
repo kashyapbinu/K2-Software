@@ -167,3 +167,42 @@ def test_a_finless_design_reaches_the_sim_without_fins():
     assert state.fin_count == 0
     assert model.fin_count == 0 and model.fin_span == 0.0
 
+
+# ── one centre of pressure ───────────────────────────────────────────────────
+#
+# The Design tab's stability readout came from a second, hand-written
+# Barrowman in core.components (fin interference 1 + tau, its own nose-CP
+# table), while the sim's AeroModel applies OpenRocket's (1 + tau)^2 below
+# Mach 0.9. The validation rocket read 2.80 cal in Design and flew at 3.26.
+# The components now call the sim's own functions.
+
+def _rocket(shape="Ogive", fin_count=3, sweep=20.0, tip=0.05):
+    asm = RocketAssembly()
+    stage = asm.stages[0]
+    nose = NoseCone()
+    nose.shape, nose.length = shape, 0.25
+    asm.add_component(stage, nose)
+    tube = BodyTube()
+    tube.length = 0.9
+    asm.add_component(stage, tube)
+    fins = TrapezoidalFinSet()
+    fins.fin_count, fins.height, fins.root_chord = fin_count, 0.07, 0.11
+    fins.tip_chord, fins.sweep_angle = tip, sweep
+    asm.add_component(tube, fins)
+    return asm
+
+
+@pytest.mark.parametrize("assembly", [
+    canonical_assembly(),
+    _rocket("Ogive"), _rocket("Conical"), _rocket("Elliptical"),
+    _rocket("Parabolic"), _rocket("Haack (LD)"),
+    _rocket(fin_count=4, sweep=45.0, tip=0.0), _rocket(fin_count=6),
+], ids=["validation", "ogive", "conical", "elliptical", "parabolic", "haack",
+        "delta-4", "six-fins"])
+def test_design_tab_and_sim_place_the_cp_identically(assembly):
+    state = _design_sync(assembly).state
+    sim_cp = AeroModel.from_state(state).cp_subsonic()
+
+    assert state.cp == pytest.approx(sim_cp, rel=1e-9)
+    assert state.stability_margin == pytest.approx(
+        (sim_cp - state.cg) / state.diameter, rel=1e-9, abs=1e-12)

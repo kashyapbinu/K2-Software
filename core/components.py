@@ -192,13 +192,13 @@ class NoseCone(RocketComponent):
         # CN_alpha = 2.0 referenced to base area
         # Scaled to d_ref: CN = 2.0 * (d_base / d_ref)^2
         cn = 2.0 * (self.diameter / d_ref)**2 if d_ref > 0 else 2.0
-        
-        if self.shape == "Conical":
-            cp = self._position + self.length * 0.667
-        elif self.shape in ["Ogive", "Haack (LD)"]:
-            cp = self._position + self.length * 0.466
-        else:
-            cp = self._position + self.length * 0.5
+
+        # CP from the flight sim's own nose model, so the Design tab and the
+        # sim place it identically. The table here had drifted from that one:
+        # an elliptical nose was at 0.5 L against the sim's 0.333 L.
+        from physics.aerodynamics import compute_nose_cp
+        from core.staging import aero_nose_type
+        cp = self._position + compute_nose_cp(self.length, aero_nose_type(self.shape))
         return (cn, cp)
 
     def _props_dict(self):
@@ -331,57 +331,35 @@ class TrapezoidalFinSet(RocketComponent):
         return area * self.thickness * density * self.fin_count
 
     def cp_contribution(self, d_ref: float):
-        """Full Barrowman method for trapezoidal fin CP."""
+        """Fin-set normal-force slope and CP at low speed.
+
+        Both come from physics.aerodynamics, the functions the flight sim's
+        AeroModel calls, evaluated at Mach 0. This method used to carry its
+        own Barrowman fin term with the fin-in-body interference factor
+        (1 + tau) alone, while the sim applies OpenRocket's (1 + tau)^2 below
+        Mach 0.9. The Design tab then showed 2.80 cal for a rocket the sim
+        flew at 3.26 cal.
+        """
         if self.root_chord <= 0 or self.height <= 0 or d_ref <= 0:
             return (0.0, 0.0)
+        from physics.aerodynamics import compute_fin_cn_alpha, compute_fin_cp
 
-        Cr = self.root_chord
-        Ct = self.tip_chord
-        a = self.height  # span from body wall
-        N = self.fin_count
-
-        # Find body radius at fin position
+        # Body radius where the fins sit
         R = 0.0
         if self.parent is not None:
             R = self.parent.outer_diameter() / 2.0
         if R <= 0: R = d_ref / 2.0
 
-        s_total = R + a  # semi-span from centerline
-
-        # Sweep length (leading edge offset)
-        sweep_len = a * math.tan(math.radians(self.sweep_angle)) if self.sweep_angle > 0 else 0
-
-        # Mid-chord line sweep
-        lm = sweep_len + (Ct / 2.0) - (Cr / 2.0)
-        
-        # Mid-chord line length l = sqrt(a^2 + lm^2)
-        l_mid = math.sqrt(a**2 + lm**2)
-
-        # Barrowman CN_alpha for N fins (referenced to d_ref)
-        denom = (self.root_chord + self.tip_chord)
-        if denom < 1e-6:
-            return 0.0, 0.0
-            
-        try:
-            val_to_sqrt = 1.0 + (2.0 * l_mid / denom)**2
-            cn_alpha = (4.0 * N * (a / d_ref)**2) / (1.0 + math.sqrt(max(0, val_to_sqrt)))
-            if not math.isfinite(cn_alpha): cn_alpha = 0.0
-        except:
-            cn_alpha = 0.0
-            
-        # CP of fins from root LE
-        if (self.root_chord + self.tip_chord) > 1e-6:
-            x_f = (sweep_len * (self.root_chord + 2.0 * self.tip_chord) / (3.0 * (self.root_chord + self.tip_chord))
-                   + (1.0 / 6.0) * (self.root_chord + self.tip_chord - self.root_chord * self.tip_chord / (self.root_chord + self.tip_chord)))
-        else:
-            x_f = self.root_chord * 0.25
-            
-        if not math.isfinite(x_f): x_f = 0.0
-        
-        # Interference factor: K_fb = 1 + R/s_total
-        K_fb = 1.0 + R / s_total
-        cn = cn_alpha * K_fb
-        return (cn, self._position + x_f)
+        sweep = math.radians(self.sweep_angle)      # degrees here, radians there
+        # compute_fin_cn_alpha is referenced to the local body cross-section.
+        cn = compute_fin_cn_alpha(self.fin_count, self.height, self.root_chord,
+                                  self.tip_chord, R, sweep, 0.0)
+        cn *= (2.0 * R / d_ref) ** 2
+        cp = compute_fin_cp(0.0, self.root_chord, self.tip_chord, self.height,
+                            sweep, 0.0, 1.0) - 1.0   # from the root leading edge
+        if not (math.isfinite(cn) and math.isfinite(cp)):
+            return (0.0, 0.0)
+        return (cn, self._position + cp)
 
     def _props_dict(self):
         return {"fin_count": self.fin_count, "root_chord": self.root_chord,
