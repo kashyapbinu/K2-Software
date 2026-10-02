@@ -172,9 +172,51 @@ def _extract_stage_geometry(stage) -> dict:
         # swept forward past its own root chord) on every multistage flight.
         geom["fin_sweep_angle"] = math.radians(fins.sweep_angle)
         geom["fin_thickness"] = getattr(fins, "thickness", 0.003)
+        geom["fin_cross_section"] = getattr(fins, "cross_section", "Rounded")
         # fin_position is stage-LOCAL (from the stage's own top): assembly
         # positions are absolute from the nose tip, so subtract the stage top.
         geom["fin_position"] = max(0.0, fins.position - stage.position)
+    return geom
+
+
+# Flat RocketState fields that describe the nose and the fin set, with the
+# value each takes when the assembly has no such component.
+_AERO_GEOMETRY_DEFAULTS = {
+    "nose_type": "ogive", "nose_length": 0.0,
+    "fin_span": 0.0, "fin_height": 0.0,
+    "fin_root_chord": 0.0, "fin_tip_chord": 0.0,
+    "fin_sweep_angle": 0.0, "fin_thickness": 0.003,
+    "fin_cross_section": "Rounded",
+}
+
+
+def assembly_aero_geometry(assembly) -> dict:
+    """Nose and fin dimensions of a UI RocketAssembly as flat RocketState fields.
+
+    AeroModel.from_state reads these flat fields and nothing else, and where
+    one is zero it substitutes a generic fin sized from the body. So whoever
+    copies an assembly into the state has to copy these too, or the flight
+    sim, Monte Carlo and the optimizer all fly a rocket the user never drew.
+
+    The nose comes from the first stage that has one and the fins from the
+    first fin set in the assembly, the same one RocketAssembly.fin_count()
+    reports. Every key is always present, so a field left over from a previous
+    design cannot survive a sync. fin_sweep_angle is in RADIANS.
+    """
+    geom = dict(_AERO_GEOMETRY_DEFAULTS)
+    have_nose = have_fins = False
+    for stage in getattr(assembly, "stages", []) or []:
+        stage_geom = _extract_stage_geometry(stage)
+        if not have_nose and "nose_length" in stage_geom:
+            have_nose = True
+            geom["nose_type"] = stage_geom["nose_type"]
+            geom["nose_length"] = stage_geom["nose_length"]
+        if not have_fins and "fin_span" in stage_geom:
+            have_fins = True
+            for key in ("fin_span", "fin_root_chord", "fin_tip_chord",
+                        "fin_sweep_angle", "fin_thickness", "fin_cross_section"):
+                geom[key] = stage_geom[key]
+            geom["fin_height"] = stage_geom["fin_span"]
     return geom
 
 
@@ -228,18 +270,26 @@ class _StackAeroConfig:
             or bottom.diameter
         self.nose_type = top.nose_type
         self.nose_length = top.nose_length or self.length * 0.2
-        # Aft fins belong to the bottom (burning) stage; place them on its
-        # segment near the tail of the stack.
-        self.fin_count = bottom.fin_count
-        self.fin_span = bottom.fin_span
-        self.fin_root_chord = bottom.fin_root_chord
-        self.fin_tip_chord = bottom.fin_tip_chord
-        self.fin_sweep_angle = bottom.fin_sweep_angle
-        self.fin_thickness = bottom.fin_thickness or 0.003
-        self.fin_cross_section = bottom.fin_cross_section
+        # The stack's fins are the aft-most fin set it carries: the bottom
+        # (burning) stage's, or the next stage up when the bottom one has
+        # none. AeroModel no longer invents fins for a finless state, so a
+        # finless booster must not hide the fins of the stage above it.
+        idx = next((i for i, st in enumerate(active)
+                    if st.fin_count > 0 and st.fin_span > 0
+                    and st.fin_root_chord > 0), None)
+        finned = active[idx] if idx is not None else bottom
+        self.fin_count = finned.fin_count if idx is not None else 0
+        self.fin_span = finned.fin_span
+        self.fin_root_chord = finned.fin_root_chord
+        self.fin_tip_chord = finned.fin_tip_chord
+        self.fin_sweep_angle = finned.fin_sweep_angle
+        self.fin_thickness = finned.fin_thickness or 0.003
+        self.fin_cross_section = finned.fin_cross_section
         self.surface_finish = top.surface_finish
-        self.fin_position = max(0.0, self.length - bottom.length
-                                + bottom.fin_position)
+        # Stage-local fin position → from the nose: everything stacked above
+        # that stage (later in ignition order) comes first.
+        above = sum(st.length for st in active[(idx or 0) + 1:])
+        self.fin_position = max(0.0, above + finned.fin_position)
         self.cmq = -20.0
 
 

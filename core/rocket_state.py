@@ -229,6 +229,8 @@ class RocketStateEngine(QObject):
         super().__init__()
         self._state = state or RocketState()
         self.auto_estimate_properties = True
+        # field -> value this engine estimated for it (see _estimate)
+        self._estimates = {}
         self._recompute_derived()
 
     @property
@@ -263,12 +265,14 @@ class RocketStateEngine(QObject):
 
     def set_state(self, state: RocketState) -> None:
         self._state = state
+        self._estimates = {}
         self._recompute_derived()
         self.log_message.emit("Project state loaded")
         self.state_changed.emit(self._state)
 
     def reset(self) -> None:
         self._state = RocketState()
+        self._estimates = {}
         self._recompute_derived()
         self.log_message.emit("State reset to defaults")
         self.state_changed.emit(self._state)
@@ -298,18 +302,27 @@ class RocketStateEngine(QObject):
             self._track_maxima(s)
             return
 
-        # ── Geometry derived ──
-        s.nose_length = s.length * 0.2
-        s.fin_root_chord = s.length * 0.1
-        s.fin_tip_chord = s.fin_root_chord * 0.5
-        s.fin_height = s.diameter * 0.6
-        # Keep fin_span in sync (used by AeroModel)
-        if s.fin_span <= 0:
-            s.fin_span = s.fin_height
+        # ── Geometry: estimate what the state does not declare ──
+        # A declared dimension is never touched. This block used to rewrite
+        # nose length, fin chords and fin height from the body on every call,
+        # so the validation rocket, which declares a 0.08 m tip chord, flew a
+        # 0.10 m one. AeroModel.from_state takes the state at face value, so
+        # the generic fin set for a bare state is written here, where it shows.
+        fin_declared = self._declared("fin_root_chord") and (
+            self._declared("fin_span") or self._declared("fin_height"))
+        self._estimate("nose_length", s.length * 0.2)
+        if not fin_declared:
+            self._estimate("fin_root_chord", s.length * 0.1)
+            self._estimate("fin_tip_chord", s.fin_root_chord * 0.5)
+            self._estimate("fin_span", s.fin_height if self._declared("fin_height")
+                           else s.diameter * 0.6)
+        self._estimate("fin_height", s.fin_span)
+        self._estimate("fin_count", 4)
 
-        # ── CG estimation ──
-        body_cg = s.length * 0.45
-        motor_cg = s.length * 0.85
+        # ── CG estimation (a declared dry CG / motor position is kept) ──
+        body_cg = s.dry_cg if s.dry_cg > 0 else s.length * 0.45
+        if s.motor_position <= 0:
+            motor_cg = s.length * 0.85
         total_mass = s.total_mass()
         if total_mass > 0:
             s.cg = (s.dry_mass * body_cg
@@ -343,6 +356,22 @@ class RocketStateEngine(QObject):
         s.net_force = s.thrust - s.drag - s.weight
 
         self._track_maxima(s)
+
+    def _declared(self, name: str) -> bool:
+        """True if the state carries its own value for *name*: non-zero, and
+        not something this engine estimated on an earlier pass."""
+        value = getattr(self._state, name)
+        return bool(value) and value != self._estimates.get(name)
+
+    def _estimate(self, name: str, value) -> None:
+        """Fill *name* with an estimate unless the state declares it.
+
+        An earlier estimate is replaced, so estimated dimensions keep
+        following the body when its length or diameter changes."""
+        if self._declared(name):
+            return
+        setattr(self._state, name, value)
+        self._estimates[name] = value
 
     def _track_maxima(self, s):
         # ── Track maxima ──

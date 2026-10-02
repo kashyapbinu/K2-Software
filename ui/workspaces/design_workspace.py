@@ -220,6 +220,11 @@ class DesignWorkspace(QWidget):
                 motor_pos = c._position + c.component_length()
                 break
 
+        # Nose and fin dimensions go with the rest. The sim builds its own
+        # AeroModel from these flat fields, and sized a generic fin from the
+        # body wherever one was still zero.
+        from core.staging import assembly_aero_geometry
+
         self.engine.update(
             name=asm.name,
             length=asm.total_length(),
@@ -231,6 +236,7 @@ class DesignWorkspace(QWidget):
             cg=asm.compute_cg(),
             dry_cg=asm.compute_cg(),
             cp=asm.compute_cp(),
+            **assembly_aero_geometry(asm),
         )
 
     def reset_camera(self):

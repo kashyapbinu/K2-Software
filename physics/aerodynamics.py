@@ -829,17 +829,29 @@ class AeroModel:
 
     @classmethod
     def from_state(cls, s) -> "AeroModel":
-        """Construct AeroModel from the rocket state object."""
-        # Use 'or' so zero-valued fields fall through to geometry-based defaults
-        fin_span = getattr(s, 'fin_span', 0) or getattr(s, 'fin_height', 0) or s.diameter * 0.6
-        fin_rc = getattr(s, 'fin_root_chord', 0) or s.length * 0.08
-        fin_tc = getattr(s, 'fin_tip_chord', 0) or fin_rc * 0.5
+        """Construct AeroModel from the rocket state object.
+
+        The fins modelled are the ones the state describes. A fin count, span
+        or root chord of zero is a rocket without fins, and a tip chord of
+        zero is a delta fin. Zeros used to be read as "not set" and replaced
+        with a generic four-fin set sized from the body (span 0.6 D, root
+        0.08 L, tip half the root), so a finless design flew with fins nobody
+        drew and a delta fin flew as a trapezoid. Callers that really have no
+        geometry get estimates from RocketStateEngine, which writes them into
+        the state where they can be seen.
+        """
+        fin_count = int(getattr(s, 'fin_count', 0) or 0)
+        fin_span = getattr(s, 'fin_span', 0) or getattr(s, 'fin_height', 0) or 0.0
+        fin_rc = getattr(s, 'fin_root_chord', 0) or 0.0
+        fin_tc = getattr(s, 'fin_tip_chord', 0) or 0.0
+        if fin_count <= 0 or fin_span <= 0 or fin_rc <= 0:
+            fin_count, fin_span, fin_rc, fin_tc = 0, 0.0, 0.0, 0.0
         return cls(
             nose_type=getattr(s, 'nose_type', 'ogive'),
             nose_length=getattr(s, 'nose_length', 0) or s.length * 0.2,
             body_length=s.length,
             body_diameter=s.diameter,
-            fin_count=getattr(s, 'fin_count', 4) or 4,
+            fin_count=fin_count,
             fin_span=fin_span,
             fin_root_chord=fin_rc,
             fin_tip_chord=fin_tc,

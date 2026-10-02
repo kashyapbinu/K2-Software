@@ -67,6 +67,14 @@ def canonical_state() -> RocketState:
         dry_mass=6.0,
         propellant_mass=MOTOR["propellant_mass"],
         propellant_mass_initial=MOTOR["propellant_mass"],
+        # Mass centres, declared rather than left to RocketStateEngine's
+        # estimate (airframe at 0.45 L, motor at 0.85 L), which only the
+        # interactive engine applies: a batch run built from this state had
+        # its CG at the nose tip. Same two positions, now explicit: the motor
+        # is 0.60 m long with its aft end at the tail, so its centre is 1.70 m.
+        dry_cg=0.90,
+        motor_position=2.0,
+        motor_length=0.60,
         # ── Structures (airframe wall) ──
         wall_thickness=0.0025,
         material_name="Aluminum 6061-T6",

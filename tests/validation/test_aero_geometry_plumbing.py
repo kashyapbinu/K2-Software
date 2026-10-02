@@ -245,3 +245,115 @@ def test_fin_cna_is_smooth_across_the_subsonic_joint():
     right = (cna1(m + h) - cna1(m)) / h
     assert abs(cna1(m + 1e-9) - cna1(m - 1e-9)) < 1e-6      # value
     assert abs(right - left) < 1e-3                          # slope
+
+
+# ── zeros are values, not "missing" ──────────────────────────────────────────
+#
+# AeroModel.from_state read every zero as "not set" and substituted a generic
+# fin (four fins, span 0.6 D, root 0.08 L, tip half the root). A rocket drawn
+# without fins therefore flew with fins, and a delta fin flew as a trapezoid.
+# RocketStateEngine made the opposite mistake: it overwrote dimensions the
+# state DID declare with its own estimates, so the validation rocket's 0.08 m
+# tip chord was flown as 0.10 m. Now from_state takes the state as written,
+# and the engine estimates only what is missing, into the state itself.
+
+def test_a_state_without_fins_is_modelled_without_fins():
+    from core.rocket_state import RocketState
+    from physics.aerodynamics import compute_nose_cp
+
+    model = AeroModel.from_state(RocketState(length=2.0, diameter=0.1,
+                                             nose_length=0.4))
+    assert model.fin_count == 0 and model.fin_span == 0.0
+    # Nose only: the CP is the nose's.
+    assert model.cp_subsonic() == pytest.approx(compute_nose_cp(0.4, "ogive"))
+    out = model.compute(alpha=0.05, mach=0.5, q_dyn=2.0e4, pitch_rate=0.0,
+                        v_rel=170.0, cg=1.0)
+    assert out["stability_margin"] < 0.0
+
+
+def test_a_delta_fin_keeps_its_zero_tip_chord():
+    from core.rocket_state import RocketState
+
+    model = AeroModel.from_state(RocketState(
+        length=2.0, diameter=0.1, fin_count=3, fin_span=0.12,
+        fin_root_chord=0.20, fin_tip_chord=0.0))
+    assert model.fin_tip_chord == 0.0
+    assert model.fin_area == pytest.approx(0.5 * 0.20 * 0.12)
+
+
+def _engine(state=None):
+    from core.rocket_state import RocketStateEngine
+    from validation.sim.headless_runner import _ensure_qapp
+    _ensure_qapp()
+    return RocketStateEngine(state)
+
+
+def test_the_state_engine_keeps_declared_geometry():
+    from validation.cases.rocket_canonical import canonical_state
+
+    declared = canonical_state()
+    state = _engine(canonical_state()).state
+    for name in ("nose_length", "fin_count", "fin_span", "fin_height",
+                 "fin_root_chord", "fin_tip_chord"):
+        assert getattr(state, name) == getattr(declared, name), name
+
+
+def test_the_state_engine_estimates_only_what_is_missing():
+    engine = _engine()
+    engine.update(length=2.0, diameter=0.10, dry_mass=5.0)
+    s = engine.state
+    assert (s.nose_length, s.fin_count) == (pytest.approx(0.4), 4)
+    assert s.fin_root_chord == pytest.approx(0.2)
+    assert s.fin_span == s.fin_height == pytest.approx(0.06)
+
+    engine.update(length=3.0)               # an estimate follows the body
+    assert s.fin_root_chord == pytest.approx(0.3)
+
+    engine.update(fin_count=3, fin_span=0.15, fin_root_chord=0.25,
+                  fin_tip_chord=0.0)        # now declared: a delta fin
+    engine.update(length=4.0)
+    assert (s.fin_count, s.fin_span, s.fin_root_chord, s.fin_tip_chord) == \
+        (3, 0.15, 0.25, 0.0)
+    assert s.nose_length == pytest.approx(0.8)      # still an estimate
+
+
+def test_batch_and_engine_start_the_validation_rocket_at_the_same_cg():
+    """A batch run built from the raw state had its CG at the nose tip: the
+    state left the mass centres to an estimate only the engine applies."""
+    from core.batch_simulation import BatchSimConfig
+    from validation.cases.rocket_canonical import canonical_state
+
+    engine_cg = _engine(canonical_state()).state.cg
+    cfg = BatchSimConfig.from_rocket_state(canonical_state())
+    motor_cg = cfg.motor_position - 0.5 * cfg.motor_length
+    batch_cg = ((cfg.dry_mass * cfg.dry_cg + cfg.propellant_mass * motor_cg)
+                / (cfg.dry_mass + cfg.propellant_mass))
+
+    assert cfg.dry_cg > 0.0
+    assert batch_cg == pytest.approx(engine_cg, rel=1e-9)
+
+
+def test_a_finless_booster_does_not_hide_the_fins_above_it():
+    """The stack's aero config took its fins from the bottom stage only, and
+    relied on from_state inventing some when that stage had none."""
+    from core.staging import StageConfig, _StackAeroConfig
+
+    booster = StageConfig(name="Booster", length=0.5, diameter=0.1)
+    sustainer = StageConfig(name="Sustainer", length=1.0, diameter=0.1,
+                            nose_length=0.3, fin_count=3, fin_span=0.08,
+                            fin_root_chord=0.12, fin_tip_chord=0.05,
+                            fin_position=0.85)
+    finned_booster = StageConfig(name="Booster", length=0.5, diameter=0.1,
+                                 fin_count=4, fin_span=0.10,
+                                 fin_root_chord=0.15, fin_position=0.33)
+
+    stack = _StackAeroConfig([booster, sustainer])          # ignition order
+    assert (stack.fin_count, stack.fin_span) == (3, 0.08)
+    assert stack.fin_position == pytest.approx(0.85)        # on the sustainer
+
+    stack = _StackAeroConfig([finned_booster, sustainer])
+    assert (stack.fin_count, stack.fin_span) == (4, 0.10)
+    assert stack.fin_position == pytest.approx(1.0 + 0.33)  # below the sustainer
+
+    bare = _StackAeroConfig([booster, StageConfig(length=1.0, diameter=0.1)])
+    assert AeroModel.from_state(bare).fin_count == 0
