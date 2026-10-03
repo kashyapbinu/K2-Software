@@ -410,6 +410,24 @@ def build_candidate_config(base_config: BatchSimConfig,
         _len_scale = cfg.length / base_config.length
         for _station in ("cg", "dry_cg", "motor_position", "fin_position"):
             setattr(cfg, _station, getattr(base_config, _station, 0.0) * _len_scale)
+        # The further fin sets and the diameter changes are stations too.
+        for _f in cfg.extra_fin_sets:
+            _f["fin_position"] = _f.get("fin_position", 0.0) * _len_scale
+        for _t in cfg.transitions:
+            _t["position"] = _t.get("position", 0.0) * _len_scale
+
+    # Likewise every drawn diameter that is not the body's own (those are
+    # stored as 0 and follow cfg.diameter by themselves): a narrower nose, a
+    # fin tube, a shoulder or boat-tail keeps its ratio to the body.
+    if base_config.diameter > 0 and abs(cfg.diameter - base_config.diameter) > 1e-12:
+        _d_scale = cfg.diameter / base_config.diameter
+        cfg.nose_diameter = base_config.nose_diameter * _d_scale
+        cfg.fin_body_radius = base_config.fin_body_radius * _d_scale
+        for _f in cfg.extra_fin_sets:
+            _f["fin_body_radius"] = _f.get("fin_body_radius", 0.0) * _d_scale
+        for _t in cfg.transitions:
+            _t["fore_diameter"] = _t.get("fore_diameter", 0.0) * _d_scale
+            _t["aft_diameter"] = _t.get("aft_diameter", 0.0) * _d_scale
 
     # Derived fields
     if cfg.motor_burn_time > 0 and cfg.motor_total_impulse > 0:

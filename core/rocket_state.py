@@ -42,6 +42,12 @@ class RocketState:
     fin_position: float = 0.0   # Distance from nose tip to fin root leading edge
     surface_finish: str = "Normal"
     fin_cross_section: str = "Rounded"
+    # The rest of what the aero model flies (core.staging.assembly_aero_geometry).
+    # The fin_* fields above are the FIRST fin set; 0 below means "the body's".
+    nose_diameter: float = 0.0      # nose base diameter
+    fin_body_radius: float = 0.0    # radius of the tube the first fin set is on
+    extra_fin_sets: list = field(default_factory=list)  # further fin sets (fin_set_fields dicts)
+    transitions: list = field(default_factory=list)     # diameter changes (transition_fields dicts)
 
     # ── Mass ──────────────────────────────────────────────────────
     dry_mass: float = 0.0

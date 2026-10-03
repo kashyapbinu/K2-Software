@@ -201,6 +201,19 @@ def compute_transition_cp(length: float, fore_diam: float, aft_diam: float,
     return (length * A1 - full_volume) / dA
 
 
+def compute_conical_transition_cp(length: float, fore_diam: float,
+                                  aft_diam: float) -> float:
+    """CP of a conical transition (shoulder or boat-tail) from its fore end.
+
+    Barrowman: L/3 * (1 + (1 - df/da) / (1 - (df/da)^2)), which reduces to
+    L/3 * (df + 2 da) / (df + da). It is compute_transition_cp for a frustum.
+    """
+    total = fore_diam + aft_diam
+    if total <= 0:
+        return length / 2.0
+    return length / 3.0 * (fore_diam + 2.0 * aft_diam) / total
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  FIN SET CN_alpha (Sub/Trans/Supersonic — OpenRocket FinSetCalc)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -469,6 +482,43 @@ def compute_fin_cp(body_length: float, fin_root_chord: float,
 #  COMPLETE CD MODEL (OpenRocket-style decomposition)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _fin_friction_cd(Cf: float, thickness: float, mac_length: float,
+                     area: float, ref_area: float, count: int) -> float:
+    """Friction drag of one fin set (both sides of every fin — OpenRocket
+    FinSetCalc per fin × instance count)."""
+    if area > 0 and mac_length > 0 and ref_area > 0:
+        return (Cf * (1 + 2 * thickness / mac_length)
+                * 2 * area / ref_area * max(count, 1))
+    return 0.0
+
+
+def _fin_pressure_cd(mach: float, span: float, thickness: float,
+                     ref_area: float, count: int, sweep: float,
+                     cross_section: str) -> float:
+    """Pressure drag of one fin set: leading edge by cross-section (OpenRocket
+    FinSetCalc), slant-corrected by cos²Γ, on span·thickness frontal area."""
+    if not (span > 0 and thickness > 0 and ref_area > 0 and count > 0):
+        return 0.0
+    if cross_section in (FinCrossSection.ROUNDED, FinCrossSection.AIRFOIL):
+        if mach < 0.9:
+            cd_le = (1 - mach * mach) ** -0.417 - 1
+        elif mach < 1.0:
+            cd_le = 1 - 1.785 * (mach - 0.9)
+        else:
+            cd_le = 1.214 - 0.502 / mach**2 + 0.1095 / mach**4
+    else:  # square
+        cd_le = stagnation_cd(mach)
+    cd_le *= math.cos(sweep) ** 2
+    # Trailing-edge base drag by cross-section
+    if cross_section == FinCrossSection.SQUARE:
+        cd_te = base_cd(mach)
+    elif cross_section == FinCrossSection.ROUNDED:
+        cd_te = base_cd(mach) / 2.0
+    else:  # airfoil
+        cd_te = 0.0
+    return (cd_le + cd_te) * span * thickness / ref_area * count
+
+
 def compute_cd(mach: float, alpha: float = 0.0, fineness_ratio: float = 10.0,
                base_area_ratio: float = 1.0, Re: float = 1e6,
                nose_type: str = "ogive",
@@ -480,12 +530,17 @@ def compute_cd(mach: float, alpha: float = 0.0, fineness_ratio: float = 10.0,
                fin_count: int = 4, fin_sweep: float = 0.0,
                fin_cross_section: str = FinCrossSection.ROUNDED,
                nose_length: float = 0.0,
-               nose_pressure_interp: "LinearInterpolator" = None) -> float:
+               nose_pressure_interp: "LinearInterpolator" = None,
+               extra_fin_sets=()) -> float:
     """Total drag coefficient with all OpenRocket drag components.
 
     base_area_ratio is base area / reference area — 1.0 for a flat-base
     airframe with no boattail (matches OpenRocket, which applies the base CD
     to the full aft base area).
+
+    extra_fin_sets: further fin sets (objects with count, span, thickness,
+    area, mac_length, sweep, cross_section); each adds its own friction and
+    pressure drag.
     """
     mach = max(0.0, mach)
 
@@ -504,11 +559,8 @@ def compute_cd(mach: float, alpha: float = 0.0, fineness_ratio: float = 10.0,
 
     # 2. Fin friction (both sides of every fin — OpenRocket FinSetCalc per fin
     #    × instance count)
-    if fin_area > 0 and fin_mac_length > 0 and ref_area > 0:
-        cd_fin_friction = (Cf * (1 + 2 * fin_thickness / fin_mac_length)
-                           * 2 * fin_area / ref_area * max(fin_count, 1))
-    else:
-        cd_fin_friction = 0.0
+    cd_fin_friction = _fin_friction_cd(Cf, fin_thickness, fin_mac_length,
+                                       fin_area, ref_area, fin_count)
 
     # 3. Base drag (full aft base area)
     cd_base = base_cd(mach) * base_area_ratio
@@ -528,32 +580,18 @@ def compute_cd(mach: float, alpha: float = 0.0, fineness_ratio: float = 10.0,
             nose_type, nose_length or body_length * 0.2,
             math.sqrt(ref_area / math.pi)).get_value(mach)
 
-    # 6. Fin pressure drag: leading edge by cross-section (OpenRocket
-    #    FinSetCalc), slant-corrected by cos²Γ, on span·thickness frontal area.
-    cd_fin_pressure = 0.0
-    if fin_span > 0 and fin_thickness > 0 and ref_area > 0 and fin_count > 0:
-        if fin_cross_section in (FinCrossSection.ROUNDED, FinCrossSection.AIRFOIL):
-            if mach < 0.9:
-                cd_le = (1 - mach * mach) ** -0.417 - 1
-            elif mach < 1.0:
-                cd_le = 1 - 1.785 * (mach - 0.9)
-            else:
-                cd_le = 1.214 - 0.502 / mach**2 + 0.1095 / mach**4
-        else:  # square
-            cd_le = stagnation_cd(mach)
-        cd_le *= math.cos(fin_sweep) ** 2
-        # Trailing-edge base drag by cross-section
-        if fin_cross_section == FinCrossSection.SQUARE:
-            cd_te = base_cd(mach)
-        elif fin_cross_section == FinCrossSection.ROUNDED:
-            cd_te = base_cd(mach) / 2.0
-        else:  # airfoil
-            cd_te = 0.0
-        cd_fin_pressure = ((cd_le + cd_te) * fin_span * fin_thickness
-                           / ref_area * fin_count)
+    # 6. Fin pressure drag (leading and trailing edge, by cross-section)
+    cd_fin_pressure = _fin_pressure_cd(mach, fin_span, fin_thickness, ref_area,
+                                       fin_count, fin_sweep, fin_cross_section)
 
     total_cd = (cd_friction + cd_fin_friction + cd_base + cd_induced
                 + cd_nose + cd_fin_pressure)
+    # 7. Every further fin set: the same two fin terms again
+    for fs in extra_fin_sets:
+        total_cd += _fin_friction_cd(Cf, fs.thickness, fs.mac_length, fs.area,
+                                     ref_area, fs.count)
+        total_cd += _fin_pressure_cd(mach, fs.span, fs.thickness, ref_area,
+                                     fs.count, fs.sweep, fs.cross_section)
     return min(total_cd, 3.0)  # Cap at 3.0 to prevent divergence
 
 
@@ -621,10 +659,67 @@ def compute_pitch_damping_moment(damping_mul: float, pitch_rate: float,
 #  AeroModel — Main Interface Class
 # ══════════════════════════════════════════════════════════════════════════════
 
+class _FinSet:
+    """One fin set as the aero model flies it."""
+
+    __slots__ = ("count", "span", "root_chord", "tip_chord", "sweep",
+                 "thickness", "cross_section", "position", "body_radius",
+                 "area", "mac_length")
+
+    def __init__(self, count, span, root_chord, tip_chord, sweep, thickness,
+                 cross_section, position, body_radius):
+        self.count = count
+        self.span = span
+        self.root_chord = root_chord
+        self.tip_chord = tip_chord
+        self.sweep = sweep                  # leading-edge sweep, radians
+        self.thickness = thickness
+        self.cross_section = cross_section
+        self.position = position            # nose tip → root leading edge (0 = at the tail)
+        self.body_radius = body_radius      # of the tube the fins sit on
+        self.area = 0.5 * (root_chord + tip_chord) * span
+        self.mac_length = (root_chord + tip_chord) / 2.0
+
+    @classmethod
+    def from_fields(cls, f, default_radius: float):
+        """From a dict keyed like the flat RocketState fin fields
+        (core.staging.fin_set_fields), or None if it describes no fin."""
+        count = int(f.get("fin_count", 0) or 0)
+        span = f.get("fin_span", 0.0) or 0.0
+        root = f.get("fin_root_chord", 0.0) or 0.0
+        if count <= 0 or span <= 0 or root <= 0:
+            return None
+        return cls(count, span, root, f.get("fin_tip_chord", 0.0) or 0.0,
+                   f.get("fin_sweep_angle", 0.0) or 0.0,
+                   f.get("fin_thickness", 0.003) or 0.003,
+                   f.get("fin_cross_section", "Rounded") or "Rounded",
+                   f.get("fin_position", 0.0) or 0.0,
+                   (f.get("fin_body_radius", 0.0) or 0.0) or default_radius)
+
+    def cn_alpha(self, ref_radius: float, mach: float, alpha: float = 0.0) -> float:
+        """CN_alpha on the rocket's reference area. compute_fin_cn_alpha is
+        referenced to the cross-section of the tube the fins are on."""
+        cn = compute_fin_cn_alpha(self.count, self.span, self.root_chord,
+                                  self.tip_chord, self.body_radius, self.sweep,
+                                  mach, alpha)
+        return cn * (self.body_radius / ref_radius) ** 2 if ref_radius > 0 else cn
+
+    def cp(self, body_length: float, mach: float) -> float:
+        return compute_fin_cp(body_length, self.root_chord, self.tip_chord,
+                              self.span, self.sweep, mach, self.position)
+
+
 class AeroModel:
     """
     High-fidelity aerodynamic model for a rocket vehicle.
     Uses OpenRocket-equivalent physics for all subsystems.
+
+    Normal force and CP come from the nose, every fin set and every diameter
+    change (transitions, boat-tails), the parts the Design tab's Barrowman
+    readout counts, so the stability the sim flies is the one shown there.
+    The model used to know one fin set on a constant-diameter tube: a canard
+    set, a booster's fins or a shoulder moved the Design tab's CP and not the
+    flight's.
     """
 
     def __init__(self, nose_type="ogive", nose_length=0.3,
@@ -635,7 +730,9 @@ class AeroModel:
                  surface_finish="Normal",
                  fin_cross_section="Rounded",
                  fin_thickness=0.003,
-                 fin_position=0.0):
+                 fin_position=0.0,
+                 nose_diameter=0.0, fin_body_radius=0.0,
+                 extra_fin_sets=(), transitions=()):
         self.nose_type = nose_type
         self.nose_length = nose_length
         self.body_length = body_length
@@ -663,9 +760,36 @@ class AeroModel:
         self.fin_area = 0.5 * (fin_root_chord + fin_tip_chord) * fin_span
         self.fin_mac_length = (fin_root_chord + fin_tip_chord) / 2.0
 
-        # Pre-compute subsonic CN_alpha
+        # Every fin set, the primary one (the flat fin_* fields) first. Each
+        # sits on its own tube radius; 0 means the reference body radius.
+        self.fin_body_radius = fin_body_radius or self.body_radius
+        self._extra_fins = [fs for fs in (
+            _FinSet.from_fields(f, self.body_radius) for f in extra_fin_sets or ())
+            if fs is not None]
+        self.fin_sets = list(self._extra_fins)
+        if fin_count > 0 and fin_span > 0 and fin_root_chord > 0:
+            self.fin_sets.insert(0, _FinSet(
+                fin_count, fin_span, fin_root_chord, fin_tip_chord, fin_sweep,
+                fin_thickness, fin_cross_section, fin_position,
+                self.fin_body_radius))
+
+        # Pre-compute subsonic CN_alpha. Slender-body: 2 per radian on the
+        # nose's own base area, so a nose narrower than the reference
+        # diameter carries (d_nose / d_ref)² of it.
+        self.nose_diameter = nose_diameter or body_diameter
         self._cn_alpha_nose = compute_nose_cn(nose_type)
+        if body_diameter > 0:
+            self._cn_alpha_nose *= (self.nose_diameter / body_diameter) ** 2
         self._cp_nose = compute_nose_cp(nose_length, nose_type)
+
+        # Diameter changes: (CN_alpha, CP from the nose tip) each, Barrowman.
+        self._transition_terms = []
+        for tr in transitions or ():
+            fore, aft = tr.get("fore_diameter", 0.0), tr.get("aft_diameter", 0.0)
+            cn = compute_transition_cn(fore, aft, self.ref_area)
+            if cn != 0.0:
+                self._transition_terms.append((cn, tr.get("position", 0.0)
+                    + compute_conical_transition_cp(tr.get("length", 0.0), fore, aft)))
 
         # Nose pressure-drag interpolator (Mach → CD on frontal area)
         from physics.drag_tables import build_nose_pressure_interpolator
@@ -682,20 +806,28 @@ class AeroModel:
             f"D={body_diameter}m, fins={fin_count}×{fin_span}m"
         )
 
+    def _fin_terms(self, mach: float, alpha: float = 0.0) -> list:
+        """[(CN_alpha, CP from the nose tip)] of every fin set."""
+        return [(fs.cn_alpha(self.body_radius, mach, alpha),
+                 fs.cp(self.body_length, mach)) for fs in self.fin_sets]
+
+    @staticmethod
+    def _sum_terms(terms) -> tuple:
+        """(sum of CN, sum of CN·x), added in order."""
+        cn, moment = 0.0, 0.0
+        for cn_i, x_i in terms:
+            cn += cn_i
+            moment += cn_i * x_i
+        return cn, moment
+
     def cp_subsonic(self) -> float:
-        """CP location at subsonic speed."""
-        cn_fins = compute_fin_cn_alpha(
-            self.fin_count, self.fin_span, self.fin_root_chord,
-            self.fin_tip_chord, self.body_radius, self.fin_sweep, 0.0
-        )
-        cp_fins = compute_fin_cp(
-            self.body_length, self.fin_root_chord, self.fin_tip_chord,
-            self.fin_span, self.fin_sweep, 0.0, self.fin_position
-        )
-        cn_total = self._cn_alpha_nose + cn_fins
+        """CP location at subsonic speed: nose, fin sets and transitions."""
+        cn_fins, m_fins = self._sum_terms(self._fin_terms(0.0))
+        cn_trans, m_trans = self._sum_terms(self._transition_terms)
+        cn_total = self._cn_alpha_nose + cn_fins + cn_trans
         if cn_total <= 0:
             return self.body_length * 0.5
-        return (self._cn_alpha_nose * self._cp_nose + cn_fins * cp_fins) / cn_total
+        return (self._cn_alpha_nose * self._cp_nose + m_fins + m_trans) / cn_total
 
     def stability_margin(self, cp: float, cg: float) -> float:
         if self.body_diameter <= 0:
@@ -725,16 +857,12 @@ class AeroModel:
             nu = self._atm.kinematic_viscosity(0)
         Re = v_rel * self.body_length / max(nu, 1e-9)
 
-        # Fin CN_alpha (Mach-aware)
-        cn_fins = compute_fin_cn_alpha(
-            self.fin_count, self.fin_span, self.fin_root_chord,
-            self.fin_tip_chord, self.body_radius, self.fin_sweep,
-            mach, alpha
-        )
-        cp_fins = compute_fin_cp(
-            self.body_length, self.fin_root_chord, self.fin_tip_chord,
-            self.fin_span, self.fin_sweep, mach, self.fin_position
-        )
+        # Fin CN_alpha (Mach-aware), every fin set
+        fin_terms = self._fin_terms(mach, alpha)
+        cn_fins, m_fins = self._sum_terms(fin_terms)
+
+        # Diameter changes (slender-body, Mach-independent like the nose)
+        cn_trans, m_trans = self._sum_terms(self._transition_terms)
 
         # Body lift
         cn_body = compute_body_lift_cn(
@@ -747,11 +875,11 @@ class AeroModel:
         cp_nose_val = self._cp_nose
 
         # Total CN_alpha and CP
-        cn_total = cn_nose + cn_fins + cn_body
+        cn_total = cn_nose + cn_fins + cn_trans + cn_body
         self.cn_alpha_total = cn_total
 
         if cn_total > 1e-9:
-            cp = (cn_nose * cp_nose_val + cn_fins * cp_fins + cn_body * cp_body) / cn_total
+            cp = (cn_nose * cp_nose_val + m_fins + m_trans + cn_body * cp_body) / cn_total
         else:
             cp = self.body_length * 0.5
         # CP must lie on the physical body — the supersonic fin-CP / body-lift
@@ -769,6 +897,7 @@ class AeroModel:
             fin_cross_section=self.fin_cross_section,
             nose_length=self.nose_length,
             nose_pressure_interp=self._nose_pressure,
+            extra_fin_sets=self._extra_fins,
         )
 
         # CN with stall
@@ -784,7 +913,10 @@ class AeroModel:
         # speed, leaving the high-q weathercock essentially undamped (ζ≈0.0006)
         # → divergent overshoot/tumbling in any crosswind. This linear Cmq form
         # gives a realistic ζ≈0.05 that keeps the airframe stable.
-        cmq = self._pitch_damping_coeff(cn_fins, cp_fins, cg, d)
+        cmq = self._pitch_damping_coeff(*(fin_terms[0] if fin_terms else (0.0, 0.0)),
+                                        cg, d)
+        for cn_i, cp_i in fin_terms[1:]:    # each further fin set damps too
+            cmq += self._pitch_damping_coeff(cn_i, cp_i, cg, d) + 1.0
         m_damp = self._damping_moment(cmq, pitch_rate, v_rel, q_dyn, A, d, cn_total)
 
         # Forces
@@ -861,6 +993,10 @@ class AeroModel:
             fin_cross_section=getattr(s, 'fin_cross_section', 'Rounded'),
             fin_thickness=getattr(s, 'fin_thickness', 0.003) or 0.003,
             fin_position=getattr(s, 'fin_position', 0.0),
+            nose_diameter=getattr(s, 'nose_diameter', 0.0) or 0.0,
+            fin_body_radius=getattr(s, 'fin_body_radius', 0.0) or 0.0,
+            extra_fin_sets=getattr(s, 'extra_fin_sets', None) or (),
+            transitions=getattr(s, 'transitions', None) or (),
         )
 
 

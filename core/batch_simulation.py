@@ -94,6 +94,12 @@ class BatchSimConfig:
     fin_position: float = 0.0
     surface_finish: str = "Normal"
     fin_cross_section: str = "Rounded"
+    # As on RocketState: nose base diameter, the first fin set's tube radius,
+    # further fin sets and diameter changes.
+    nose_diameter: float = 0.0
+    fin_body_radius: float = 0.0
+    extra_fin_sets: list = field(default_factory=list)
+    transitions: list = field(default_factory=list)
 
     # ── Mass ──────────────────────────────────────────────────────
     dry_mass: float = 0.0
@@ -165,6 +171,10 @@ class BatchSimConfig:
             fin_position=getattr(state, "fin_position", 0.0),
             surface_finish=getattr(state, "surface_finish", "Normal"),
             fin_cross_section=getattr(state, "fin_cross_section", "Rounded"),
+            nose_diameter=getattr(state, "nose_diameter", 0.0),
+            fin_body_radius=getattr(state, "fin_body_radius", 0.0),
+            extra_fin_sets=[dict(f) for f in getattr(state, "extra_fin_sets", None) or []],
+            transitions=[dict(t) for t in getattr(state, "transitions", None) or []],
             # Mass
             dry_mass=state.dry_mass,
             propellant_mass=getattr(state, "propellant_mass_initial",
@@ -305,9 +315,14 @@ class _StateProxy:
         "fin_height", "fin_root_chord", "fin_tip_chord", "fin_count",
         "fin_span", "fin_sweep_angle", "fin_thickness", "fin_position",
         "surface_finish", "fin_cross_section",
+        "nose_diameter", "fin_body_radius", "extra_fin_sets", "transitions",
     )
 
     def __init__(self, cfg: BatchSimConfig):
+        self.nose_diameter = cfg.nose_diameter
+        self.fin_body_radius = cfg.fin_body_radius
+        self.extra_fin_sets = cfg.extra_fin_sets
+        self.transitions = cfg.transitions
         self.length = cfg.length
         self.diameter = cfg.diameter
         self.nose_length = cfg.nose_length

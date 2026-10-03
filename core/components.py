@@ -250,6 +250,20 @@ class BodyTube(RocketComponent):
                 "inner_diameter": self.inner_diameter}
 
 
+def _diameter_change_cp(position: float, length: float, fore_diameter: float,
+                        aft_diameter: float, d_ref: float) -> tuple:
+    """(CN_alpha, CP from the nose tip) of a conical diameter change, from
+    the functions the flight sim's AeroModel uses for the same part."""
+    if d_ref <= 0:
+        return (0.0, 0.0)
+    from physics.aerodynamics import (compute_conical_transition_cp,
+                                      compute_transition_cn)
+    cn = compute_transition_cn(fore_diameter, aft_diameter,
+                               math.pi * (d_ref / 2.0) ** 2)
+    return (cn, position + compute_conical_transition_cp(
+        length, fore_diameter, aft_diameter))
+
+
 class Transition(RocketComponent):
     component_type = "Transition"
     category = "Body"
@@ -279,23 +293,8 @@ class Transition(RocketComponent):
 
     def cp_contribution(self, d_ref: float):
         """Full Barrowman transition CP contribution."""
-        d_f = self.fore_diameter
-        d_a = self.aft_diameter
-        if d_ref <= 0: return (0.0, 0.0)
-        
-        # CN_alpha referenced to d_ref
-        cn = 2.0 * ((d_a / d_ref)**2 - (d_f / d_ref)**2)
-        
-        # CP location from fore end
-        if abs(d_a - d_f) < 1e-6:
-            cp_loc = self.length / 2.0
-        else:
-            # Barrowman formula for conical transition CP
-            # x = L/3 * [1 + (1 - df/da)/(1 - (df/da)^2)]
-            ratio = d_f / d_a
-            cp_loc = (self.length / 3.0) * (1.0 + (1.0 - ratio) / (1.0 - ratio**2 + 1e-9))
-            
-        return (cn, self._position + cp_loc)
+        return _diameter_change_cp(self._position, self.length,
+                                   self.fore_diameter, self.aft_diameter, d_ref)
 
     def _props_dict(self):
         return {"shape": self.shape, "length": self.length,
@@ -706,14 +705,12 @@ class Nozzle(RocketComponent):
         return zero contribution.  Only a Boat-Tail (pure external
         taper for base-drag reduction) contributes a small negative CN.
         """
-        if d_ref <= 0:
-            return (0.0, 0.0)
-
         if self.nozzle_type == "Boat-Tail":
-            d_f = self.inlet_diameter
-            d_a = self.exit_diameter
-            cn = 2.0 * ((d_a / d_ref) ** 2 - (d_f / d_ref) ** 2)
-            return (cn, self._position + self.length / 3.0)
+            # A boat-tail is a transition: same normal force, same CP. It was
+            # placed at L/3 here, the limit of a taper closing to a point,
+            # against (L/3)(df + 2 da)/(df + da) for the frustum it is.
+            return _diameter_change_cp(self._position, self.length,
+                                       self.inlet_diameter, self.exit_diameter, d_ref)
 
         # CD / Full-Propulsion nozzles: no aerodynamic CN contribution
         return (0.0, 0.0)

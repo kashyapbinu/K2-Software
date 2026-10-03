@@ -70,10 +70,16 @@ class StageConfig:
     fin_thickness: float = 0.003
     fin_position: float = 0.0          # from this stage's own top
     fin_cross_section: str = "Rounded"
+    fin_body_radius: float = 0.0       # tube the fins sit on (0 = stack radius)
+    # Further fin sets and diameter changes on this stage (fin_set_fields /
+    # transition_fields dicts, positions from this stage's own top)
+    extra_fin_sets: list = field(default_factory=list)
+    transitions: list = field(default_factory=list)
 
     # ── Nose (typically only the top stage) ──
     nose_type: str = "ogive"
     nose_length: float = 0.0
+    nose_diameter: float = 0.0         # nose base diameter (0 = stack diameter)
     surface_finish: str = "Normal"
 
     # ── Staging ──
@@ -149,6 +155,57 @@ def aero_nose_type(shape) -> str:
     return _NOSE_SHAPE_MAP.get(str(shape or "ogive").lower(), "ogive")
 
 
+def _descendants(component):
+    """Every descendant of `component`, depth-first, in tree order (the order
+    RocketAssembly.all_components walks one stage)."""
+    for c in getattr(component, "children", []):
+        yield c
+        yield from _descendants(c)
+
+
+def fin_set_fields(fins, origin: float = 0.0) -> dict:
+    """One TrapezoidalFinSet as the flat RocketState fin fields.
+
+    These are the keys the state carries for its first fin set and the keys
+    of each entry in ``extra_fin_sets``. ``origin`` is subtracted from the
+    position: 0 for a position from the nose tip, the stage top for a
+    stage-local one.
+    """
+    parent = getattr(fins, "parent", None)
+    return {
+        "fin_count": fins.fin_count,
+        "fin_root_chord": fins.root_chord,
+        "fin_tip_chord": fins.tip_chord,
+        "fin_span": fins.height,
+        # DEGREES on the component, RADIANS on the state/StageConfig — the aero
+        # model does a bare math.tan on this field. Passing it through unchanged
+        # made a 30-degree fin reach AeroModel as 30 radians (tan = -6.4, a fin
+        # swept forward past its own root chord) on every multistage flight.
+        "fin_sweep_angle": math.radians(fins.sweep_angle),
+        "fin_thickness": getattr(fins, "thickness", 0.003),
+        "fin_cross_section": getattr(fins, "cross_section", "Rounded"),
+        "fin_position": max(0.0, fins.position - origin),
+        # Radius of the tube the fins are on (0: not on a tube, use the body's)
+        "fin_body_radius": (parent.outer_diameter() / 2.0) if parent is not None else 0.0,
+    }
+
+
+def transition_fields(component, origin: float = 0.0):
+    """A diameter change as the aero model takes it, or None if `component`
+    is not one: a Transition, or a Boat-Tail nozzle (the only nozzle type
+    that is an external surface)."""
+    from core.components import Nozzle, Transition
+    if isinstance(component, Transition):
+        fore, aft = component.fore_diameter, component.aft_diameter
+    elif isinstance(component, Nozzle) and component.nozzle_type == "Boat-Tail":
+        fore, aft = component.inlet_diameter, component.exit_diameter
+    else:
+        return None
+    return {"position": max(0.0, component.position - origin),
+            "length": component.length,
+            "fore_diameter": fore, "aft_diameter": aft}
+
+
 def _extract_stage_geometry(stage) -> dict:
     """Pull StageConfig geometry fields from one assembly Stage (UI component)."""
     from core.components import NoseCone, TrapezoidalFinSet
@@ -163,34 +220,29 @@ def _extract_stage_geometry(stage) -> dict:
     if nose is not None:
         geom["nose_type"] = aero_nose_type(getattr(nose, "shape", "ogive"))
         geom["nose_length"] = nose.component_length()
+        geom["nose_diameter"] = nose.outer_diameter()
 
-    fins = _find_child(stage, TrapezoidalFinSet)
-    if fins is not None:
-        geom["fin_count"] = fins.fin_count
-        geom["fin_root_chord"] = fins.root_chord
-        geom["fin_tip_chord"] = fins.tip_chord
-        geom["fin_span"] = fins.height
-        # DEGREES on the component, RADIANS on the state/StageConfig — the aero
-        # model does a bare math.tan on this field. Passing it through unchanged
-        # made a 30-degree fin reach AeroModel as 30 radians (tan = -6.4, a fin
-        # swept forward past its own root chord) on every multistage flight.
-        geom["fin_sweep_angle"] = math.radians(fins.sweep_angle)
-        geom["fin_thickness"] = getattr(fins, "thickness", 0.003)
-        geom["fin_cross_section"] = getattr(fins, "cross_section", "Rounded")
-        # fin_position is stage-LOCAL (from the stage's own top): assembly
-        # positions are absolute from the nose tip, so subtract the stage top.
-        geom["fin_position"] = max(0.0, fins.position - stage.position)
+    # fin_position is stage-LOCAL (from the stage's own top): assembly
+    # positions are absolute from the nose tip, so subtract the stage top.
+    # The first fin set fills the flat fin_* fields; any others follow whole.
+    fin_sets = [c for c in _descendants(stage) if isinstance(c, TrapezoidalFinSet)]
+    if fin_sets:
+        geom.update(fin_set_fields(fin_sets[0], stage.position))
+        geom["extra_fin_sets"] = [fin_set_fields(f, stage.position)
+                                  for f in fin_sets[1:]]
+    geom["transitions"] = [t for t in (transition_fields(c, stage.position)
+                                       for c in _descendants(stage)) if t]
     return geom
 
 
 # Flat RocketState fields that describe the nose and the fin set, with the
 # value each takes when the assembly has no such component.
 _AERO_GEOMETRY_DEFAULTS = {
-    "nose_type": "ogive", "nose_length": 0.0,
+    "nose_type": "ogive", "nose_length": 0.0, "nose_diameter": 0.0,
     "fin_span": 0.0, "fin_height": 0.0,
     "fin_root_chord": 0.0, "fin_tip_chord": 0.0,
     "fin_sweep_angle": 0.0, "fin_thickness": 0.003,
-    "fin_cross_section": "Rounded",
+    "fin_cross_section": "Rounded", "fin_body_radius": 0.0,
 }
 
 
@@ -206,21 +258,47 @@ def assembly_aero_geometry(assembly) -> dict:
     first fin set in the assembly, the same one RocketAssembly.fin_count()
     reports. Every key is always present, so a field left over from a previous
     design cannot survive a sync. fin_sweep_angle is in RADIANS.
+
+    ``extra_fin_sets`` holds every further fin set and ``transitions`` every
+    diameter change, positions from the nose tip. RocketAssembly.compute_cp
+    counts all of them, so the sim has to be told about all of them: with
+    only the first fin set a canard, a booster's fins or a boat-tail moved
+    the Design tab's CP and left the flight's where it was.
     """
+    from core.components import TrapezoidalFinSet
+
+    # A nose or fin tube as wide as the body is written as 0 ("the body's"),
+    # so it follows the body diameter when that is edited on the state (the
+    # optimizer's diameter variable) instead of keeping the drawn radius.
+    body = assembly.max_diameter() if hasattr(assembly, "max_diameter") else 0.0
+
+    def _unless_body(value, body_value):
+        return 0.0 if abs(value - body_value) <= 1e-12 else value
+
     geom = dict(_AERO_GEOMETRY_DEFAULTS)
+    geom["extra_fin_sets"], geom["transitions"] = [], []
     have_nose = have_fins = False
     for stage in getattr(assembly, "stages", []) or []:
         stage_geom = _extract_stage_geometry(stage)
         if not have_nose and "nose_length" in stage_geom:
             have_nose = True
-            geom["nose_type"] = stage_geom["nose_type"]
-            geom["nose_length"] = stage_geom["nose_length"]
-        if not have_fins and "fin_span" in stage_geom:
+            for key in ("nose_type", "nose_length", "nose_diameter"):
+                geom[key] = stage_geom[key]
+            geom["nose_diameter"] = _unless_body(geom["nose_diameter"], body)
+        for fins in (c for c in _descendants(stage) if isinstance(c, TrapezoidalFinSet)):
+            fields = fin_set_fields(fins)
+            fields["fin_body_radius"] = _unless_body(fields["fin_body_radius"], body / 2.0)
+            if have_fins:
+                geom["extra_fin_sets"].append(fields)
+                continue
             have_fins = True
             for key in ("fin_span", "fin_root_chord", "fin_tip_chord",
-                        "fin_sweep_angle", "fin_thickness", "fin_cross_section"):
-                geom[key] = stage_geom[key]
-            geom["fin_height"] = stage_geom["fin_span"]
+                        "fin_sweep_angle", "fin_thickness", "fin_cross_section",
+                        "fin_body_radius"):
+                geom[key] = fields[key]
+            geom["fin_height"] = fields["fin_span"]
+        geom["transitions"] += [t for t in (transition_fields(c)
+                                            for c in _descendants(stage)) if t]
     return geom
 
 
@@ -261,9 +339,14 @@ class _StackAeroConfig:
     the currently-attached stack rather than the whole vehicle.
     """
     __slots__ = ("length", "diameter", "nose_type", "nose_length",
-                 "fin_count", "fin_span", "fin_root_chord", "fin_tip_chord",
-                 "fin_sweep_angle", "fin_thickness", "fin_position",
-                 "fin_cross_section", "surface_finish", "cmq")
+                 "nose_diameter", "fin_count", "fin_span", "fin_root_chord",
+                 "fin_tip_chord", "fin_sweep_angle", "fin_thickness",
+                 "fin_position", "fin_cross_section", "fin_body_radius",
+                 "extra_fin_sets", "transitions", "surface_finish", "cmq")
+
+    _FIN_KEYS = ("fin_count", "fin_span", "fin_root_chord", "fin_tip_chord",
+                 "fin_sweep_angle", "fin_thickness", "fin_cross_section",
+                 "fin_position", "fin_body_radius")
 
     def __init__(self, active: list[StageConfig]):
         # Physical top→bottom is the reverse of ignition order.
@@ -274,6 +357,7 @@ class _StackAeroConfig:
             or bottom.diameter
         self.nose_type = top.nose_type
         self.nose_length = top.nose_length or self.length * 0.2
+        self.nose_diameter = top.nose_diameter
         # The stack's fins are the aft-most fin set it carries: the bottom
         # (burning) stage's, or the next stage up when the bottom one has
         # none. AeroModel no longer invents fins for a finless state, so a
@@ -289,12 +373,34 @@ class _StackAeroConfig:
         self.fin_sweep_angle = finned.fin_sweep_angle
         self.fin_thickness = finned.fin_thickness or 0.003
         self.fin_cross_section = finned.fin_cross_section
+        self.fin_body_radius = finned.fin_body_radius
         self.surface_finish = top.surface_finish
         # Stage-local fin position → from the nose: everything stacked above
         # that stage (later in ignition order) comes first.
         above = sum(st.length for st in active[(idx or 0) + 1:])
         self.fin_position = max(0.0, above + finned.fin_position)
         self.cmq = -20.0
+
+        # Everything else the stack carries: the other stages' fin sets, each
+        # stage's further fin sets and its diameter changes, moved from
+        # stage-local positions to positions from the nose. The sustainer's
+        # fins fly with the booster attached; without them the sim's CP sat
+        # where the booster's fins alone put it.
+        self.extra_fin_sets, self.transitions = [], []
+        for i, st in enumerate(active):
+            top_of_stage = sum(s.length for s in active[i + 1:])
+            sets = list(st.extra_fin_sets or [])
+            if i != idx and st.fin_count > 0 and st.fin_span > 0 \
+                    and st.fin_root_chord > 0:
+                sets.insert(0, {k: getattr(st, k) for k in self._FIN_KEYS})
+            for f in sets:
+                f = dict(f)
+                f["fin_position"] = max(0.0, top_of_stage + f.get("fin_position", 0.0))
+                self.extra_fin_sets.append(f)
+            for tr in st.transitions or []:
+                tr = dict(tr)
+                tr["position"] = top_of_stage + tr.get("position", 0.0)
+                self.transitions.append(tr)
 
 
 class StageManager:
@@ -342,8 +448,12 @@ class StageManager:
             fin_thickness=getattr(s, 'fin_thickness', 0.003),
             fin_position=getattr(s, 'fin_position', 0.0),
             fin_cross_section=getattr(s, 'fin_cross_section', 'Rounded'),
+            fin_body_radius=getattr(s, 'fin_body_radius', 0.0),
+            extra_fin_sets=[dict(f) for f in getattr(s, 'extra_fin_sets', None) or []],
+            transitions=[dict(t) for t in getattr(s, 'transitions', None) or []],
             nose_type=getattr(s, 'nose_type', 'ogive'),
             nose_length=getattr(s, 'nose_length', 0.0),
+            nose_diameter=getattr(s, 'nose_diameter', 0.0),
             surface_finish=getattr(s, 'surface_finish', 'Normal'),
         )
         return cls([cfg])
