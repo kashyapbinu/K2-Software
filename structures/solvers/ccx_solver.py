@@ -104,6 +104,15 @@ class CalculiXSolver(FEMSolver):
         lc = cfg.load_case
 
         inp = cfg.work_dir / "analysis.inp"
+        # The results of an earlier deck in this folder must not be read back
+        # as this one's. With ccx missing (or quarantined), parse_results found
+        # the last run's analysis.frd and showed it, labelled CalculiX, as the
+        # current rocket's result; the modal parser did the same with .dat.
+        for stale in ("analysis.frd", "analysis.dat"):
+            try:
+                (cfg.work_dir / stale).unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning(f"Could not remove the previous {stale}: {exc}")
         mesh_text = ""
         if self._mesh_path and self._mesh_path.is_file():
             mesh_text = self._mesh_path.read_text(encoding="ascii", errors="replace")
@@ -408,7 +417,8 @@ class CalculiXSolver(FEMSolver):
         result.load_case_name = self.config.load_case.name
 
         frd_path = self.config.work_dir / "analysis.frd"
-        if frd_path.is_file() and getattr(self, "_load_model", None) is not None:
+        if (self._ccx_exe and frd_path.is_file()
+                and getattr(self, "_load_model", None) is not None):
             self._results_from_frd(frd_path, result)
             result.result_vtk = frd_path
             result.converged = True
@@ -416,15 +426,7 @@ class CalculiXSolver(FEMSolver):
 
         if not self._ccx_exe:
             result = self._analytical_fallback(result, mat)
-        if result.max_von_mises > 0:
-            result.safety_factor = mat.yield_strength / result.max_von_mises
-            result.yield_utilization = result.max_von_mises / mat.yield_strength
-            result.margin_of_safety = (result.safety_factor
-                                       / self.config.safety_factor_required) - 1.0
-        else:
-            result.safety_factor = float('inf')
-            result.margin_of_safety = float('inf')
-            result.yield_utilization = 0.0
+        self.fallback_safety(result, mat, self.config.safety_factor_required)
         result.converged = True
         logger.info(
             f"FEM Results (analytical): σ_vm={result.max_von_mises/1e6:.1f} MPa, "
@@ -596,6 +598,63 @@ class CalculiXSolver(FEMSolver):
         I = math.pi / 4 * (r_o**4 - r_i**4)
         return d_ref, r, total_L, wt, r_o, r_i, cross_area, I
 
+    def _fin_loads(self, q_dyn: float, aoa_rad: float) -> tuple:
+        """(normal force per fin, root bending stress, lifting panels, fin
+        material) for the assembly's first fin set; zeros and None for a
+        rocket without fins.
+
+        The fallback used a fin of its own making here (span 0.8 D, chord
+        0.12 L, three of them) with a root section sized from the AIRFRAME
+        wall, so its fin stress had nothing to do with the fins drawn and a
+        finless rocket still got one. Only fins in the cross-flow carry
+        normal force: N/2 of a set of three or more (physics.aerodynamics).
+        """
+        assembly = self.config.assembly
+        info = None
+        if assembly is not None:
+            L, d = assembly.total_length(), assembly.get_reference_diameter()
+            for stage in assembly.stages:
+                info = info or _find_fin_info(stage, L, d)
+        if not info or info["count"] <= 0:
+            return 0.0, 0.0, 0.0, None
+        from structures.workstation import fin_root_bending
+        force, stress = fin_root_bending(
+            info["span"], info["root_chord"], info["tip_chord"],
+            info["thickness"], q_dyn, aoa_rad)
+        count = info["count"]
+        fin_mat = get_structural_material(info.get("material") or self.config.material_name)
+        return force, stress, (count / 2.0 if count >= 3 else float(count)), fin_mat
+
+    @staticmethod
+    def _judge_parts(result: FEMResult, mat, vm_body: float, vm_fin: float, fin_mat):
+        """Record the airframe and fin peaks, each against its OWN material,
+        as the FE result does. The fin root used to be divided into the
+        airframe's yield strength, so a plywood fin on an aluminium tube was
+        credited with aluminium's strength."""
+        parts = result.component_results
+        if vm_body > 0:
+            parts["Airframe"] = {"max_stress": vm_body, "sf": mat.yield_strength / vm_body}
+        if vm_fin > 0 and fin_mat is not None:
+            parts["Fins"] = {"max_stress": vm_fin, "sf": fin_mat.yield_strength / vm_fin}
+
+    @staticmethod
+    def fallback_safety(result: FEMResult, mat, required_sf: float) -> None:
+        """Safety factor, utilisation and margin of an analytical result: the
+        weakest part when the fallback recorded them, else the peak stress
+        against the analysis material."""
+        sfs = [p["sf"] for p in result.component_results.values() if "sf" in p]
+        if sfs:
+            result.safety_factor = min(sfs)
+        elif result.max_von_mises > 0:
+            result.safety_factor = mat.yield_strength / result.max_von_mises
+        else:
+            result.safety_factor = float('inf')
+            result.margin_of_safety = float('inf')
+            result.yield_utilization = 0.0
+            return
+        result.yield_utilization = 1.0 / result.safety_factor
+        result.margin_of_safety = result.safety_factor / required_sf - 1.0
+
     def _analytical_max_thrust(self, result: FEMResult, mat) -> FEMResult:
         """Max Thrust: compressive axial + hoop + shear + bending + fin root."""
         lc = self.config.load_case
@@ -629,20 +688,10 @@ class CalculiXSolver(FEMSolver):
         elif aoa > 0:
             sigma_bend = sigma_axial * 0.03 * aoa
 
-        # Fin root bending
-        sigma_fin_root = 0.0
-        fin_span = d_ref * 0.8
-        n_fins = 3
-        if lc.mach > 0 and q_dyn > 0:
-            aoa_rad = math.radians(aoa) if aoa > 0 else math.radians(2.0)
-            fin_chord = total_L * 0.12
-            A_fin_plan = fin_span * fin_chord
-            F_per_fin = q_dyn * 4.0 * aoa_rad * A_fin_plan
-            M_fin = F_per_fin * fin_span / 3
-            fin_area = wt * fin_span * 0.5
-            sigma_fin_root = M_fin / (fin_area * wt) if fin_area > 0 else 0
-        else:
-            sigma_fin_root = sigma_axial * 0.3
+        # Fin root bending, for the fins this rocket has. Without airspeed
+        # there is no fin load (this used to add 30 % of the axial stress).
+        aoa_rad = math.radians(aoa) if aoa > 0 else math.radians(2.0)
+        _F_per_fin, sigma_fin_root, _panels, fin_mat = self._fin_loads(q_dyn, aoa_rad)
 
         # Inertial body bending
         accel = abs(lc.axial_force) / max(5.0 * 9.81, 1.0)
@@ -656,7 +705,10 @@ class CalculiXSolver(FEMSolver):
         vm_body = math.sqrt(sx**2 - sx*sy + sy**2 + 3 * tau**2) * Kt_detail
         vm_fin = sigma_fin_root * Kt_detail
         vm = max(vm_body, vm_fin)
-        total_bend = sigma_bend + sigma_inertial + sigma_fin_root
+        self._judge_parts(result, mat, vm_body, vm_fin, fin_mat)
+        # Airframe bending only, as the FE result reports it: the fin root is
+        # a different part and does not bend the tube.
+        total_bend = sigma_bend + sigma_inertial
 
         result.max_axial_stress = sigma_axial
         result.max_hoop_stress = sigma_hoop
@@ -730,22 +782,13 @@ class CalculiXSolver(FEMSolver):
         A_body_side = d_ref * total_L
         F_body_normal = q_dyn * 2.0 * aoa_rad * A_body_side
 
-        # Fin normal force using fin planform area
-        fin_span = d_ref * 0.8
-        fin_chord = total_L * 0.12
-        A_fin_plan = fin_span * fin_chord
-        n_fins = 3
-        F_fins_normal = q_dyn * 4.0 * aoa_rad * A_fin_plan * n_fins
+        # Fin normal force and root bending, for the fins this rocket has
+        F_per_fin, sigma_fin_root, panels, fin_mat = self._fin_loads(q_dyn, aoa_rad)
+        F_fins_normal = F_per_fin * panels
 
         F_normal_total = F_body_normal + F_fins_normal
         M_bend = F_normal_total * total_L * 0.35
         sigma_bend = M_bend * r_o / I if I > 0 else 0
-
-        # Fin root bending
-        F_per_fin = F_fins_normal / n_fins
-        M_fin = F_per_fin * fin_span / 3
-        fin_area = wt * fin_span * 0.5
-        sigma_fin_root = M_fin / (fin_area * wt) if fin_area > 0 else 0
 
         hp_ext = q_dyn * r / wt if wt > 0 else 0
         tau = F_normal_total / (2 * math.pi * r * wt) if (r > 0 and wt > 0) else 0
@@ -755,7 +798,9 @@ class CalculiXSolver(FEMSolver):
         vm_body = math.sqrt(sx**2 - sx*sy + sy**2 + 3 * tau**2) * Kt_detail * DAF_gust
         vm_fin = sigma_fin_root * Kt_detail * DAF_gust
         vm = max(vm_body, vm_fin)
-        total_bend = sigma_bend + sigma_fin_root
+        self._judge_parts(result, mat, vm_body, vm_fin, fin_mat)
+        # Airframe bending only (the fin load is already in M_bend)
+        total_bend = sigma_bend
 
         result.max_axial_stress = sigma_axial
         result.max_hoop_stress = hp_ext

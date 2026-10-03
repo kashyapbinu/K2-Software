@@ -97,10 +97,8 @@ class FEMInterface:
         result = solver._analytical_fallback(FEMResult(), solver._material)
         mat = solver._material
         if result.max_von_mises > 0:
-            result.safety_factor = mat.yield_strength / result.max_von_mises
-            result.yield_utilization = result.max_von_mises / mat.yield_strength
-            # Use config SF requirement for consistency with parse_results()
-            result.margin_of_safety = (result.safety_factor / cfg.safety_factor_required) - 1.0
+            # Same judgement as parse_results()
+            solver.fallback_safety(result, mat, cfg.safety_factor_required)
         result.material_name = mat.name
         result.yield_strength = mat.yield_strength
         return result

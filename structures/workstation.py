@@ -533,6 +533,25 @@ class FinAnalysis:
                    status="NO FINS")
 
 
+def fin_root_bending(span: float, root: float, tip: float, thick: float,
+                     q: float, aoa_rad: float) -> tuple:
+    """Normal force on one fin and the bending stress it puts in the root.
+
+    Finite-aspect-ratio lift slope on the trapezoid planform, load centroid
+    at 0.4 span, rectangular root section (root chord x thickness). Returns
+    ``(force_N, stress_Pa)``. Shared by fin_analysis and the CalculiX
+    solver's no-solver fallback, which used to size a made-up fin from the
+    airframe wall.
+    """
+    if span <= 0 or root <= 0 or thick <= 0 or q <= 0:
+        return 0.0, 0.0
+    area = 0.5 * (root + tip) * span
+    cn_alpha = 2 * math.pi / (1 + 2 / max(span * 2 / (root + tip), 0.5))
+    force = q * cn_alpha * aoa_rad * area
+    section_modulus = root * thick ** 2 / 6.0
+    return force, force * (0.4 * span) / section_modulus
+
+
 def _fin_material_name(assembly, fallback: str) -> str:
     """Material of the first fin set in the assembly, else the body material.
 
@@ -584,16 +603,11 @@ def fin_analysis(state, flight: FlightLoads, material_name: str) -> FinAnalysis:
         P, T, rho = isa(flight.maxq_altitude or 3000.0)
         V = (flight.max_mach or 0.6) * speed_of_sound(T)
         q = 0.5 * rho * V ** 2
-    A_fin = 0.5 * (root + tip) * span          # trapezoid planform
     aoa = math.radians(5.0)                    # conservative gust AoA
-    CN_alpha = 2 * math.pi / (1 + 2 / max(span * 2 / (root + tip), 0.5))  # finite-AR lift slope
-    F_fin = q * CN_alpha * aoa * A_fin
-    fa.fin_normal_force_N = F_fin
-
     # ── Root bending stress: load centroid at ~0.4 span, rectangular root ──
-    M_root = F_fin * (0.4 * span)
-    Z_root = (root * thick ** 2) / 6.0          # section modulus of root rect
-    fa.root_bending_MPa = (M_root / Z_root) / 1e6 if Z_root > 0 else 0.0
+    F_fin, sigma_root = fin_root_bending(span, root, tip, thick, q, aoa)
+    fa.fin_normal_force_N = F_fin
+    fa.root_bending_MPa = sigma_root / 1e6
 
     # ── Root shear ──
     A_root = root * thick
