@@ -43,6 +43,49 @@ R_AIR = 287.05          # J/(kg·K)
 # ── Cantilever eigenvalue for first bending mode ────────────────────────────
 _BETA1_L = 1.8751040687  # first root of cos(βL)·cosh(βL) + 1 = 0
 
+# ── Verdict scale ───────────────────────────────────────────────────────────
+# Margin of a flutter (or divergence) speed over the fastest the rocket flies.
+# Every panel that judges one reads this scale. The Dynamics workspace, the
+# Structures fin tab and the Structures modal panel each had their own (SAFE
+# from +20 %, from 1.5x and from 2.0x), so one fin at one flight speed could
+# read SAFE, MARGIN and ADEQUATE at the same time.
+SAFE_MARGIN_PCT = 20.0        # SAFE at and above
+CAUTION_MARGIN_PCT = 10.0     # CAUTION at and above, UNSAFE below
+
+
+def margin_verdict(margin_pct: float) -> str:
+    """'SAFE' | 'CAUTION' | 'UNSAFE' for a percentage speed margin."""
+    if margin_pct >= SAFE_MARGIN_PCT:
+        return "SAFE"
+    if margin_pct >= CAUTION_MARGIN_PCT:
+        return "CAUTION"
+    return "UNSAFE"
+
+
+def speed_margin_pct(critical_speed: float, max_flight_speed: float) -> float:
+    """How far a critical speed sits above the max flight speed, in percent.
+    Infinite when there is no finite critical speed or no flight speed."""
+    if not (critical_speed < 1e6) or max_flight_speed <= 0:
+        return float("inf")
+    return (critical_speed - max_flight_speed) / max_flight_speed * 100.0
+
+
+def flutter_verdict(flutter_speed: float, max_flight_speed: float) -> tuple:
+    """(verdict, margin %) of a flutter speed against the max flight speed."""
+    pct = speed_margin_pct(flutter_speed, max_flight_speed)
+    return margin_verdict(pct), pct
+
+
+def margin_safety_factor(margin_pct: float) -> float:
+    """A speed margin on the structural safety-factor scale (SAFE from 1.5,
+    FAILURE below 1.0), so a roll-up that judges safety factors gives a fin
+    the verdict this scale does: 1.5 at the SAFE margin, 1.0 at the CAUTION
+    margin, below 1.0 wherever the verdict is UNSAFE."""
+    if margin_pct >= CAUTION_MARGIN_PCT:
+        return 1.0 + 0.5 * (margin_pct - CAUTION_MARGIN_PCT) / (
+            SAFE_MARGIN_PCT - CAUTION_MARGIN_PCT)
+    return max(0.0, (100.0 + margin_pct) / (100.0 + CAUTION_MARGIN_PCT))
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  DATA CLASSES
@@ -60,8 +103,9 @@ class FlutterResult:
     flutter_mach: float = 0.0               # flutter Mach number
     max_flight_speed: float = 0.0           # max expected flight speed (m/s)
     max_flight_mach: float = 0.0            # max expected Mach number
-    flutter_margin: float = 0.0             # V_flutter / V_max (>1 = safe)
-    safe: bool = True
+    flutter_margin: float = 0.0             # V_flutter / V_max
+    safe: bool = True                       # verdict == 'SAFE'
+    verdict: str = "SAFE"                   # flutter_verdict(): SAFE | CAUTION | UNSAFE
     altitude_sweep: list = field(default_factory=list)
     # [(alt_m, V_flutter, M_flutter, fin_name), ...]
     mach_sweep: list = field(default_factory=list)
@@ -827,7 +871,10 @@ def flutter_analysis(assembly, max_flight_speed: float = 300.0,
     result.flutter_speed_mps = global_min_flutter
     result.flutter_margin = (global_min_flutter / max_flight_speed
                              if max_flight_speed > 0 else float('inf'))
-    result.safe = result.flutter_margin > 1.0
+    # The flag follows the verdict the panels show. It was "margin > 1", true
+    # for a fin 2 % clear of flutter that the panel called UNSAFE.
+    result.verdict = flutter_verdict(global_min_flutter, max_flight_speed)[0]
+    result.safe = result.verdict == "SAFE"
 
     # Worst-case altitude
     result.worst_case_altitude_m = global_worst_alt

@@ -266,6 +266,10 @@ class FEMConfig:
     # Modal boundary condition for effective-length factor
     modal_bc: str = 'cantilever'  # 'cantilever'|'pinned-pinned'|'fixed-fixed'|'fixed-pinned'
 
+    # Fastest the rocket flies (m/s); 0 = no flight known. The modal panel's
+    # fin-flutter margin is judged against it.
+    max_flight_speed: float = 0.0
+
 
 # ── Results ───────────────────────────────────────────────────────────────────
 
@@ -402,6 +406,7 @@ class ModalResult:
         "critical_speed_m_s": 0.0,
         "flutter_margin": 0.0,
         "max_flight_speed_m_s": 0.0,
+        "flight_speed_assumed": False,
         "verdict": "—",
         "method": "—",
     })

@@ -26,6 +26,13 @@ def _vl(t="—"):
     l = QLabel(t); l.setProperty("value", True); return l
 
 
+def _flutter_verdict_color(verdict):
+    """Colour for a dynamics.flutter_analysis verdict. Matched whole: the
+    old substring test ('SAFE' in verdict) would paint UNSAFE green."""
+    return {"SAFE": theme.OK, "CAUTION": theme.WARN,
+            "UNSAFE": theme.ERR}.get(verdict, theme.TEXT_DIM)
+
+
 class AnalysisThread(QThread):
     progress = pyqtSignal(str, float)
     finished = pyqtSignal(object, str)  # (result, type)
@@ -1037,10 +1044,14 @@ class StructuresWorkspace(QWidget):
         from structures.fem_interface import FEMInterface
         refinement, custom_circum, custom_axial = self._get_fem_custom_params()
         fem = FEMInterface()
+        # The fin-flutter margin is judged against the fastest the rocket
+        # flew, the speed the fin tab uses (0 when there is no flight yet).
+        v_max = wks.FlightLoads.from_history(self._get_history(),
+                                             self.engine.state).max_speed()
         self._progress.setVisible(True); self.btn_modal.setEnabled(False)
         self._thread = AnalysisThread(fem.modal_analysis,
             (assembly, self.mat_combo.currentText(), 10, refinement,
-             custom_circum, custom_axial), "modal")
+             custom_circum, custom_axial, v_max), "modal")
         self._thread.finished.connect(self._on_result)
         self._thread.errored.connect(self._on_error)
         self._thread.start()
@@ -1164,27 +1175,16 @@ class StructuresWorkspace(QWidget):
             if fa.get("critical_speed_m_s", 0) > 0:
                 self.lbl_flutter_speed.setText(f"{fa['critical_speed_m_s']:.0f} m/s")
                 margin = fa.get('flutter_margin', 0)
-                self.lbl_flutter_margin.setText(f"{margin:.2f}×")
+                self.lbl_flutter_margin.setText(
+                    f"{margin:.2f}× of {fa.get('max_flight_speed_m_s', 0):.0f} m/s")
                 verdict = fa.get('verdict', '—')
                 self.lbl_flutter_verdict.setText(verdict)
-                if '✓' in verdict or 'SAFE' in verdict:
-                    self.lbl_flutter_verdict.setStyleSheet(
-                        f"color:{theme.OK};font-weight:700;font-size:12px;padding:4px;"
-                    )
-                elif 'ADEQUATE' in verdict:
-                    self.lbl_flutter_verdict.setStyleSheet(
-                        f"color:{theme.WARN};font-weight:700;font-size:12px;padding:4px;"
-                    )
-                elif 'MARGINAL' in verdict:
-                    self.lbl_flutter_verdict.setStyleSheet(
-                        f"color:{theme.ACCENT};font-weight:700;font-size:12px;padding:4px;"
-                    )
-                else:
-                    self.lbl_flutter_verdict.setStyleSheet(
-                        f"color:{theme.ERR};font-weight:700;font-size:12px;padding:4px;"
-                    )
+                self.lbl_flutter_verdict.setStyleSheet(
+                    f"color:{_flutter_verdict_color(verdict)};"
+                    "font-weight:700;font-size:12px;padding:4px;")
                 self.lbl_flutter_method.setText(
                     f"{fa.get('method', 'NACA')} | AR={fa.get('fin_AR', '?')}, t/c={fa.get('fin_t_c', '?')}"
+                    + (" | no flight yet: speed assumed" if fa.get('flight_speed_assumed') else "")
                 )
 
             # Damping
@@ -1542,7 +1542,8 @@ class StructuresWorkspace(QWidget):
         self.lbl_fin_defl.setText(f"{fa.tip_deflection_mm:.2f} mm")
         self.lbl_fin_freq.setText(f"{fa.natural_frequency_Hz:.0f} Hz")
         self.lbl_fin_flutter.setText(f"{fa.flutter_speed_m_s:.0f} m/s")
-        self.lbl_fin_margin.setText("∞" if not (fa.flutter_margin < 1e6) else f"{fa.flutter_margin:.2f}×")
+        self.lbl_fin_margin.setText("∞" if not (fa.flutter_margin < 1e6)
+                                    else f"{fa.flutter_margin:.2f}×  {fa.flutter_verdict}")
         self.lbl_fin_force.setText(f"{fa.fin_normal_force_N:.0f} N")
         self.lbl_fin_loaded.setText(fa.highest_loaded_fin)
         sf = fa.safety_factor

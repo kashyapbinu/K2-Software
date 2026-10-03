@@ -40,12 +40,11 @@ def _vl(t="—"):
 
 
 def _verdict(margin_pct):
-    """(text, colour) for a percentage safety margin."""
-    if margin_pct >= 20.0:
-        return "SAFE", theme.OK
-    if margin_pct >= 10.0:
-        return "CAUTION", theme.WARN
-    return "UNSAFE", theme.ERR
+    """(text, colour) for a percentage safety margin, on the scale every
+    flutter readout shares (dynamics.flutter_analysis.margin_verdict)."""
+    from dynamics.flutter_analysis import margin_verdict
+    text = margin_verdict(margin_pct)
+    return text, {"SAFE": theme.OK, "CAUTION": theme.WARN, "UNSAFE": theme.ERR}[text]
 
 
 def _envelope_verdict(margins, crosses):

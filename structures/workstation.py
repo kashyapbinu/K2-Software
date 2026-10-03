@@ -149,6 +149,13 @@ class FlightLoads:
             moment_arm=abs(getattr(state, "cp", 0.0) - getattr(state, "cg", 0.0)),
         )
 
+    def max_speed(self) -> float:
+        """Fastest the rocket flew (m/s), 0 when no flight is known. The speed
+        every flutter margin in the Structures workspace is judged against."""
+        if self.max_velocity:
+            return self.max_velocity
+        return self.max_mach * speed_of_sound(isa(self.maxq_altitude or 3000.0)[1])
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 4.  WORST-CASE LOAD SEARCH
@@ -524,13 +531,23 @@ class FinAnalysis:
     status_color: str = "#8b949e"
     deflection_profile: list = field(default_factory=list)  # [(span_frac, defl_mm)]
     present: bool = True       # False: the rocket has no fins to analyse
+    # Flutter on the scale every flutter readout shares
+    # (dynamics.flutter_analysis): the verdict, and that verdict on the
+    # safety-factor scale the status, failure map and score are judged on.
+    flutter_verdict: str = "—"
+    flutter_sf: float = 0.0
+
+    @property
+    def governing_sf(self) -> float:
+        """What the fins are judged on: the lower of root bending and flutter."""
+        return min(self.safety_factor, self.flutter_sf)
 
     @classmethod
     def no_fins(cls) -> "FinAnalysis":
         """Result for a finless rocket: nothing to fail, nothing to report."""
         return cls(present=False, safety_factor=float("inf"),
-                   flutter_margin=float("inf"), highest_loaded_fin="—",
-                   status="NO FINS")
+                   flutter_margin=float("inf"), flutter_sf=float("inf"),
+                   highest_loaded_fin="—", status="NO FINS")
 
 
 def fin_root_bending(span: float, root: float, tip: float, thick: float,
@@ -635,23 +652,55 @@ def fin_analysis(state, flight: FlightLoads, material_name: str) -> FinAnalysis:
     # function. This tab used the NACA value alone, at the max-Q altitude,
     # and so quoted a higher flutter speed than Dynamics for the same fin
     # (452 against 282 m/s for a 4 mm plywood fin).
-    from dynamics.flutter_analysis import governing_flutter_speed
-    _P, T, _rho = isa(flight.maxq_altitude or 3000.0)
-    a_sound = speed_of_sound(T)
+    from dynamics.flutter_analysis import (
+        flutter_verdict, governing_flutter_speed, margin_safety_factor)
     G_shear = mat.G if mat.G > 0 else mat.E / (2 * (1 + mat.nu))
-    v_max = flight.max_velocity or (flight.max_mach * a_sound)
+    v_max = flight.max_speed()
     v_f, _v_naca, _pk = governing_flutter_speed(
         span, root, tip, thick, mat.E, G_shear, mat.density,
         max_flight_speed=v_max if v_max > 0 else 300.0)
     fa.flutter_speed_m_s = v_f if math.isfinite(v_f) else 0.0
-    fa.flutter_margin = fa.flutter_speed_m_s / v_max if v_max > 0 else float("inf")
+    fa.flutter_margin = v_f / v_max if v_max > 0 else float("inf")
+    # Judged as the Dynamics workspace judges it. The ratio used to go
+    # straight onto the safety-factor scale (SAFE from 1.5x), so a fin 30 %
+    # clear of flutter read MARGIN here and SAFE there, and one 5 % clear
+    # read WARNING here (structure: PASS WITH MARGIN) and UNSAFE there.
+    fa.flutter_verdict, margin_pct = flutter_verdict(v_f, v_max)
+    fa.flutter_sf = margin_safety_factor(margin_pct)
 
     # ── Safety factor: bending vs yield ──
     sigma = fa.root_bending_MPa * 1e6
     fa.safety_factor = mat.yield_strength / sigma if sigma > 0 else float("inf")
     fa.highest_loaded_fin = "Fin 1"   # symmetric set — all equal; gust loads one most
-    fa.status, fa.status_color = _status_from_sf(min(fa.safety_factor, fa.flutter_margin))
+    fa.status, fa.status_color = _status_from_sf(fa.governing_sf)
     return fa
+
+
+def weakest_fin_analysis(state, assembly, flight: FlightLoads,
+                         material_name: str) -> FinAnalysis:
+    """fin_analysis of every fin set, each in its own material; the rocket's
+    fins are judged on the weakest one (lowest governing_sf).
+
+    The Dynamics workspace takes the lowest flutter speed over all fin sets;
+    this tab analysed the first set only, so canards that flutter long before
+    the tail fins read SAFE here and UNSAFE there. Without an assembly the
+    state's own fin set is analysed."""
+    import types
+    from core.components import TrapezoidalFinSet
+    from core.staging import fin_set_fields
+
+    sets = ([c for c in assembly.all_components() if isinstance(c, TrapezoidalFinSet)]
+            if assembly is not None else [])
+    if not sets:
+        return fin_analysis(state, flight, _fin_material_name(assembly, material_name))
+    results = []
+    for fins in sets:
+        fa = fin_analysis(types.SimpleNamespace(**fin_set_fields(fins)), flight,
+                          getattr(fins, "material", None) or material_name)
+        if len(sets) > 1:
+            fa.highest_loaded_fin = fins.name
+        results.append(fa)
+    return min(results, key=lambda fa: fa.governing_sf)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1023,7 +1072,10 @@ def failure_map(state, body_sf: float, fin: FinAnalysis,
                         "Thrust transfer + buckling"),
         "Airframe": (min(body_sf, *(m.margin for m in buckling.modes) if buckling.modes else (body_sf,)),
                      "Axial + bending + shell buckling"),
-        "Fins": (min(fin.safety_factor, fin.flutter_margin), "Root bending + flutter"),
+        "Fins": (fin.governing_sf,
+                 "Root bending + flutter" if fin.safety_factor <= fin.flutter_sf else
+                 f"Flutter governs: margin {(fin.flutter_margin - 1.0) * 100.0:+.0f}% on "
+                 f"max flight speed ({fin.flutter_verdict})"),
         "Couplers": (body_sf * 0.9, "Joint shear + bending"),
         "Bulkheads": (recovery.safety_factor, "Recovery shock reaction"),
         "Recovery System": (recovery.safety_factor, "Deployment shock"),
@@ -1172,8 +1224,7 @@ def full_analysis(state, assembly, history, material_name: str,
         )
     body_sf = rep.body_condition["safety_factor"]
 
-    fin_mat = _fin_material_name(assembly, material_name)
-    rep.fin = fin_analysis(state, rep.flight, fin_mat)
+    rep.fin = weakest_fin_analysis(state, assembly, rep.flight, material_name)
     rep.buckling = buckling_analysis(state, rep.flight, material_name,
                                      bending_stress_pa=rep.body_condition.get("bending", 0.0))
     rep.thermal = thermal_profile(state, rep.flight, history, material_name)
@@ -1184,8 +1235,7 @@ def full_analysis(state, assembly, history, material_name: str,
     thermal_sf = thermal_margin(rep.thermal)
     buck_sf = rep.buckling.governing.margin if rep.buckling.governing else 99.0
     rep.score = safety_score(body_sf, buck_sf, rep.recovery.safety_factor,
-                             min(rep.fin.safety_factor, rep.fin.flutter_margin),
-                             thermal_sf)
+                             rep.fin.governing_sf, thermal_sf)
     rep.failure = failure_map(state, body_sf, rep.fin, rep.recovery,
                               rep.buckling, rep.thermal)
     rep.loads = load_path(state, rep.flight)

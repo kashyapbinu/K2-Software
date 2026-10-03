@@ -90,8 +90,11 @@ def _recommendations(state, rep):
         recs.append(f"Buckling margin governed by {rep.buckling.governing.name} "
                     f"(×{rep.buckling.governing.margin:.2f}); add stiffeners or "
                     f"increase wall thickness aft.")
-    if rep.fin.flutter_margin < 1.5:
-        recs.append(f"Fin flutter margin is {rep.fin.flutter_margin:.2f}× — stiffen "
+    # Whenever the shared flutter scale does not read SAFE (it was a flat 1.5x
+    # here, so a fin Dynamics called SAFE at +30 % was told to be stiffened).
+    if rep.fin.flutter_verdict in ("CAUTION", "UNSAFE"):
+        recs.append(f"Fin flutter margin is {rep.fin.flutter_margin:.2f}× "
+                    f"({rep.fin.flutter_verdict}) — stiffen "
                     f"fins (thicker section / lower aspect ratio) before flight.")
     if rep.recovery.safety_factor < 2.0:
         recs.append(f"Recovery hardware SF is {rep.recovery.safety_factor:.2f}; "
@@ -229,7 +232,7 @@ def generate_structural_report(path, state, rep, material_name="Aluminum 6061-T6
             ["Tip Deflection", f"{fa.tip_deflection_mm:.2f} mm"],
             ["Natural Frequency", f"{fa.natural_frequency_Hz:.0f} Hz"],
             ["Flutter Speed", f"{fa.flutter_speed_m_s:.0f} m/s"],
-            ["Flutter Margin", f"{fa.flutter_margin:.2f}×"],
+            ["Flutter Margin", f"{fa.flutter_margin:.2f}×  ({fa.flutter_verdict})"],
             ["Safety Factor", f"{fa.safety_factor:.2f}  ({fa.status})"],
         ]))
 

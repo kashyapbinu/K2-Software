@@ -499,3 +499,199 @@ def test_envelope_verdict_uses_the_panels_scale():
 
     # Nothing assessed is not SAFE.
     assert _envelope_verdict([], []) == (None, "")
+
+
+# ── one verdict scale in every tab ───────────────────────────────────────────
+#
+# One fin at one flight speed was judged three ways: Dynamics SAFE from +20 %
+# (UNSAFE under +10 %), the Structures fin tab on the safety-factor scale
+# (SAFE from 1.5x, FAILURE under 1.0x) and the Structures modal panel on its
+# own (SAFE from 2.0x), against Mach 0.8 at 3 km instead of the flight speed.
+# At 1.3x that read SAFE / MARGIN / ADEQUATE; at 1.05x UNSAFE / WARNING /
+# MARGINAL, with the structural report saying PASS WITH MARGIN.
+
+_RATIOS = (2.5, 1.6, 1.3, 1.21, 1.19, 1.15, 1.11, 1.09, 1.05, 1.0, 0.9)
+_FIN_STATUS = {"SAFE": {"SAFE"}, "CAUTION": {"MARGIN", "WARNING"}, "UNSAFE": {"FAILURE"}}
+
+
+def _fin_tab(v_max, q=500.0):
+    """The Structures fin tab's analysis of the _rocket() fin, at a load low
+    enough that root bending never governs."""
+    import structures.workstation as wks
+
+    class State:
+        length, diameter = 1.68, 0.155
+        fin_root_chord, fin_tip_chord = 0.20, 0.08
+        fin_span, fin_thickness, fin_count = 0.12, 0.004, 4
+
+    flight = wks.FlightLoads(available=True, source="test", max_velocity=v_max,
+                             max_mach=v_max / 340.0, max_dynamic_pressure=q,
+                             maxq_altitude=1000.0)
+    return wks.fin_analysis(State(), flight, "Plywood (Birch)")
+
+
+def _modal_panel(v_max):
+    from structures.solvers.ccx_solver import _flutter_assessment
+    return _flutter_assessment(dict(count=4, span=0.12, root_chord=0.20, tip_chord=0.08,
+                                    thickness=0.004, material="Plywood (Birch)"), v_max)
+
+
+@pytest.mark.parametrize("ratio", _RATIOS)
+def test_every_tab_gives_one_fin_the_same_flutter_verdict(ratio):
+    from dynamics.flutter_analysis import flutter_analysis
+    from ui.workspaces.dynamics_workspace import _verdict
+
+    asm, _fin = _rocket()
+    v_f = flutter_analysis(asm, 300.0, 0.9).flutter_speed_mps
+    v_max = v_f / ratio
+
+    dynamics = flutter_analysis(asm, v_max, v_max / 340.0)
+    panel = _verdict((dynamics.flutter_speed_mps - v_max) / v_max * 100.0)[0]
+    assert dynamics.verdict == panel
+    assert dynamics.safe == (panel == "SAFE")
+
+    modal = _modal_panel(v_max)
+    assert modal["verdict"] == panel
+    assert modal["critical_speed_m_s"] == pytest.approx(v_f, abs=0.06)
+
+    fin = _fin_tab(v_max)
+    assert fin.flutter_speed_m_s == pytest.approx(v_f, rel=1e-9)
+    assert fin.flutter_verdict == panel
+    assert fin.safety_factor > 100, "root bending must not be what is judged here"
+    assert fin.status in _FIN_STATUS[panel]
+
+
+def test_the_scale_itself():
+    from dynamics.flutter_analysis import (
+        CAUTION_MARGIN_PCT, SAFE_MARGIN_PCT, flutter_verdict, margin_safety_factor,
+        margin_verdict)
+    assert (SAFE_MARGIN_PCT, CAUTION_MARGIN_PCT) == (20.0, 10.0)
+    assert [margin_verdict(p) for p in (20.0, 19.99, 10.0, 9.99, -5.0)] == \
+        ["SAFE", "CAUTION", "CAUTION", "UNSAFE", "UNSAFE"]
+    assert flutter_verdict(360.0, 300.0) == ("SAFE", pytest.approx(20.0))
+    # No finite flutter speed, or nothing flown yet: nothing to exceed.
+    assert flutter_verdict(float("inf"), 300.0) == ("SAFE", float("inf"))
+    assert flutter_verdict(300.0, 0.0) == ("SAFE", float("inf"))
+
+    # On the safety-factor scale the bands land on the structural ones:
+    # SAFE from 1.5, FAILURE below 1.0, monotonic in between and beyond.
+    assert margin_safety_factor(SAFE_MARGIN_PCT) == 1.5
+    assert margin_safety_factor(CAUTION_MARGIN_PCT) == 1.0
+    assert margin_safety_factor(float("inf")) == float("inf")
+    grid = [-100.0 + 0.5 * i for i in range(400)]
+    sfs = [margin_safety_factor(p) for p in grid]
+    assert sfs == sorted(sfs) and sfs[0] == 0.0
+    for p, sf in zip(grid, sfs):
+        assert (sf >= 1.5) == (margin_verdict(p) == "SAFE")
+        assert (sf < 1.0) == (margin_verdict(p) == "UNSAFE")
+
+
+@pytest.mark.parametrize("ratio, verdict", [(1.5, "PASS"), (1.15, "PASS WITH MARGIN"),
+                                            (1.05, "FAIL")])
+def test_structural_report_follows_the_flutter_verdict(ratio, verdict):
+    """A fin 5 % clear of flutter is UNSAFE in Dynamics; the structural
+    report said PASS WITH MARGIN (and at +30 % told the user to stiffen a fin
+    Dynamics called SAFE)."""
+    import structures.workstation as wks
+    from structures.report import _recommendations
+    from validation.cases.rocket_canonical import canonical_assembly, canonical_state
+
+    def report(v_max):
+        s = canonical_state()
+        s.max_velocity, s.max_mach = v_max, v_max / 340.0
+        return s, wks.full_analysis(s, canonical_assembly(), None, "Aluminum 6061-T6", "Max-Q")
+
+    v_f = report(200.0)[1].fin.flutter_speed_m_s
+    state, rep = report(v_f / ratio)
+    fins = next(c for c in rep.failure.components if c.name == "Fins")
+
+    assert rep.fin.safety_factor > 1.5 > 0, "root bending must not govern this case"
+    assert rep.verdict == verdict
+    assert fins.status in {"PASS": {"SAFE"}, "PASS WITH MARGIN": {"MARGIN", "WARNING"},
+                           "FAIL": {"FAILURE"}}[verdict]
+    advised = any("flutter" in r.lower() for r in _recommendations(state, rep))
+    assert advised == (rep.fin.flutter_verdict != "SAFE")
+    if verdict != "PASS":
+        assert rep.failure.weakest.name == "Fins" and "Flutter governs" in fins.detail
+
+
+def test_modal_panel_is_judged_against_the_rockets_own_flight_speed(tmp_path):
+    """It used Mach 0.8 at 3 km (263 m/s) whatever the rocket flew."""
+    from structures.solvers.base import FEMConfig
+    from structures.solvers.ccx_solver import CalculiXSolver
+    from validation.cases.rocket_canonical import canonical_assembly
+
+    def assessment(**kw):
+        solver = CalculiXSolver(FEMConfig(analysis_type="modal", work_dir=tmp_path,
+                                          assembly=canonical_assembly(), **kw))
+        return solver._modal_analytical().flutter_assessment
+
+    flown = assessment(max_flight_speed=150.0)
+    assert flown["max_flight_speed_m_s"] == 150.0 and not flown["flight_speed_assumed"]
+    assert flown["flutter_margin"] == pytest.approx(flown["critical_speed_m_s"] / 150.0, abs=0.006)
+    assert flown["verdict"] == "SAFE"
+
+    fast = assessment(max_flight_speed=flown["critical_speed_m_s"] / 1.05)
+    assert fast["verdict"] == "UNSAFE"
+    assert fast["critical_speed_m_s"] == flown["critical_speed_m_s"]
+
+    # No flight known: the load-case speed, and the result says it is assumed.
+    unflown = assessment()
+    assert unflown["flight_speed_assumed"]
+    assert unflown["max_flight_speed_m_s"] == pytest.approx(0.8 * 328.6, abs=0.5)
+
+
+def test_structures_workspace_passes_the_flight_speed_and_colours_by_whole_word():
+    import ast
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[2] / "ui" / "workspaces"
+           / "structures_workspace.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    run_modal = next(n for n in ast.walk(tree)
+                     if isinstance(n, ast.FunctionDef) and n.name == "_run_modal")
+    assert "max_speed" in ast.unparse(run_modal), \
+        "the modal run must be given the rocket's max flight speed"
+
+    ns = {"theme": type("T", (), dict(OK="ok", WARN="warn", ERR="err", TEXT_DIM="dim"))}
+    colour = next(n for n in tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name == "_flutter_verdict_color")
+    exec(compile(ast.Module([colour], []), "structures_workspace", "exec"), ns)
+    assert [ns["_flutter_verdict_color"](v) for v in ("SAFE", "CAUTION", "UNSAFE", "—")] == \
+        ["ok", "warn", "err", "dim"]
+
+
+@pytest.mark.parametrize("ratio", (1.5, 1.15, 1.05))
+def test_every_tab_judges_the_fin_set_that_flutters_first(ratio, tmp_path):
+    """Dynamics takes the lowest flutter speed over every fin set; the
+    Structures fin tab and modal panel looked at the first set only, so thin
+    canards that flutter long before the tail fins were never seen there."""
+    import structures.workstation as wks
+    from core.components import BodyTube, TrapezoidalFinSet
+    from dynamics.flutter_analysis import flutter_analysis
+    from structures.solvers.base import FEMConfig
+    from structures.solvers.ccx_solver import CalculiXSolver
+    from validation.cases.rocket_canonical import canonical_state
+
+    asm, _fin = _rocket()
+    tube = next(c for c in asm.all_components() if isinstance(c, BodyTube))
+    canards = TrapezoidalFinSet("Thin canards")
+    canards.height, canards.root_chord, canards.tip_chord, canards.thickness = 0.10, 0.10, 0.05, 0.0015
+    asm.add_component(tube, canards)
+
+    v_f = flutter_analysis(asm, 300.0, 0.9).flutter_speed_mps
+    v_max = v_f / ratio
+    dynamics = flutter_analysis(asm, v_max, v_max / 340.0)
+
+    modal = CalculiXSolver(FEMConfig(analysis_type="modal", work_dir=tmp_path, assembly=asm,
+                                     max_flight_speed=v_max))._modal_analytical().flutter_assessment
+    state = canonical_state()
+    state.max_velocity, state.max_mach = v_max, v_max / 340.0
+    fin_tab = wks.full_analysis(state, asm, None, "Aluminum 6061-T6", "Max-Q").fin
+
+    assert dynamics.altitude_sweep[0][3] == "Thin canards"
+    assert modal["critical_speed_m_s"] == pytest.approx(v_f, abs=0.06)
+    assert modal["fin_set"] == "Thin canards" and modal["method"].endswith("Thin canards")
+    assert fin_tab.flutter_speed_m_s == pytest.approx(v_f, rel=1e-9)
+    assert fin_tab.highest_loaded_fin == "Thin canards"
+    assert dynamics.verdict == modal["verdict"] == fin_tab.flutter_verdict

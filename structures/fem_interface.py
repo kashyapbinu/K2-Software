@@ -60,8 +60,12 @@ class FEMInterface:
     def modal_analysis(self, assembly, material_name: str = "Aluminum 6061-T6",
                        num_modes: int = 10, refinement: str = "medium",
                        custom_circum: int | None = None,
-                       custom_axial_per_cal: int | None = None) -> ModalResult:
-        """Run modal (eigenvalue) analysis for natural frequencies."""
+                       custom_axial_per_cal: int | None = None,
+                       max_flight_speed: float = 0.0) -> ModalResult:
+        """Run modal (eigenvalue) analysis for natural frequencies.
+
+        ``max_flight_speed`` (m/s) is what the fin-flutter margin in the
+        result is judged against; 0 when no flight is known."""
         work = self._get_work_dir("modal")
         cfg = FEMConfig(
             material_name=material_name,
@@ -72,6 +76,7 @@ class FEMInterface:
             assembly=assembly,
             custom_circum=custom_circum,
             custom_axial_per_cal=custom_axial_per_cal,
+            max_flight_speed=max_flight_speed,
         )
         solver = CalculiXSolver(cfg)
         solver.generate_mesh(assembly)

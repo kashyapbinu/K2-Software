@@ -1312,13 +1312,10 @@ class CalculiXSolver(FEMSolver):
         wt = 0.002
 
         from core.components import BodyTube
-        fin_info = None
         for stage in assembly.stages:
             for comp in stage.children:
                 if isinstance(comp, BodyTube):
                     wt = (comp.outer_diameter_val - comp.inner_diameter) / 2
-                if fin_info is None:
-                    fin_info = _find_fin_info(comp, L, d)
 
         r_o, r_i = r + wt / 2, r - wt / 2
         A = math.pi * (r_o**2 - r_i**2)
@@ -1511,12 +1508,34 @@ class CalculiXSolver(FEMSolver):
         result.resonance_warnings = warnings
 
         # ── Flutter ─────────────────────────────────────────────────
-        assessment = _flutter_assessment(fin_info, V_flight)
+        assessment = self._fin_flutter(V_flight)
         if assessment:
             result.flutter_assessment = assessment
 
         logger.info(f"Modal post-process: {len(result.mode_classifications)} classified, "
                      f"{len(warnings)} resonance warnings")
+
+    def _fin_flutter(self, v_load_case: float) -> dict:
+        """Flutter assessment of the fin set that flutters first, against the
+        fastest the rocket flies.
+
+        Every fin set is assessed, as the Dynamics workspace does; this panel
+        took the first set only, so canards that flutter long before the tail
+        fins were never looked at. The flight speed comes with the analysis
+        (FEMConfig.max_flight_speed, the one the fin tab uses); only when no
+        flight is known is the load-case speed used, and the result says so.
+        The margin used to be taken against the load-case speed always, Mach
+        0.8 at 3 km for a modal run, whatever the rocket did."""
+        v_max = getattr(self.config, "max_flight_speed", 0.0) or 0.0
+        v_flight, assumed = (v_max, False) if v_max > 0 else (v_load_case, True)
+        infos = _all_fin_infos(self.config.assembly)
+        found = [a for a in (_flutter_assessment(i, v_flight, assumed) for i in infos) if a]
+        if not found:
+            return {}
+        worst = min(found, key=lambda a: a["critical_speed_m_s"])
+        if len(infos) > 1:
+            worst["method"] += f", {worst['fin_set']}"
+        return worst
 
     def _modal_analytical(self) -> ModalResult:
         """Analytical natural frequencies for a free-free beam with professional
@@ -1535,13 +1554,10 @@ class CalculiXSolver(FEMSolver):
         r = d / 2
         wt = 0.002
         from core.components import BodyTube
-        fin_info = None
         for stage in assembly.stages:
             for comp in stage.children:
                 if isinstance(comp, BodyTube):
                     wt = (comp.outer_diameter_val - comp.inner_diameter) / 2
-                if fin_info is None:
-                    fin_info = _find_fin_info(comp, L, d)
 
         r_o, r_i = r + wt / 2, r - wt / 2
         I = math.pi / 4 * (r_o**4 - r_i**4)
@@ -1774,7 +1790,7 @@ class CalculiXSolver(FEMSolver):
         result.resonance_warnings = warnings
 
         # ── Fin flutter assessment ───────────────────────────────────────
-        assessment = _flutter_assessment(fin_info, V_flight)
+        assessment = self._fin_flutter(V_flight)
         if assessment:
             result.flutter_assessment = assessment
 
@@ -1826,41 +1842,53 @@ def _find_fin_info(comp, L: float, d: float) -> Optional[dict]:
     return None
 
 
-def _flutter_assessment(fin_info: Optional[dict], v_flight: float) -> dict:
+def _all_fin_infos(assembly) -> list:
+    """_find_fin_info of every fin set in the assembly, each with its name."""
+    from core.components import TrapezoidalFinSet
+    if assembly is None:
+        return []
+    L, d = assembly.total_length(), assembly.get_reference_diameter()
+    return [dict(_find_fin_info(c, L, d), fin_set=c.name)
+            for c in assembly.all_components() if isinstance(c, TrapezoidalFinSet)]
+
+
+def _flutter_assessment(fin_info: Optional[dict], v_flight: float,
+                        assumed: bool = False) -> dict:
     """Fin flutter for the modal panel, or {} when there is no fin to assess.
 
     The speed is dynamics.flutter_analysis.governing_flutter_speed for the
     fin's own material, the number the Dynamics workspace and the fin tab
     quote. This panel used to re-derive the NACA formula on the mean chord
     with the AIRFRAME's shear modulus, and so gave a third flutter speed.
+
+    The verdict is dynamics.flutter_analysis.flutter_verdict, the scale those
+    two read as well (this panel had its own: SAFE only from 2.0x). *assumed*
+    marks a ``v_flight`` that is not the rocket's own flight speed.
     """
     if not fin_info:
         return {}
-    from dynamics.flutter_analysis import governing_flutter_speed
+    from dynamics.flutter_analysis import flutter_verdict, governing_flutter_speed
 
     cr, ct = fin_info["root_chord"], fin_info["tip_chord"]
     span, t_fin = fin_info["span"], fin_info["thickness"]
     fin_mat = get_structural_material(fin_info.get("material") or "Plywood (Birch)")
+    v_flight = max(v_flight, 1.0)
     v_flutter, v_naca, _pk = governing_flutter_speed(
         span, cr, ct, t_fin, fin_mat.E, fin_mat.G, fin_mat.density,
-        max_flight_speed=max(v_flight, 1.0))
+        max_flight_speed=v_flight)
     if not math.isfinite(v_flutter):
         return {}
 
-    flutter_margin = v_flutter / max(v_flight, 1.0)
-    if flutter_margin >= 2.0:
-        verdict = "✓ SAFE (margin ≥ 2.0)"
-    elif flutter_margin >= 1.25:
-        verdict = "ADEQUATE (margin 1.25–2.0)"
-    elif flutter_margin >= 1.0:
-        verdict = "MARGINAL (margin < 1.25)"
-    else:
-        verdict = "✕ FLUTTER RISK (V_flight > V_flutter)"
+    flutter_margin = v_flutter / v_flight
+    verdict, margin_pct = flutter_verdict(v_flutter, v_flight)
     area = 0.5 * (cr + ct) * span
     return {
         "critical_speed_m_s": round(v_flutter, 1),
         "flutter_margin": round(flutter_margin, 2),
+        "margin_pct": margin_pct,
         "max_flight_speed_m_s": round(v_flight, 1),
+        "flight_speed_assumed": assumed,
+        "fin_set": fin_info.get("fin_set", ""),
         "verdict": verdict,
         "method": ("p-k (2-DOF)" if v_flutter < v_naca else "NACA TN-4197")
                   + f", {fin_mat.name}",
