@@ -73,7 +73,8 @@
     const dur = 1600;
     const start = performance.now();
     function step(now) {
-      const p = Math.min((now - start) / dur, 1);
+      // The first frame's timestamp can predate `start`; clamp so it never counts below zero
+      const p = Math.min(Math.max((now - start) / dur, 0), 1);
       const eased = 1 - Math.pow(1 - p, 3);
       el.textContent = Math.round(target * eased).toLocaleString() + (p === 1 ? suffix : "");
       if (p < 1) requestAnimationFrame(step);
@@ -101,6 +102,80 @@
     }
   });
 
+  /* ── Promo video: autoplay (muted) while in view, overlay controls ── */
+  const vp = document.querySelector(".vp");
+  if (vp) {
+    const video = vp.querySelector("video");
+    const bigBtn = vp.querySelector(".vp-big");
+    const muteBtn = vp.querySelector(".vp-mute");
+    const fsBtn = vp.querySelector(".vp-fs");
+    const bar = vp.querySelector(".vp-progress span");
+    let userPaused = false; // a pause the visitor chose — scrolling back must not override it
+
+    video.removeAttribute("controls");
+    vp.querySelectorAll("[hidden]").forEach((el) => (el.hidden = false));
+    vp.classList.add("is-ready", "is-muted");
+
+    const sync = () => {
+      vp.classList.toggle("is-paused", video.paused);
+      bigBtn.setAttribute("aria-label", video.paused ? "Play video" : "Pause video");
+    };
+    const toggle = () => {
+      if (video.paused) {
+        userPaused = false;
+        video.play().catch(() => {});
+      } else {
+        userPaused = true;
+        video.pause();
+      }
+    };
+    video.addEventListener("play", sync);
+    video.addEventListener("pause", sync);
+    video.addEventListener("click", toggle);
+    bigBtn.addEventListener("click", toggle);
+    video.addEventListener("timeupdate", () => {
+      if (video.duration) bar.style.transform = `scaleX(${video.currentTime / video.duration})`;
+    });
+
+    muteBtn.addEventListener("click", () => {
+      video.muted = !video.muted;
+      vp.classList.toggle("is-muted", video.muted);
+      muteBtn.setAttribute("aria-label", video.muted ? "Unmute" : "Mute");
+    });
+    fsBtn.addEventListener("click", () => {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else if (vp.requestFullscreen) vp.requestFullscreen();
+      else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen(); // iOS Safari
+    });
+
+    if (!reduced) {
+      new IntersectionObserver(
+        ([e]) => {
+          if (e.isIntersecting && !userPaused) video.play().catch(() => {});
+          else if (!e.isIntersecting && !video.paused) video.pause();
+        },
+        { threshold: 0.5 }
+      ).observe(vp);
+    }
+  }
+
+  /* ── Workspace marquee ── */
+  // Duplicate each track so translateX(-50%) loops seamlessly. The copies are
+  // decorative: hidden from screen readers and skipped by keyboard focus.
+  if (!reduced) {
+    document.querySelectorAll(".ws-marquee").forEach((mq) => {
+      mq.querySelectorAll(".ws-track").forEach((track) => {
+        Array.from(track.children).forEach((tile) => {
+          const copy = tile.cloneNode(true);
+          copy.setAttribute("aria-hidden", "true");
+          copy.tabIndex = -1;
+          track.appendChild(copy);
+        });
+      });
+      mq.classList.add("is-running");
+    });
+  }
+
   /* ── Screenshot lightbox ── */
   const lb = document.getElementById("lightbox");
   if (lb) {
@@ -114,6 +189,8 @@
         const fig = img.closest(".shot, .wsd-shot");
         const cap = fig ? fig.querySelector("figcaption") : null;
         lbCap.innerHTML = cap ? cap.innerHTML : img.alt;
+        // Carry the card's accent colour into the viewer (empty for cards without one)
+        lb.style.setProperty("--c", fig ? fig.style.getPropertyValue("--c") : "");
         lb.hidden = false;
         document.body.style.overflow = "hidden";
       });
@@ -134,13 +211,13 @@
   const lines = [
     "$ python main.py",
     "[K2] AeroSim initialized — 12 workspaces ready",
-    "[SIM] 6DOF · RK45 Dormand-Prince · dt adaptive",
-    "[SIM] T+0.00s   liftoff        thrust 1977 N",
-    "[SIM] T+1.34s   burnout        v = 168.8 m/s   M 0.50",
-    "[SIM] T+15.7s   APOGEE         1,223 m AGL",
-    "[SIM] T+16.1s   drogue deploy  descent 21.2 m/s",
-    "[SIM] T+60.4s   main deploy    descent 5.1 m/s",
-    "[SIM] T+95.8s   touchdown nominal — recovery DEPLOYED ✓",
+    "[SIM] 6DOF · RK4 · dt adaptive",
+    "[SIM] T+0.00s   liftoff        thrust 2106 N",
+    "[SIM] T+1.34s   burnout        v = 168.4 m/s   M 0.50",
+    "[SIM] T+15.6s   APOGEE         1,191 m AGL",
+    "[SIM] T+16.6s   drogue deploy  descent 20.8 m/s",
+    "[SIM] T+59.1s   main deploy    descent 7.7 m/s",
+    "[SIM] T+96.2s   touchdown nominal — recovery DEPLOYED ✓",
   ];
   const term = document.getElementById("termBody");
   if (term) {

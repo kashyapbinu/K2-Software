@@ -7,7 +7,7 @@
 <meta name="description" content="Developer's Talk — thoughts, design notes, roadmap and update log for K2 AeroSim, by Kashyap Binu.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 <link rel="icon" type="image/png" href="assets/favicon.png">
 </head>
@@ -84,13 +84,13 @@
   </div>
   <div class="report-methods">
     <a class="report-card" href="https://forms.gle/xNi7yA6wCCaEzrxu8" target="_blank" rel="noopener">
-      <div class="report-icon">📝</div>
+      <div class="report-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></svg></div>
       <h4>Quick form</h4>
       <p>A short Google Form — no account needed. Best for a fast report.</p>
       <span class="report-go">Open the form →</span>
     </a>
     <a class="report-card" href="https://github.com/kashyapbinu/K2-Software/issues/new" target="_blank" rel="noopener">
-      <div class="report-icon">🐙</div>
+      <div class="report-icon"><svg viewBox="0 0 24 24" aria-hidden="true" class="icon-fill"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.55v-2.17c-3.2.7-3.87-1.37-3.87-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.19 1.76 1.19 1.03 1.76 2.7 1.25 3.36.96.1-.75.4-1.25.73-1.54-2.55-.29-5.23-1.28-5.23-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11.07 11.07 0 0 1 5.78 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.42-2.69 5.39-5.25 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.66.8.55A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5z"/></svg></div>
       <h4>GitHub Issue</h4>
       <p>Open an issue on the repository. Best for detailed reports, logs, and tracking.</p>
       <span class="report-go">Open an issue →</span>
@@ -101,7 +101,29 @@
 <!-- ───────────────────────── UPDATES ───────────────────────── -->
 <section class="section devtalk-section" id="updates">
   <h3 class="devtalk-h">Updates</h3>
+
   <div class="dev-prose">
+    <h4 class="rel-h">v0.1.10 <span class="rel-tag">latest</span></h4>
+    <ul class="dev-list">
+      <li><strong>Leaner AI Assistant</strong> — the assistant now ships with two backends instead of three: Gemini (free tier, <code>gemini-3.6-flash</code>) as the default cloud model, and Ollama (<code>qwen3:1.7b</code>) for fully offline local use. The Anthropic backend was removed to keep setup simple and the download smaller.</li>
+      <li><strong>Installer Fix</strong> — updates no longer stack on top of the previous release. The installer now clears the old program files before writing the new ones, so upgrading in place gives you a clean install instead of a mix of two versions.</li>
+    </ul>
+  </div>
+
+  <div class="dev-prose">
+    <h4 class="rel-h">v0.1.9</h4>
+    <ul class="dev-list">
+      <li><strong>In-App AI Design Assistant</strong> — a dockable assistant that can read your live rocket model, explain results, and change the design through a tool bridge: edit components, run simulations and fast-forward flights on request. Pluggable LLM backends, so you can run it in the cloud or entirely on your own machine.</li>
+      <li><strong>6DOF Aero Frame Unified</strong> — the simulation engine and the batch (Monte Carlo / optimization) runner used to carry two hand-copied copies of the flight derivatives. They now share one frame, so a single-run flight and the same case inside a sweep produce identical physics.</li>
+      <li><strong>Dynamics Corrections</strong> — fixed the divergence eigenvalue and rebuilt the base-excitation FRF (it was reporting receptance, not transmissibility), so vibration and aeroelastic numbers are trustworthy.</li>
+      <li><strong>Structures Corrections</strong> — free-free modal analysis, rail-exit detection, and stress scaling in the viewer all fixed.</li>
+      <li><strong>Physics Corrections</strong> — nozzle area ratio, fin interference K-table range, tube radii, and wind turbulence models corrected.</li>
+      <li><strong>Supersonic CFD Benchmark</strong> — a Barrowman-vs-SU2 comparison added to the validation suite, plus a configurable VTK dump rate so long solves don't fill the disk.</li>
+    </ul>
+  </div>
+
+  <div class="dev-prose">
+    <h4 class="rel-h">Earlier releases</h4>
     <ul class="dev-list">
       <li><strong>Liquid Propellant Simulation</strong> — liquid and hybrid rocket propulsion now supported, with a dedicated engine designer covering bi-propellant and monopropellant systems, injector and feed-system modeling, and full integration into both single-stage and multi-stage builds.</li>
       <li><strong>Multi-Stage Rocket Simulation</strong> — full multistage flight with stage separation, ignition sequencing, and stage-wise trajectory analysis through the staging manager.</li>
