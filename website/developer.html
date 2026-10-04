@@ -103,7 +103,19 @@
   <h3 class="devtalk-h">Updates</h3>
 
   <div class="dev-prose">
-    <h4 class="rel-h">v0.1.10 <span class="rel-tag">latest</span></h4>
+    <h4 class="rel-h">v0.2.0 <span class="rel-tag">latest</span></h4>
+    <ul class="dev-list">
+      <li><strong>The Sim Flies the Rocket You Drew</strong> — every fin set, nose diameter, shoulder, boat-tail and transition in the Design tab now reaches the flight model. Values you set are never overwritten by estimates, and a finless design flies finless. The Design tab's stability margin and the simulation's now come from the same CP model.</li>
+      <li><strong>Correct Component Masses</strong> — components are weighed by their own material. Some named materials (e.g. "Aluminum 6061-T6") were previously weighed as cardboard.</li>
+      <li><strong>One Flutter Answer</strong> — Dynamics, the Structures fin tab and the modal panel now report one flutter speed and judge it on one SAFE / CAUTION / UNSAFE scale, against the rocket's real maximum speed, for every fin set.</li>
+      <li><strong>Structures Fixes</strong> — the CalculiX static model carries the real flight loads with inertia relief; without CalculiX the fallback analyses your actual fins against their own material, and never shows a stale result from a previous run.</li>
+      <li><strong>Batch &amp; Optimizer Consistency</strong> — Monte Carlo and optimization runs match the single-flight engine (fin drag was missing), and the optimizer results panel shows the whole design.</li>
+      <li><strong>Smoother UI</strong> — hidden 3D viewports no longer render in the background, docked panels stay open on tab switch, and a crash on quit from the Design tab is fixed.</li>
+    </ul>
+  </div>
+
+  <div class="dev-prose">
+    <h4 class="rel-h">v0.1.10</h4>
     <ul class="dev-list">
       <li><strong>Leaner AI Assistant</strong> — the assistant now ships with two backends instead of three: Gemini (free tier, <code>gemini-3.6-flash</code>) as the default cloud model, and Ollama (<code>qwen3:1.7b</code>) for fully offline local use. The Anthropic backend was removed to keep setup simple and the download smaller.</li>
       <li><strong>Installer Fix</strong> — updates no longer stack on top of the previous release. The installer now clears the old program files before writing the new ones, so upgrading in place gives you a clean install instead of a mix of two versions.</li>
