@@ -227,6 +227,15 @@ class MonteCarloWorkspace(QWidget):
         self.spin_max_mach.setDecimals(1)
         self.spin_max_mach.setValue(2.0)
         f6.addRow("Max Mach:", self.spin_max_mach)
+        self.spin_max_landing = QDoubleSpinBox()
+        self.spin_max_landing.setRange(1, 100)
+        self.spin_max_landing.setSuffix(" m/s")
+        self.spin_max_landing.setDecimals(1)
+        self.spin_max_landing.setValue(10.0)
+        self.spin_max_landing.setToolTip(
+            "Fastest touchdown descent rate that still counts as a safe "
+            "recovery. Faster landings are reported as 'Hard landing'.")
+        f6.addRow("Max Landing Vel:", self.spin_max_landing)
         # Recovery range-safety: landings outside this radius from the pad are a
         # hazard. 0 disables the circle. Re-draws the dispersion plot live.
         self.spin_safety_radius = QDoubleSpinBox()
@@ -518,6 +527,7 @@ class MonteCarloWorkspace(QWidget):
             min_stability_cal=self.spin_min_stab.value(),
             min_rail_exit_velocity=self.spin_min_rev.value(),
             max_mach_limit=self.spin_max_mach.value(),
+            max_landing_velocity=self.spin_max_landing.value(),
             target_apogee=self.spin_target.value(),
         )
 

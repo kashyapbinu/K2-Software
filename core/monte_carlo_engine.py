@@ -69,6 +69,7 @@ class MonteCarloConfig:
     min_stability_cal: float = 1.0                  # calibers
     min_rail_exit_velocity: float = 15.0            # m/s
     max_mach_limit: float = 5.0                     # Mach number
+    max_landing_velocity: float = 10.0              # m/s descent rate at touchdown
 
     # Target apogee (0 = auto-detect from a nominal baseline run)
     target_apogee: float = 0.0
@@ -530,8 +531,11 @@ class MonteCarloEngine(QObject):
         cfg.cd_nominal = base.cd
         params["cd"] = cfg.cd
 
-        # Launch angle: σ = deg
-        cfg.launch_angle = max(0.0, min(90.0,
+        # Launch angle: σ = deg. Elevation runs 0–180: past 90 the rail leans
+        # the other way. Capping it at 90 folded half of every sample drawn
+        # around a vertical launch onto exactly 90.0, so half the runs had no
+        # tilt at all and the rest all leaned the same way.
+        cfg.launch_angle = max(0.0, min(180.0,
             base.launch_angle + _cg(rng, mc.launch_angle_uncertainty_deg)
         ))
         params["launch_angle"] = cfg.launch_angle
@@ -715,6 +719,11 @@ class MonteCarloEngine(QObject):
             # Non-recovery
             if r.final_phase not in ("Landed",):
                 reasons.append("Recovery failure")
+            # Reaching the ground is not a recovery. A rocket that came in
+            # ballistic also ends in "Landed"; only the touchdown speed tells
+            # the two apart.
+            elif r.landing_velocity > mc.max_landing_velocity and r.apogee > 1.0:
+                reasons.append("Hard landing")
 
             if reasons:
                 failure_count += 1
@@ -889,8 +898,13 @@ class MonteCarloEngine(QObject):
         # was being fed the 95%-of-target number, so it read optimistically.
         prob_target = float(np.sum(v_apogees >= target * 0.95)) / nv if nv > 0 else 0.0
         prob_above_target = float(np.sum(v_apogees >= target)) / nv if nv > 0 else 0.0
+        # Safe recovery = back on the ground AND slow enough to survive it.
+        # This counted every run that reached "Landed", so a design with no
+        # parachute at all scored 100 %.
         prob_recovery = float(
-            sum(1 for r in pv_runs if r.final_phase == "Landed")
+            sum(1 for r in pv_runs
+                if r.final_phase == "Landed"
+                and r.landing_velocity <= mc.max_landing_velocity)
         ) / npv if npv > 0 else 0.0
         mission_prob = success_count / n if n > 0 else 0.0
 
