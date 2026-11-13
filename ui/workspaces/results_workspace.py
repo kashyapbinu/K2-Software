@@ -49,22 +49,25 @@ def canopy_line(c: dict) -> str:
 def summary_text(summary, key: str) -> str:
     """One FlightSummary value as tile text; "—" for a value the flight did
     not produce (None), never a made-up zero."""
+    from ui.units import format_value
     value = getattr(summary, key, None) if summary is not None else None
     if value is None:
         return "—"
     if key == "max_acceleration":
-        return f"{value:.0f} m/s² ({value / 9.80665:.1f} g)"
+        return f"{format_value(value, 'acceleration')} ({value / 9.80665:.1f} g)"
     if key == "max_q":
-        return f"{value / 1000.0:.1f} kPa"
+        return format_value(value, "pressure")
     if key == "max_mach":
         return f"{value:.3f}"
     if key in ("stability_at_rail_exit", "min_stability"):
         return f"{value:.2f} cal"
     if key == "flight_time":
         return f"{value:.1f} s"
-    if key in ("apogee", "landing_drift"):
-        return f"{value:.0f} m"
-    return f"{value:.1f} m/s"
+    if key == "apogee":
+        return format_value(value, "altitude")
+    if key == "landing_drift":
+        return format_value(value, "distance")
+    return format_value(value, "velocity")
 
 
 class ReadoutValue(QLabel):
@@ -120,6 +123,14 @@ class ResultsWorkspace(QWidget):
         self.btn_clear_log.clicked.connect(self._clear_flight_log)
         self.btn_clear_log.setVisible(False)
         top.addWidget(self.btn_clear_log)
+
+        self.btn_report = QPushButton(icon("report"), "Technical Report…")
+        self.btn_report.setToolTip(
+            "One PDF for judges / range safety: vehicle, launch conditions, "
+            "flight, recovery, Monte Carlo dispersion, margins, rules check "
+            "and model limits.")
+        self.btn_report.clicked.connect(self._on_report)
+        top.addWidget(self.btn_report)
         layout.addLayout(top)
 
         # Summary
@@ -222,6 +233,10 @@ class ResultsWorkspace(QWidget):
         self.landing_plot = PlotWidget(title="Landing Footprint", xlabel="Downrange X (m)", ylabel="Crossrange Y (m)")
         self.tabs.addTab(self.landing_plot, "Landing")
 
+        from ui.widgets.rules_panel import RulesPanel
+        self.rules_panel = RulesPanel()
+        self.tabs.addTab(self.rules_panel, icon("check"), "Rules")
+
         layout.addWidget(self.tabs, 1)
 
     def _check_data(self, state):
@@ -292,6 +307,7 @@ class ResultsWorkspace(QWidget):
         # Summary — every number from the flight's FlightSummary.
         summary = getattr(self.sim_engine, "summary", None)
         self._show_summary(summary)
+        self.rules_panel.set_flights(summary, self.engine.state)
         status = summary.final_phase if summary is not None else "In flight"
         text = f"Flight: {status}  |  {history.count} data points"
         for c in (summary.canopies if summary is not None else []):
@@ -310,6 +326,49 @@ class ResultsWorkspace(QWidget):
                 f"\n📈 Log '{self._flight_log['source']}' — "
                 f"Measured apogee: {cmp['measured_apogee']:.1f} m  |  "
                 f"Sim error: {cmp['error_m']:+.1f} m ({cmp['error_pct']:+.1f}%)")
+
+    # ── Technical report ──
+
+    def report_inputs(self) -> dict:
+        """Everything the technical report can include, from wherever it
+        was computed. Missing pieces stay missing (the report says 'Not run')."""
+        main = self.window()
+        s = self.engine.state
+        out = {"state": s,
+               "summary": getattr(self.sim_engine, "summary", None),
+               "history": self._history if self._history is not None
+               else self._get_history(),
+               "rule_set": self.rules_panel.current_set(),
+               "rule_results": self.rules_panel.results() or None}
+        mc = getattr(main, "monte_carlo_ws", None)
+        if mc is not None and getattr(mc, "_results", None) is not None:
+            from ui.workspaces.monte_carlo_workspace import landing_dispersion, landing_points
+            out["dispersion"] = landing_dispersion(mc._results)
+            out["landings"] = landing_points(mc._results)
+        margins = {}
+        if getattr(s, "flutter_speed", 0.0) > 0:
+            margins["flutter_speed"] = s.flutter_speed
+        wks = getattr(getattr(main, "structures_ws", None), "_wks_report", None)
+        weakest = getattr(getattr(wks, "failure", None), "weakest", None)
+        if weakest is not None and weakest.margin > 0:
+            margins["structural_sf"] = weakest.margin
+            margins["structures_source"] = f"{weakest.name}, Structures workstation"
+        out["margins"] = margins
+        return out
+
+    def _on_report(self, path: str = None):
+        from core.technical_report import build_content, render_pdf
+        if not path:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Technical Report",
+                str(Path.home() / "Documents" / f"{self.engine.state.name}_report.pdf"),
+                "PDF (*.pdf)")
+            if not path:
+                return
+        inp = self.report_inputs()
+        rep = build_content(inp.pop("state"), inp.pop("summary"), **inp)
+        render_pdf(rep, path)
+        self.engine.log_message.emit(f"Technical report saved: {path}")
 
     def _show_summary(self, summary):
         for key, tile in self.summary_tiles.items():

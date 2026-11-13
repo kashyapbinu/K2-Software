@@ -154,9 +154,12 @@ _RESULTS_SCRIPT = textwrap.dedent("""
     ws.refresh_plots()
     s = sim.summary
     tiles = {{k: w.text() for k, w in ws.summary_tiles.items()}}
-    assert tiles["rail_exit_velocity"] == f"{{s.rail_exit_velocity:.1f}} m/s", tiles
-    assert tiles["apogee"] == f"{{s.apogee:.0f}} m", tiles
-    assert tiles["landing_velocity"] == f"{{s.landing_velocity:.1f}} m/s", tiles
+    assert tiles["rail_exit_velocity"] == f"{{s.rail_exit_velocity:,.1f}} m/s", tiles
+    assert tiles["apogee"] == f"{{s.apogee:,.0f}} m", tiles
+    assert tiles["landing_velocity"] == f"{{s.landing_velocity:,.1f}} m/s", tiles
+    assert ws.tabs.tabText(ws.tabs.count() - 1) == "Rules"
+    assert "pass" in ws.rules_panel.summary_label.text() or \
+        "not evaluated" in ws.rules_panel.summary_label.text()
     assert tiles["min_stability"].endswith(" cal"), tiles
     assert "Landed" in ws.summary_label.text()
     assert summary_text(None, "apogee") == "—"
