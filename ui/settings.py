@@ -22,6 +22,7 @@ DEFAULTS = {
     "startup/check_updates": True,
     "projects/default_dir": "",       # empty -> core.project_manager default
     "sim/confirm_on_exit": True,
+    "sim/launch_sites": "",           # user launch sites, JSON (core.launch_sites)
     # AI assistant (ai/providers.py). Keys live in QSettings — plaintext on disk.
     "ai/provider": "auto",            # auto | gemini | ollama | custom
     "ai/gemini_key": "",

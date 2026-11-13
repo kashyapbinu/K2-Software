@@ -150,6 +150,15 @@ class RocketState:
     sim_speed: float = 1.0
     integrator_name: str = "rk4"
 
+    # ── Launch site ───────────────────────────────────────────────
+    # Flight altitudes on this state are ABOVE THE PAD; launch_altitude is the
+    # pad's elevation above sea level, added wherever the air is looked up.
+    launch_altitude: float = 0.0          # pad elevation above sea level (m)
+    launch_latitude: float = 0.0          # deg, + north
+    launch_longitude: float = 0.0         # deg, + east
+    launch_azimuth: float = 0.0           # compass bearing the rail leans toward (deg)
+    launch_site_name: str = ""
+
     # ── Environment ───────────────────────────────────────────────
     launch_angle: float = 90.0
     launch_rod_length: float = 1.0        # guided length before free flight (m)
@@ -202,7 +211,11 @@ class RocketState:
     descent_time: float = 0.0             # apogee → landing duration (s)
 
     # ── Atmosphere Snapshot (updated each tick) ───────────────────
-    ground_temperature: float = 288.15    # launch-site temp (K) → ISA+ΔT offset
+    # Air temperature at the pad (K) → ISA+ΔT offset. 0 = standard day at the
+    # site elevation (environment.atmosphere_model.launch_site_atmosphere).
+    # Projects saved before launch sites hold 288.15, which at a sea-level
+    # pad is the same air.
+    ground_temperature: float = 0.0
     atm_temperature: float = 288.15
     atm_pressure: float = 101325.0
     atm_density: float = 1.225

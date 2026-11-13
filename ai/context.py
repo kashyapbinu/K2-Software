@@ -90,10 +90,14 @@ def summarize_state(state, assembly=None) -> dict:
 
     launch = {
         "launch_angle_deg": _f(state.launch_angle, 1),
+        "rail_azimuth_deg": _f(state.launch_azimuth, 0),
         "rod_length_m": _f(state.launch_rod_length, 2),
+        "site_elevation_m": _f(state.launch_altitude, 0),
         "wind_speed_m_s": _f(state.wind_speed, 1),
         "wind_from_deg": _f(state.wind_direction, 0),
-        "ground_temp_K": _f(state.ground_temperature, 1),
+        # 0 on the state means a standard day at the site elevation.
+        "ground_temp_K": (_f(state.ground_temperature, 1)
+                          if state.ground_temperature > 0 else "ISA"),
     }
     recovery = {
         "drogue_cd_area_m2": _f(state.drogue_cd_area, 2),

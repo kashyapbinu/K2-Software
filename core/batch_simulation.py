@@ -27,7 +27,7 @@ from typing import List, Optional
 import numpy as np
 
 from core.constants import G_EARTH, gravity_at_altitude
-from environment.atmosphere_model import Atmosphere
+from environment.atmosphere_model import launch_site_atmosphere
 from core.flight_dynamics import (attitude_step_limit, resolve_aero_frame,
                                   wrap_angle, yaw_euler_rate)
 from core.flight_phases import FlightPhase, PhaseManager
@@ -134,6 +134,11 @@ class BatchSimConfig:
     motor_isp: float = 0.0
     custom_thrust_curve: list = field(default_factory=list)
 
+    # ── Launch site (as on RocketState) ───────────────────────────
+    launch_altitude: float = 0.0          # pad elevation above sea level (m)
+    launch_azimuth: float = 0.0           # bearing the rail leans toward (deg)
+    ground_temperature: float = 0.0       # pad air temperature (K); 0 = ISA
+
     # ── Environment ───────────────────────────────────────────────
     launch_angle: float = 90.0
     launch_rod_length: float = 1.0        # guided length before free flight (m)
@@ -203,6 +208,10 @@ class BatchSimConfig:
             motor_burn_time=getattr(state, "motor_burn_time", 0.0),
             motor_isp=getattr(state, "motor_isp", 0.0),
             custom_thrust_curve=list(getattr(state, "custom_thrust_curve", [])),
+            # Launch site
+            launch_altitude=getattr(state, "launch_altitude", 0.0),
+            launch_azimuth=getattr(state, "launch_azimuth", 0.0),
+            ground_temperature=getattr(state, "ground_temperature", 0.0),
             # Environment
             launch_angle=getattr(state, "launch_angle", 90.0),
             launch_rod_length=getattr(state, "launch_rod_length", 1.0) or 1.0,
@@ -301,8 +310,18 @@ def config_problems(config: "BatchSimConfig") -> List[str]:
     for name in ("dry_mass", "diameter", "length", "sim_dt"):
         _check(name, positive=True)
     for name in ("propellant_mass", "motor_dry_mass", "wind_speed",
-                 "drogue_cd_area", "main_cd_area"):
+                 "drogue_cd_area", "main_cd_area", "launch_altitude",
+                 "ground_temperature"):
         _check(name, positive=False)
+    try:
+        azimuth_ok = math.isfinite(float(config.launch_azimuth))
+    except (TypeError, ValueError):
+        azimuth_ok = False
+    if not azimuth_ok:
+        problems.append(f"launch_azimuth is not a number ({config.launch_azimuth!r})")
+    if isinstance(config.launch_altitude, (int, float)) and config.launch_altitude > 20000.0:
+        problems.append(f"launch_altitude {config.launch_altitude:g} m is above "
+                        f"the 20 km a launch pad can sit at")
 
     raw = list(config.custom_thrust_curve or [])
     if raw:
@@ -416,7 +435,13 @@ def run_batch_simulation(
     rng = np.random.default_rng(seed)
 
     # ── Core modules (one per run — no shared state) ──────────────
-    atmosphere = Atmosphere()
+    # Read by height above the pad; same construction as the interactive
+    # engine (site elevation + pad temperature). The batch runner used to
+    # fly a sea-level ISA day whatever temperature the Simulation tab set.
+    atmosphere = launch_site_atmosphere(config.launch_altitude,
+                                        config.ground_temperature)
+    site_altitude = atmosphere.site_altitude
+    launch_yaw = math.radians(config.launch_azimuth)
     phase_mgr = PhaseManager()
     phase_mgr.reset()
     integrator = get_integrator(config.integrator_name, nan_guard=False)
@@ -489,7 +514,7 @@ def run_batch_simulation(
         0.0,            # 4  vy
         0.0,            # 5  vz
         launch_pitch,   # 6  pitch
-        0.0,            # 7  yaw
+        launch_yaw,     # 7  yaw: the rail's azimuth (compass bearing)
         0.0,            # 8  roll
         0.0,            # 9  pitch_rate
         0.0,            # 10 yaw_rate
@@ -555,15 +580,15 @@ def run_batch_simulation(
         on_rail = z < rod_len
         if on_rail or phase == FlightPhase.PRELAUNCH:
             pitch = launch_pitch
-            yaw = 0.0
+            yaw = launch_yaw
             pitch_rate_ = yaw_rate_ = roll_rate_ = 0.0
 
-        # Atmosphere
+        # Atmosphere (read by height above the pad)
         rho = atmosphere.density(z)
         a_sound = atmosphere.speed_of_sound(z)
 
-        # Altitude-dependent gravity
-        g = gravity_at_altitude(z)
+        # Altitude-dependent gravity, above sea level
+        g = gravity_at_altitude(z + site_altitude)
 
         # Wind (uses the proper WindModel with pink-noise turbulence)
         wind_vx, wind_vy, wind_vz = wind_model.get_wind_velocity(z, t_)

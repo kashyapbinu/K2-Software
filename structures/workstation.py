@@ -64,6 +64,15 @@ def speed_of_sound(T_K: float) -> float:
     return math.sqrt(1.4 * 287.05 * max(T_K, 1.0))
 
 
+def _site_altitude(state) -> float:
+    """Launch-site elevation above sea level (m). Flight altitudes are above
+    the pad; ISA wants them above sea level."""
+    try:
+        return float(getattr(state, "launch_altitude", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # 3.  FLIGHT LOAD IMPORT
 # ═════════════════════════════════════════════════════════════════════════════
@@ -79,6 +88,8 @@ class FlightLoads:
     max_dynamic_pressure: float = 0.0  # Pa
     max_thrust: float = 0.0       # N
     maxq_mach: float = 0.0
+    # The *_altitude fields are above SEA LEVEL (the ISA lookups here need
+    # that): the flight's height above the pad plus the launch-site elevation.
     maxq_altitude: float = 0.0    # m
     maxq_time: float = 0.0        # s
     maxmach_altitude: float = 0.0  # m (altitude at peak Mach — peak heating)
@@ -104,6 +115,7 @@ class FlightLoads:
         snap = history.get_snapshot(idx_q) if idx_q is not None else {}
         snap_m = history.get_snapshot(idx_m) if idx_m is not None else {}
         snap_thr = history.get_snapshot(idx_thr) if idx_thr is not None else {}
+        site = _site_altitude(state)
         wind = getattr(state, "wind_speed", 0.0) if state else 0.0
         mass = snap.get("mass", 0.0) or (state.total_mass() if state else 5.0)
         # Bending moment arm at max-Q = distance between centre of pressure and
@@ -116,10 +128,10 @@ class FlightLoads:
             max_acceleration=a_max, max_accel_g=a_max / G,
             max_dynamic_pressure=q_max, max_thrust=thr_max,
             maxq_mach=snap.get("mach", m_max),
-            maxq_altitude=snap.get("altitude", 0.0),
-            maxmach_altitude=snap_m.get("altitude", snap.get("altitude", 0.0)),
+            maxq_altitude=site + snap.get("altitude", 0.0),
+            maxmach_altitude=site + snap_m.get("altitude", snap.get("altitude", 0.0)),
             maxthrust_mach=snap_thr.get("mach", 0.0),
-            maxthrust_altitude=snap_thr.get("altitude", 0.0),
+            maxthrust_altitude=site + snap_thr.get("altitude", 0.0),
             maxq_time=t_q, wind_speed=wind,
             vehicle_mass=mass if mass > 0 else 5.0,
             moment_arm=arm,
@@ -142,8 +154,8 @@ class FlightLoads:
             max_dynamic_pressure=getattr(state, "dynamic_pressure", 0.0),
             max_thrust=getattr(state, "motor_max_thrust", 0.0) or getattr(state, "thrust", 0.0),
             maxq_mach=getattr(state, "max_mach", 0.0),
-            maxq_altitude=getattr(state, "altitude", 0.0),
-            maxmach_altitude=getattr(state, "altitude", 0.0),
+            maxq_altitude=_site_altitude(state) + getattr(state, "altitude", 0.0),
+            maxmach_altitude=_site_altitude(state) + getattr(state, "altitude", 0.0),
             wind_speed=getattr(state, "wind_speed", 0.0),
             vehicle_mass=mass if mass and mass > 0 else 5.0,
             moment_arm=abs(getattr(state, "cp", 0.0) - getattr(state, "cg", 0.0)),
@@ -363,12 +375,13 @@ def recovery_loads(state, history=None,
         _, apogee_alt, iap = history.find_max("altitude")
         snap = history.get_snapshot(min(iap + 1, len(history) - 1))
         v_drogue = max(abs(snap.get("velocity", 30.0)), 10.0)
-    _, _, rho_apogee = isa(apogee_alt if apogee_alt > 0 else 1000.0)
+    site = _site_altitude(state)
+    _, _, rho_apogee = isa(site + (apogee_alt if apogee_alt > 0 else 1000.0))
     rl.drogue_deploy_velocity = v_drogue
     rl.drogue_shock_N = 0.5 * rho_apogee * v_drogue ** 2 * drogue_cda * _SHOCK_FACTOR
 
     # ── Main deploys low: terminal velocity under drogue is the inflow speed ──
-    _, _, rho_main = isa(main_alt)
+    _, _, rho_main = isa(site + main_alt)
     v_main = math.sqrt(2 * mass * G / (rho_main * drogue_cda)) if drogue_cda > 0 else 30.0
     rl.main_deploy_velocity = v_main
     rl.main_shock_N = 0.5 * rho_main * v_main ** 2 * main_cda * _SHOCK_FACTOR
@@ -988,10 +1001,11 @@ def thermal_profile(state, flight: FlightLoads, history, material_name: str) -> 
     pts = []
     if history is not None and len(history) > 0:
         machs = history.get_values("mach")
-        alts = history.get_values("altitude")
+        alts = history.get_values("altitude")          # above the pad
+        site = _site_altitude(state)
         step = max(1, len(machs) // 40)
         for i in range(0, len(machs), step):
-            rr = thermal_at(machs[i], alts[i])
+            rr = thermal_at(machs[i], site + alts[i])  # the air is at site + h
             pts.append((alts[i], rr["thermal"] / 1e6))
     else:
         for alt in range(0, 12000, 500):

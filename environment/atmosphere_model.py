@@ -164,6 +164,81 @@ class Atmosphere:
         return abs(velocity) * characteristic_length / nu
 
 
+class SiteAtmosphere:
+    """An Atmosphere read by height above the launch pad.
+
+    The flight engines carry altitude above ground level (the pad is z = 0).
+    Every atmosphere lookup they make goes through this, which adds the site
+    elevation, so a flight from a 1,400 m pad meets the air at 1,400 m and
+    above instead of sea-level air. Before launch sites existed every flight
+    started at sea level.
+    """
+
+    def __init__(self, atmosphere: "Atmosphere", site_altitude: float = 0.0):
+        self.atmosphere = atmosphere
+        self.site_altitude = float(site_altitude)
+
+    @property
+    def temperature_offset(self) -> float:
+        return self.atmosphere.temperature_offset
+
+    @temperature_offset.setter
+    def temperature_offset(self, value: float) -> None:
+        self.atmosphere.temperature_offset = value
+
+    def above_sea_level(self, height: float) -> float:
+        """Height above the pad (m) → altitude above sea level (m)."""
+        return height + self.site_altitude
+
+    def temperature(self, height: float) -> float:
+        return self.atmosphere.temperature(height + self.site_altitude)
+
+    def pressure(self, height: float) -> float:
+        return self.atmosphere.pressure(height + self.site_altitude)
+
+    def density(self, height: float) -> float:
+        return self.atmosphere.density(height + self.site_altitude)
+
+    def speed_of_sound(self, height: float) -> float:
+        return self.atmosphere.speed_of_sound(height + self.site_altitude)
+
+    def mach_number(self, velocity: float, height: float) -> float:
+        return self.atmosphere.mach_number(velocity, height + self.site_altitude)
+
+    def dynamic_pressure(self, velocity: float, height: float) -> float:
+        return self.atmosphere.dynamic_pressure(velocity, height + self.site_altitude)
+
+    def kinematic_viscosity(self, height: float) -> float:
+        return self.atmosphere.kinematic_viscosity(height + self.site_altitude)
+
+    def reynolds_number(self, velocity: float, characteristic_length: float,
+                        height: float) -> float:
+        return self.atmosphere.reynolds_number(
+            velocity, characteristic_length, height + self.site_altitude)
+
+
+def launch_site_atmosphere(site_altitude: float = 0.0,
+                           ground_temperature: float = 0.0) -> SiteAtmosphere:
+    """The atmosphere a flight from this site flies through, read by height
+    above the pad. Both flight engines build theirs here.
+
+    *ground_temperature* is the air temperature at the pad (K); 0 means ISA.
+    The ISA+ΔT offset is taken against ISA **at the site elevation**, so the
+    pad reads exactly the temperature entered. (The offset used to be taken
+    against the sea-level 288.15 K, which was the same thing only while every
+    pad was at sea level.)
+    """
+    atm = Atmosphere()
+    if ground_temperature and ground_temperature > 0.0:
+        atm.temperature_offset = ground_temperature - atm.temperature(site_altitude)
+    return SiteAtmosphere(atm, site_altitude)
+
+
+def isa_temperature(altitude: float) -> float:
+    """Standard-day temperature (K) at *altitude* above sea level."""
+    return _DEFAULT.temperature(altitude)
+
+
 # ── Module-level convenience functions (backward-compatible) ──
 
 _DEFAULT = Atmosphere()

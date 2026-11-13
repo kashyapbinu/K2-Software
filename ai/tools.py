@@ -35,6 +35,8 @@ _SETTABLE = {
     "dry_mass":            ("dry_mass", "kg", float),
     "launch_angle":        ("launch_angle", "deg from horizontal", float),
     "launch_rod_length":   ("launch_rod_length", "m", float),
+    "launch_azimuth":      ("launch_azimuth", "deg compass bearing the rail leans toward", float),
+    "launch_altitude":     ("launch_altitude", "m pad elevation above sea level", float),
     "wind_speed":          ("wind_speed", "m/s", float),
     "wind_direction":      ("wind_direction", "deg", float),
     "main_deploy_altitude": ("main_deploy_altitude", "m AGL", float),

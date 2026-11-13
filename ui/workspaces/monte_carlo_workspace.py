@@ -146,6 +146,16 @@ class MonteCarloWorkspace(QWidget):
         self.spin_wind_speed.setDecimals(1)
         self.spin_wind_speed.setValue(10.0)
         f2.addRow("Speed ±:", self.spin_wind_speed)
+        self.spin_wind_speed_ms = QDoubleSpinBox()
+        self.spin_wind_speed_ms.setRange(0, 20)
+        self.spin_wind_speed_ms.setSuffix(" m/s")
+        self.spin_wind_speed_ms.setDecimals(1)
+        self.spin_wind_speed_ms.setValue(0.0)
+        self.spin_wind_speed_ms.setToolTip(
+            "Absolute wind-speed uncertainty (1σ), combined with the % above "
+            "in quadrature. Use it when the forecast is calm: a percentage of "
+            "zero wind is zero scatter.")
+        f2.addRow("Speed ± (abs):", self.spin_wind_speed_ms)
         self.spin_wind_dir = QDoubleSpinBox()
         self.spin_wind_dir.setRange(0, 45)
         self.spin_wind_dir.setSuffix(" °")
@@ -518,6 +528,7 @@ class MonteCarloWorkspace(QWidget):
         config = MonteCarloConfig(
             num_simulations=self.spin_num.value(),
             wind_speed_uncertainty_pct=self.spin_wind_speed.value(),
+            wind_speed_uncertainty_ms=self.spin_wind_speed_ms.value(),
             wind_direction_uncertainty_deg=self.spin_wind_dir.value(),
             dry_mass_uncertainty_pct=self.spin_dry_mass.value(),
             drag_coeff_uncertainty_pct=self.spin_cd.value(),

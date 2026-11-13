@@ -27,7 +27,7 @@ import numpy as np
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from core.constants import G_EARTH
-from environment.atmosphere_model import Atmosphere
+from environment.atmosphere_model import launch_site_atmosphere
 from core.flight_phases import FlightPhase, PhaseManager
 from core.integrators import get_integrator
 from core.event_manager import EventManager, SimEvent
@@ -68,7 +68,9 @@ class SimulationEngine(QObject):
         self._paused = False
 
         # ── Core modules ──
-        self.atmosphere = Atmosphere()
+        self.atmosphere = launch_site_atmosphere()   # rebuilt per flight in start()
+        self._site_altitude = 0.0
+        self._launch_yaw = 0.0
         self.phase_mgr = PhaseManager()
         self.event_mgr = EventManager()
         self.history = HistoryManager()
@@ -216,9 +218,12 @@ class SimulationEngine(QObject):
         else:
             self.wind_model = WindModel(wind_speed, wind_dir, wind_gust)
 
-        # Launch-site temperature → ISA+ΔT atmosphere offset
-        self.atmosphere.temperature_offset = (
-            getattr(s, 'ground_temperature', 288.15) - 288.15)
+        # The air at this launch site, read by height above the pad: site
+        # elevation, and the pad temperature as an ISA+ΔT offset.
+        self.atmosphere = launch_site_atmosphere(
+            getattr(s, 'launch_altitude', 0.0), getattr(s, 'ground_temperature', 0.0))
+        self._site_altitude = self.atmosphere.site_altitude
+        self._launch_yaw = math.radians(getattr(s, 'launch_azimuth', 0.0))
 
         # Reset modules
         self.phase_mgr.reset()
@@ -517,16 +522,16 @@ class SimulationEngine(QObject):
         if on_rail or self._phase == FlightPhase.PRELAUNCH:
             launch_pitch = math.radians(getattr(s, 'launch_angle', 90.0))
             pitch = launch_pitch
-            yaw = 0.0
+            yaw = self._launch_yaw
             pitch_rate = yaw_rate = roll_rate = 0.0
 
-        # Atmosphere
+        # Atmosphere (self.atmosphere is read by height above the pad)
         rho = self.atmosphere.density(z)
         a_sound = self.atmosphere.speed_of_sound(z)
 
-        # Altitude-dependent gravity
+        # Altitude-dependent gravity, above sea level
         from core.constants import gravity_at_altitude
-        g = gravity_at_altitude(z)
+        g = gravity_at_altitude(z + self._site_altitude)
 
         # Wind
         wind_vx, wind_vy, wind_vz = self.wind_model.get_wind_velocity(z, t)
@@ -888,7 +893,7 @@ class SimulationEngine(QObject):
                 0.0,               # vy
                 s.velocity,        # vz
                 launch_pitch,      # pitch
-                0.0,               # yaw
+                self._launch_yaw,  # yaw: the rail's azimuth (compass bearing)
                 0.0,               # roll
                 0.0,               # pitch_rate
                 0.0,               # yaw_rate
@@ -1170,7 +1175,8 @@ class SimulationEngine(QObject):
         from core.constants import gravity_at_altitude
         from physics.structures import compute_all
         from structures.thermal_analysis import recovery_temperature
-        net_force    = thrust - drag_force - new_mass * gravity_at_altitude(new_altitude)
+        g_here       = gravity_at_altitude(new_altitude + self._site_altitude)
+        net_force    = thrust - drag_force - new_mass * g_here
 
         # Aerodynamic skin heating: adiabatic-wall (recovery) temperature is the
         # conservative skin temp; thermal stress is driven by its rise above the
@@ -1198,7 +1204,7 @@ class SimulationEngine(QObject):
         # descent structural margin reflects the snatch load, not just weight.
         struct_res = compute_all(
             force=max(abs(net_force), abs(thrust),
-                      new_mass * gravity_at_altitude(new_altitude),
+                      new_mass * g_here,
                       drag_force if (self._drogue_deployed or self._main_deployed) else 0.0),
             diameter=s.diameter,
             wall_thickness=getattr(s, 'wall_thickness', 0.002),
@@ -1389,8 +1395,10 @@ class SimulationEngine(QObject):
             if self.spent_stages:
                 from core.spent_stage import propagate_all
                 from core.constants import gravity_at_altitude as _g
+                site = self._site_altitude
                 self.spent_stage_results = propagate_all(
-                    self.spent_stages, self.atmosphere, self.wind_model, _g)
+                    self.spent_stages, self.atmosphere, self.wind_model,
+                    lambda z: _g(z + site))
                 for snap, r in zip(self.spent_stages, self.spent_stage_results):
                     self.engine.log_message.emit(
                         f"Spent stage '{snap.get('name','')}' landed "

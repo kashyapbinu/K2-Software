@@ -58,6 +58,7 @@ class MonteCarloConfig:
 
     # Perturbation σ values
     wind_speed_uncertainty_pct: float = 10.0       # % of nominal wind speed
+    wind_speed_uncertainty_ms: float = 0.0         # m/s σ, added in quadrature
     wind_direction_uncertainty_deg: float = 15.0    # degrees σ
     motor_impulse_uncertainty_pct: float = 5.0      # % of nominal
     dry_mass_uncertainty_pct: float = 3.0           # % of nominal
@@ -494,9 +495,12 @@ class MonteCarloEngine(QObject):
             # per-layer independent noise would create unphysical shear).
             speed_scale = max(0.0, 1.0 + _cg(
                 rng, mc.wind_speed_uncertainty_pct / 100.0))
+            speed_shift = _cg(rng, mc.wind_speed_uncertainty_ms) \
+                if mc.wind_speed_uncertainty_ms > 0 else 0.0
             dir_offset = _cg(rng, mc.wind_direction_uncertainty_deg)
             cfg.wind_layers = [
-                (alt, spd * speed_scale, (drn + dir_offset) % 360.0)
+                (alt, max(0.0, spd * speed_scale + speed_shift),
+                 (drn + dir_offset) % 360.0)
                 for alt, spd, drn in base.wind_layers
             ]
             # Log ground-layer values so correlation/scatter plots stay meaningful
@@ -507,14 +511,22 @@ class MonteCarloEngine(QObject):
             # is meaningless — a -3 deg perturbation logs as 357.
             params["wind_direction_offset"] = dir_offset
         else:
-            # Wind speed: σ = base * pct / 100
-            ws_sigma = max(base.wind_speed * mc.wind_speed_uncertainty_pct / 100.0, 0.01)
-            cfg.wind_speed = max(0.0, base.wind_speed + _cg(rng, ws_sigma))
+            # Wind speed: the percentage of the base speed and the absolute
+            # m/s, added in quadrature (independent error sources). With only
+            # a percentage, a calm baseline had no wind scatter at all.
+            ws_sigma = max(math.hypot(
+                base.wind_speed * mc.wind_speed_uncertainty_pct / 100.0,
+                mc.wind_speed_uncertainty_ms), 0.01)
+            speed = base.wind_speed + _cg(rng, ws_sigma)
+            # A sample below zero is wind from the opposite bearing, not calm:
+            # clamping it to 0 made half of a calm forecast's runs windless.
+            reverse = 180.0 if speed < 0.0 else 0.0
+            cfg.wind_speed = abs(speed)
             params["wind_speed"] = cfg.wind_speed
 
             # Wind direction: σ = deg
             dir_offset = _cg(rng, mc.wind_direction_uncertainty_deg)
-            cfg.wind_direction = base.wind_direction + dir_offset
+            cfg.wind_direction = base.wind_direction + dir_offset + reverse
             params["wind_direction"] = cfg.wind_direction
             params["wind_direction_offset"] = dir_offset
 

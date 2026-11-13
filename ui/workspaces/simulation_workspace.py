@@ -6,12 +6,17 @@ import logging
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
     QFormLayout, QLabel, QPushButton, QDoubleSpinBox, QComboBox,
     QFrame, QGridLayout, QProgressBar, QScrollArea, QStackedWidget,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QMessageBox)
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QMessageBox,
+    QCheckBox, QInputDialog)
 from PyQt6.QtCore import Qt
 from core.flight_phases import FlightPhase, PHASE_COLORS
+from core import launch_sites
 from ui.icons import icon
 
 from ui import theme
+from ui import settings
+
+CUSTOM_SITE = "Custom"
 
 logger = logging.getLogger("K2.SimWS")
 
@@ -115,6 +120,9 @@ class SimulationWorkspace(QWidget):
         left_col = QVBoxLayout()
         left_col.setSpacing(10)
 
+        # Launch site
+        left_col.addWidget(self._build_site_group())
+
         # Environment settings
         env_group = QGroupBox("Environment")
         ef = QFormLayout(); ef.setSpacing(6)
@@ -123,6 +131,17 @@ class SimulationWorkspace(QWidget):
         self.angle_spin.setRange(0, 90); self.angle_spin.setValue(90); self.angle_spin.setSuffix("°")
         self.angle_spin.valueChanged.connect(lambda v: self.engine.update(launch_angle=v))
         ef.addRow("Launch Angle:", self.angle_spin)
+
+        self.azimuth_spin = QDoubleSpinBox()
+        self.azimuth_spin.setRange(0, 360); self.azimuth_spin.setValue(0)
+        self.azimuth_spin.setSuffix("°"); self.azimuth_spin.setDecimals(0)
+        self.azimuth_spin.setWrapping(True)
+        self.azimuth_spin.setToolTip(
+            "Compass bearing the rail leans toward (0 = N, 90 = E). Matters "
+            "only when the launch angle is below 90°.")
+        self.azimuth_spin.valueChanged.connect(
+            lambda v: self.engine.update(launch_azimuth=v % 360.0))
+        ef.addRow("Rail Azimuth:", self.azimuth_spin)
 
         self.rod_spin = QDoubleSpinBox()
         self.rod_spin.setRange(0.3, 15.0); self.rod_spin.setValue(1.0)
@@ -134,12 +153,22 @@ class SimulationWorkspace(QWidget):
             lambda v: self.engine.update(launch_rod_length=v))
         ef.addRow("Launch Rod:", self.rod_spin)
 
+        self.isa_check = QCheckBox("Standard day (ISA)")
+        self.isa_check.setChecked(True)
+        self.isa_check.setToolTip(
+            "Use the standard-atmosphere temperature at the site's elevation. "
+            "Untick to enter the air temperature measured at the pad.")
+        self.isa_check.toggled.connect(self._on_isa_toggled)
+        ef.addRow("Air:", self.isa_check)
+
         self.temp_spin = QDoubleSpinBox()
         self.temp_spin.setRange(200, 330); self.temp_spin.setValue(288.15); self.temp_spin.setSuffix(" K")
         self.temp_spin.setDecimals(1)
+        self.temp_spin.setEnabled(False)
+        self.temp_spin.setToolTip("Air temperature at the pad.")
         self.temp_spin.valueChanged.connect(
             lambda v: self.engine.update(ground_temperature=v))
-        ef.addRow("Temperature:", self.temp_spin)
+        ef.addRow("Pad Temperature:", self.temp_spin)
 
         env_group.setLayout(ef)
         left_col.addWidget(env_group)
@@ -378,6 +407,133 @@ class SimulationWorkspace(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
 
+    # ── Launch site ───────────────────────────────────────────────
+
+    def _build_site_group(self):
+        group = QGroupBox("Launch Site")
+        form = QFormLayout(); form.setSpacing(6)
+
+        row = QHBoxLayout()
+        self.site_combo = QComboBox()
+        self.site_combo.setToolTip("Saved launch sites. Editing a value below makes it 'Custom'.")
+        self.site_combo.activated.connect(self._on_site_chosen)
+        row.addWidget(self.site_combo, 1)
+        self.btn_site_save = QPushButton(icon("save"), "")
+        self.btn_site_save.setToolTip("Save these values as a named site")
+        self.btn_site_save.clicked.connect(self._on_site_save)
+        row.addWidget(self.btn_site_save)
+        self.btn_site_delete = QPushButton(icon("delete", color=theme.ERR), "")
+        self.btn_site_delete.setToolTip("Delete the selected saved site")
+        self.btn_site_delete.clicked.connect(self._on_site_delete)
+        row.addWidget(self.btn_site_delete)
+        form.addRow("Site:", row)
+
+        self.site_note = QLabel("")
+        self.site_note.setWordWrap(True)
+        self.site_note.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px;")
+        form.addRow(self.site_note)
+
+        def _spin(lo, hi, decimals, suffix, field):
+            sp = QDoubleSpinBox()
+            sp.setRange(lo, hi); sp.setDecimals(decimals); sp.setSuffix(suffix)
+            sp.valueChanged.connect(
+                lambda v, f=field: self.engine.update(**{f: v, "launch_site_name": ""}))
+            return sp
+
+        self.site_alt_spin = _spin(-500.0, 9000.0, 0, " m", "launch_altitude")
+        self.site_alt_spin.setToolTip("Pad elevation above sea level. The flight's "
+                                      "altitudes are above the pad.")
+        form.addRow("Elevation:", self.site_alt_spin)
+        self.site_lat_spin = _spin(-90.0, 90.0, 5, "°", "launch_latitude")
+        self.site_lat_spin.setToolTip("Latitude, + north")
+        form.addRow("Latitude:", self.site_lat_spin)
+        self.site_lon_spin = _spin(-180.0, 180.0, 5, "°", "launch_longitude")
+        self.site_lon_spin.setToolTip("Longitude, + east")
+        form.addRow("Longitude:", self.site_lon_spin)
+
+        group.setLayout(form)
+        self._reload_sites()
+        return group
+
+    def _sites(self):
+        return launch_sites.all_sites(settings.get("sim/launch_sites") or "")
+
+    def _reload_sites(self, select: str = None):
+        self._site_list = self._sites()
+        self.site_combo.blockSignals(True)
+        self.site_combo.clear()
+        for site in self._site_list:
+            self.site_combo.addItem(site.name)
+        self.site_combo.addItem(CUSTOM_SITE)
+        self.site_combo.blockSignals(False)
+        self._select_site(select if select is not None
+                          else self.engine.state.launch_site_name)
+
+    def _select_site(self, name: str):
+        idx = self.site_combo.findText(name) if name else -1
+        if idx < 0:
+            idx = self.site_combo.findText(CUSTOM_SITE)
+        self.site_combo.blockSignals(True)
+        self.site_combo.setCurrentIndex(idx)
+        self.site_combo.blockSignals(False)
+        site = self._site_by_name(self.site_combo.currentText())
+        self.site_note.setText(site.note if site else "")
+        self.site_note.setVisible(bool(site and site.note))
+        self.btn_site_delete.setEnabled(bool(site and not site.builtin))
+
+    def _site_by_name(self, name: str):
+        return next((s for s in getattr(self, "_site_list", []) if s.name == name), None)
+
+    def _on_site_chosen(self, index: int):
+        site = self._site_by_name(self.site_combo.itemText(index))
+        if site is None:            # "Custom": keep the values as they are
+            self.engine.update(launch_site_name="")
+        else:
+            self.engine.update(**site.state_fields())
+        self._select_site(site.name if site else CUSTOM_SITE)
+
+    def _on_site_save(self):
+        s = self.engine.state
+        name, ok = QInputDialog.getText(self, "Save Launch Site", "Site name:",
+                                        text=s.launch_site_name or "")
+        if not ok or not name.strip():
+            return
+        site = launch_sites.LaunchSite(
+            name=name.strip(), altitude=s.launch_altitude,
+            latitude=s.launch_latitude, longitude=s.launch_longitude,
+            note="Saved by you.")
+        problems = site.problems()
+        if problems:
+            QMessageBox.warning(self, "Save Launch Site", "\n".join(problems))
+            return
+        settings.set("sim/launch_sites", launch_sites.with_site(
+            settings.get("sim/launch_sites") or "", site))
+        self.engine.update(launch_site_name=site.name)
+        self._reload_sites(select=site.name)
+
+    def _on_site_delete(self):
+        site = self._site_by_name(self.site_combo.currentText())
+        if site is None or site.builtin:
+            return
+        settings.set("sim/launch_sites", launch_sites.without_site(
+            settings.get("sim/launch_sites") or "", site.name))
+        self.engine.update(launch_site_name="")
+        self._reload_sites(select=CUSTOM_SITE)
+
+    def _on_isa_toggled(self, standard_day: bool):
+        """Standard day stores 0 (ISA at the site). Unticking starts the pad
+        temperature from the standard value at this elevation."""
+        self.temp_spin.setEnabled(not standard_day)
+        if standard_day:
+            self.engine.update(ground_temperature=0.0)
+        else:
+            from environment.atmosphere_model import isa_temperature
+            t = round(isa_temperature(self.engine.state.launch_altitude), 1)
+            self.temp_spin.blockSignals(True)
+            self.temp_spin.setValue(t)
+            self.temp_spin.blockSignals(False)
+            self.engine.update(ground_temperature=t)
+
     # ── Actions ──
 
     def _on_run(self):
@@ -557,8 +713,21 @@ class SimulationWorkspace(QWidget):
 
         gust = getattr(s, "wind_gust_intensity", 0.0) or 0.0
         _show(self.angle_spin, s.launch_angle)
+        _show(self.azimuth_spin, s.launch_azimuth)
         _show(self.rod_spin, s.launch_rod_length)
-        _show(self.temp_spin, s.ground_temperature)
+        _show(self.site_alt_spin, s.launch_altitude)
+        _show(self.site_lat_spin, s.launch_latitude)
+        _show(self.site_lon_spin, s.launch_longitude)
+        if self.site_combo.currentText() != (s.launch_site_name or CUSTOM_SITE):
+            self._select_site(s.launch_site_name)
+        standard_day = not (s.ground_temperature and s.ground_temperature > 0)
+        if self.isa_check.isChecked() != standard_day:
+            self.isa_check.blockSignals(True)
+            self.isa_check.setChecked(standard_day)
+            self.isa_check.blockSignals(False)
+        self.temp_spin.setEnabled(not standard_day)
+        if not standard_day:
+            _show(self.temp_spin, s.ground_temperature)
         _show(self.wind_spin, s.wind_speed)
         _show(self.wind_dir_spin, s.wind_direction)
         _show(self.wind_turb_spin, gust * 100.0)
