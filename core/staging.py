@@ -103,6 +103,27 @@ class StageConfig:
         return self.dry_mass + self.motor_dry_mass + self.current_propellant_mass
 
 
+def sanitize_thrust_curve(points) -> list:
+    """A custom thrust curve as time-ordered ``(t, F)`` float pairs.
+
+    The interpolators walk the curve segment by segment and stop at the last
+    point's time, so they need it in time order. Points pasted or imported out
+    of order used to be flown as given: the same four points shuffled gave a
+    724 m apogee instead of 569 m, with no warning. Points that are not finite
+    numbers are dropped (one NaN sample used to poison the whole burn).
+    """
+    clean = []
+    for p in points or []:
+        try:
+            t, f = float(p[0]), float(p[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if math.isfinite(t) and math.isfinite(f):
+            clean.append((t, f))
+    clean.sort(key=lambda p: p[0])
+    return clean
+
+
 def build_thrust_curve(cfg: StageConfig) -> list:
     """Trapezoidal thrust curve normalized to true total impulse (avg×burn).
 
@@ -110,7 +131,7 @@ def build_thrust_curve(cfg: StageConfig) -> list:
     produces the identical curve to the legacy scalar path.
     """
     if cfg.custom_thrust_curve:
-        return sorted((float(t), float(f)) for t, f in cfg.custom_thrust_curve)
+        return sanitize_thrust_curve(cfg.custom_thrust_curve)
 
     bt = cfg.motor_burn_time
     avg = cfg.motor_avg_thrust
@@ -300,6 +321,38 @@ def assembly_aero_geometry(assembly) -> dict:
         geom["transitions"] += [t for t in (transition_fields(c)
                                             for c in _descendants(stage)) if t]
     return geom
+
+
+def assembly_recovery(assembly) -> dict:
+    """The Design tab's parachutes as the state's recovery drag areas.
+
+    Returns ``{}`` when the design has no parachute, so the values set in the
+    Simulation tab stand. Otherwise ``drogue_cd_area`` and ``main_cd_area``
+    (Cd × canopy area, m²).
+
+    The sim read these two numbers from the Simulation tab alone. A parachute
+    drawn in the Design tab, or imported from an OpenRocket file, changed the
+    mass and nothing else: every design came down under the default 0.5 m² and
+    3.0 m² canopies.
+
+    Only the top stage's parachutes count; that is the part the flight follows
+    to the ground. With one parachute it opens at apogee (the drogue slot) and
+    nothing is added at the main-deploy altitude. With two or more, the
+    smallest opens at apogee and the largest at the main-deploy altitude.
+    """
+    from core.components import Parachute
+
+    stages = list(getattr(assembly, "stages", []) or [])
+    if not stages:
+        return {}
+    areas = sorted(
+        max(0.0, float(c.cd)) * math.pi * (max(0.0, float(c.diameter)) / 2.0) ** 2
+        for c in _descendants(stages[0]) if isinstance(c, Parachute))
+    if not areas:
+        return {}
+    if len(areas) == 1:
+        return {"drogue_cd_area": areas[0], "main_cd_area": 0.0}
+    return {"drogue_cd_area": areas[0], "main_cd_area": areas[-1]}
 
 
 def build_stages_config(assembly) -> list:

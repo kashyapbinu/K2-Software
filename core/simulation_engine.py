@@ -443,7 +443,13 @@ class SimulationEngine(QObject):
         s = self.engine.state
         
         if hasattr(s, "custom_thrust_curve") and s.custom_thrust_curve:
-            self._thrust_curve = list(s.custom_thrust_curve)
+            from core.staging import sanitize_thrust_curve
+            curve = sanitize_thrust_curve(s.custom_thrust_curve)
+            if len(curve) != len(s.custom_thrust_curve):
+                logger.warning(
+                    "Custom thrust curve: dropped %d non-numeric point(s)",
+                    len(s.custom_thrust_curve) - len(curve))
+            self._thrust_curve = curve
             return
 
         bt = s.motor_burn_time

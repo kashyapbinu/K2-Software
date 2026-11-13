@@ -223,9 +223,10 @@ class DesignWorkspace(QWidget):
         # Nose and fin dimensions go with the rest. The sim builds its own
         # AeroModel from these flat fields, and sized a generic fin from the
         # body wherever one was still zero.
-        from core.staging import assembly_aero_geometry
+        from core.staging import assembly_aero_geometry, assembly_recovery
 
         self.engine.update(
+            **assembly_recovery(asm),
             name=asm.name,
             length=asm.total_length(),
             diameter=asm.max_diameter(),

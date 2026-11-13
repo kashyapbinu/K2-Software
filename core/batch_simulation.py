@@ -32,8 +32,10 @@ from core.flight_dynamics import (attitude_step_limit, resolve_aero_frame,
                                   wrap_angle, yaw_euler_rate)
 from core.flight_phases import FlightPhase, PhaseManager
 from core.integrators import get_integrator
+from core.staging import sanitize_thrust_curve
 from physics.aerodynamics import AeroModel, compute_pitching_moment_coefficient
 from environment.wind_model import WindModel, MultiLevelWindModel
+from recovery.parachute_dynamics import RecoverySystem
 
 logger = logging.getLogger("K2.BatchSim")
 
@@ -54,6 +56,9 @@ _DIVERGENCE_MARKERS = (
     "divergence",
     "integration error",
     "simulation error",
+    # A config that cannot be flown at all (see config_problems): there is no
+    # trajectory behind the result, so it must not enter flight statistics.
+    "invalid configuration",
 )
 
 
@@ -142,6 +147,7 @@ class BatchSimConfig:
     main_deploy_altitude: float = 300.0
     drogue_cd_area: float = 0.5
     main_cd_area: float = 3.0
+    recovery_inflation_time: float = 0.6  # canopy fill time (s); main scaled 2×
 
     # ── Simulation ────────────────────────────────────────────────
     sim_dt: float = 0.01
@@ -209,6 +215,7 @@ class BatchSimConfig:
             main_deploy_altitude=getattr(state, "main_deploy_altitude", 300.0),
             drogue_cd_area=getattr(state, "drogue_cd_area", 0.5),
             main_cd_area=getattr(state, "main_cd_area", 3.0),
+            recovery_inflation_time=getattr(state, "recovery_inflation_time", 0.6),
             # Simulation
             sim_dt=getattr(state, "sim_dt", 0.01),
             integrator_name=getattr(state, "integrator_name", "rk4"),
@@ -234,6 +241,11 @@ class BatchSimResult:
 
     flight_time: float = 0.0
     rail_exit_velocity: float = 0.0
+    # Descent rate at touchdown (m/s, positive down). 0 when the run never
+    # came back to the ground.
+    landing_velocity: float = 0.0
+    drogue_deployed: bool = False
+    main_deployed: bool = False
 
     min_stability_margin: float = float("inf")
     max_dynamic_pressure: float = 0.0
@@ -241,17 +253,62 @@ class BatchSimResult:
     final_phase: str = ""
     success: bool = True
     failure_reasons: List[str] = field(default_factory=list)
+    # Things a caller should know about a flight that did run: it went
+    # unstable, or came down with no canopy out. `success` stays True for
+    # these (the trajectory is real); what counts as a failed mission is the
+    # caller's decision.
+    warnings: List[str] = field(default_factory=list)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Internal helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
+def config_problems(config: "BatchSimConfig") -> List[str]:
+    """Reasons *config* cannot be flown at all; empty when it can.
+
+    The interactive engine refuses an unflyable setup before it starts. This
+    runner had no such check and integrated whatever it was given: zero dry
+    mass or a zero time step never returned, zero diameter flew drag-free to
+    three times the real apogee and reported success, and a negative time
+    step ran the clock backwards.
+    """
+    problems: List[str] = []
+
+    def _check(name: str, positive: bool) -> None:
+        value = getattr(config, name)
+        try:
+            ok = math.isfinite(float(value))
+        except (TypeError, ValueError):
+            ok = False
+        if not ok:
+            problems.append(f"{name} is not a number ({value!r})")
+        elif positive and value <= 0:
+            problems.append(f"{name} must be greater than zero (got {value:g})")
+        elif value < 0:
+            problems.append(f"{name} cannot be negative (got {value:g})")
+
+    for name in ("dry_mass", "diameter", "length", "sim_dt"):
+        _check(name, positive=True)
+    for name in ("propellant_mass", "motor_dry_mass", "wind_speed",
+                 "drogue_cd_area", "main_cd_area"):
+        _check(name, positive=False)
+
+    raw = list(config.custom_thrust_curve or [])
+    if raw:
+        clean = sanitize_thrust_curve(raw)
+        if len(clean) != len(raw):
+            problems.append("custom thrust curve has points that are not numbers")
+        elif len(clean) < 2:
+            problems.append("custom thrust curve needs at least two points")
+    return problems
+
+
 def _build_thrust_curve(cfg: BatchSimConfig) -> List[tuple]:
     """Build a simplified trapezoidal thrust curve from motor params,
-    or return the custom curve verbatim."""
+    or return the custom curve in time order."""
     if cfg.custom_thrust_curve:
-        return [(t, v) for t, v in cfg.custom_thrust_curve]
+        return sanitize_thrust_curve(cfg.custom_thrust_curve)
 
     bt = cfg.motor_burn_time
     avg_t = cfg.motor_avg_thrust
@@ -363,6 +420,17 @@ def run_batch_simulation(
     BatchSimResult
         Summary statistics (apogee, max-V, landing point, …).
     """
+    # ── Refuse a config that cannot be flown ──────────────────────
+    problems = config_problems(config)
+    if problems:
+        logger.warning("Batch sim not run — %s", "; ".join(problems))
+        return BatchSimResult(
+            min_stability_margin=0.0,
+            final_phase=FlightPhase.PRELAUNCH.value,
+            success=False,
+            failure_reasons=["Invalid configuration: " + "; ".join(problems)],
+        )
+
     # ── Thread-local RNG ──────────────────────────────────────────
     rng = np.random.default_rng(seed)
 
@@ -413,6 +481,19 @@ def run_batch_simulation(
     # ── Thrust curve ──────────────────────────────────────────────
     thrust_curve = _build_thrust_curve(config)
 
+    # ── Recovery (the same inflation-aware model the interactive engine
+    # flies). This runner used to switch the full drag area on in one step
+    # and counted the drogue OR the main, never both, so the same rocket
+    # descended differently here than in the Simulation tab, and a canopy
+    # opening at speed registered as a four-digit-g spike.
+    recovery = RecoverySystem.from_cd_areas(
+        drogue_cd_area=config.drogue_cd_area,
+        main_cd_area=config.main_cd_area,
+        main_deploy_altitude=config.main_deploy_altitude,
+        drogue_delay=config.drogue_deploy_delay,
+        inflation_time=config.recovery_inflation_time,
+    )
+
     # ── Initial 6DOF state vector ─────────────────────────────────
     launch_pitch = math.radians(config.launch_angle)
     total_mass = config.dry_mass + config.motor_dry_mass + config.propellant_mass
@@ -442,6 +523,7 @@ def run_batch_simulation(
     prev_dt = config.sim_dt
     initial_prop_mass = config.propellant_mass
     rail_exit_detected = False
+    touchdown_speed = 0.0
     # Peak force-based acceleration (F/m, excluding gravity). Tracked as a
     # running max across ALL derivative evaluations — RK4 calls _derivatives
     # 4× per step, so capturing only the last stage missed the true peak.
@@ -578,12 +660,9 @@ def run_batch_simulation(
             M_pitch = 0.0
             M_yaw = 0.0
 
-        # Recovery drag override
-        if drogue_deployed and not main_deployed and vz < 0:
-            F_drag = 0.5 * rho * v_rel**2 * config.drogue_cd_area
-            F_normal = M_pitch = M_yaw = 0.0
-        elif main_deployed and vz < 0:
-            F_drag = 0.5 * rho * v_rel**2 * config.main_cd_area
+        # Recovery drag override (inflation-aware, drogue + main)
+        if (drogue_deployed or main_deployed) and vz < 0:
+            F_drag = recovery.get_drag_force(rho, v_rel, t_)
             F_normal = M_pitch = M_yaw = 0.0
 
         # Roll damping (simple model)
@@ -740,6 +819,9 @@ def run_batch_simulation(
             prev_dt = adaptive_dt
 
             # ── Integrate ─────────────────────────────────────────
+            prev_z = max(0.0, state_vec[2])
+            prev_speed = math.sqrt(
+                state_vec[3]**2 + state_vec[4]**2 + state_vec[5]**2)
             try:
                 new_vec = integrator.step(state_vec, t, adaptive_dt, _derivatives)
             except Exception as exc:
@@ -751,6 +833,9 @@ def run_batch_simulation(
             if new_vec[2] < 0.0:
                 new_vec[2] = 0.0
                 if new_vec[5] < 0.0:
+                    # Descent rate the vehicle met the ground with; the clamp
+                    # below would otherwise erase it.
+                    touchdown_speed = -new_vec[5]
                     new_vec[5] = 0.0
 
             # Enforce mass floor (structure + spent motor casing)
@@ -813,9 +898,19 @@ def run_batch_simulation(
                     if sm < result.min_stability_margin:
                         result.min_stability_margin = sm
 
-            # Rail exit velocity: first time altitude exceeds rocket length
-            if not rail_exit_detected and cur_z >= body_length and body_length > 0:
-                result.rail_exit_velocity = cur_speed
+            # Rail exit velocity: the speed as the rocket clears the launch
+            # rod — the same `rod_len` that releases the attitude above. It
+            # was read at the rocket's own length, so a 0.1 m rod and a 10 m
+            # rail reported the same number, and it was sampled at whichever
+            # step landed past the mark (24.3 m/s at dt 0.01, 31.6 at 0.05).
+            # Interpolated on v², which is linear in distance at constant
+            # acceleration.
+            if not rail_exit_detected and cur_z >= rod_len:
+                dz = cur_z - prev_z
+                frac = (rod_len - prev_z) / dz if dz > 1e-12 else 1.0
+                frac = max(0.0, min(1.0, frac))
+                result.rail_exit_velocity = math.sqrt(max(
+                    0.0, prev_speed**2 + frac * (cur_speed**2 - prev_speed**2)))
                 rail_exit_detected = True
 
             # ── Phase evaluation ──────────────────────────────────
@@ -829,9 +924,13 @@ def run_batch_simulation(
             # ── Recovery deployment ───────────────────────────────
             if phase == FlightPhase.DROGUE_DESCENT and not drogue_deployed:
                 drogue_deployed = True
+                recovery.drogue.deploy(t)
+                recovery.drogue_deployed = True
 
             if phase == FlightPhase.MAIN_DESCENT and not main_deployed:
                 main_deployed = True
+                recovery.main.deploy(t)
+                recovery.main_deployed = True
 
             # ── Ground check ──────────────────────────────────────
             descent_phases = (
@@ -870,10 +969,28 @@ def run_batch_simulation(
     result.landing_y = state_vec[1]
     result.landing_distance = math.sqrt(state_vec[0]**2 + state_vec[1]**2)
     result.final_phase = phase.value
+    # "Deployed" means a canopy actually opened: the deployment event also
+    # fires for a slot whose drag area is zero.
+    drogue_deployed = drogue_deployed and config.drogue_cd_area > 0.0
+    main_deployed = main_deployed and config.main_cd_area > 0.0
+    result.drogue_deployed = drogue_deployed
+    result.main_deployed = main_deployed
+    if phase == FlightPhase.LANDED:
+        result.landing_velocity = touchdown_speed
 
     # If stability margin was never updated, reset sentinel
     if result.min_stability_margin == float("inf"):
         result.min_stability_margin = 0.0
+
+    if result.min_stability_margin < 0.0:
+        result.warnings.append(
+            f"Unstable: stability margin fell to "
+            f"{result.min_stability_margin:.2f} cal")
+    if (phase == FlightPhase.LANDED and result.apogee >= 1.0
+            and not (drogue_deployed or main_deployed)):
+        result.warnings.append(
+            f"Ballistic impact at {touchdown_speed:.0f} m/s — "
+            f"no parachute was out")
 
     # Determine success
     if failure_reasons:
@@ -884,7 +1001,14 @@ def run_batch_simulation(
         result.failure_reasons = ["Simulation timed out"]
     elif result.apogee < 1.0:
         result.success = False
-        result.failure_reasons = ["Apogee below 1 m — likely no thrust"]
+        # Keep the leading words: callers match on them. The cause is not
+        # always the motor (a horizontal launch never climbs either).
+        if thrust_curve and max(f for _, f in thrust_curve) > 0.0:
+            result.failure_reasons = [
+                "Apogee below 1 m — the rocket never climbed "
+                "(thrust below weight, or launch angle near horizontal)"]
+        else:
+            result.failure_reasons = ["Apogee below 1 m — likely no thrust"]
     else:
         result.success = True
         result.failure_reasons = []
