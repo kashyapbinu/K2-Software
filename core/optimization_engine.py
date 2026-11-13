@@ -707,8 +707,11 @@ def evaluate_candidate(base_config: BatchSimConfig,
         # Everything that is open at touchdown: the drogue stays out under the
         # main, and a single-parachute design carries its canopy in the
         # drogue slot with a main area of zero (core.staging.assembly_recovery).
-        main_cda = (variables.get("main_cd_area", cfg.main_cd_area)
-                    + variables.get("drogue_cd_area", cfg.drogue_cd_area))
+        if cfg.recovery_canopies:     # the Design tab's parachutes
+            main_cda = sum(float(r.get("cd_area", 0.0)) for r in cfg.recovery_canopies)
+        else:
+            main_cda = (variables.get("main_cd_area", cfg.main_cd_area)
+                        + variables.get("drogue_cd_area", cfg.drogue_cd_area))
         if main_cda > 0:
             total_mass = variables.get("dry_mass", cfg.dry_mass) + cfg.propellant_mass * 0.05
             rho_sl = 1.225

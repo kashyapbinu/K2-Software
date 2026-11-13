@@ -338,36 +338,45 @@ def assembly_aero_geometry(assembly) -> dict:
     return geom
 
 
+def parachute_canopy(chute) -> dict:
+    """One Parachute component as a recovery canopy row
+    (recovery.parachute_dynamics.RecoverySystem.from_canopies)."""
+    event = str(getattr(chute, "deploy_event", "apogee")).lower()
+    if event not in ("apogee", "altitude"):
+        event = "apogee"
+    return {"name": chute.name,
+            "cd_area": chute.cd_area(),
+            "event": event,
+            "altitude": float(getattr(chute, "deploy_altitude", 0.0)),
+            "delay": float(getattr(chute, "deploy_delay", 0.0))}
+
+
 def assembly_recovery(assembly) -> dict:
-    """The Design tab's parachutes as the state's recovery drag areas.
+    """The Design tab's parachutes as ``{"recovery_canopies": [...]}``, each
+    with its own trigger (Parachute.deploy_event / deploy_altitude /
+    deploy_delay).
 
-    Returns ``{}`` when the design has no parachute, so the values set in the
-    Simulation tab stand. Otherwise ``drogue_cd_area`` and ``main_cd_area``
-    (Cd × canopy area, m²).
+    The list is empty when the design has no parachute, and then the
+    Simulation tab's drogue/main values stand. The key is always present, so
+    deleting the last parachute in the design stops it flying.
 
-    The sim read these two numbers from the Simulation tab alone. A parachute
-    drawn in the Design tab, or imported from an OpenRocket file, changed the
-    mass and nothing else: every design came down under the default 0.5 m² and
-    3.0 m² canopies.
+    Only the top stage's parachutes count; that is the part the flight
+    follows to the ground.
 
-    Only the top stage's parachutes count; that is the part the flight follows
-    to the ground. With one parachute it opens at apogee (the drogue slot) and
-    nothing is added at the main-deploy altitude. With two or more, the
-    smallest opens at apogee and the largest at the main-deploy altitude.
+    The first version of this mapped the parachutes onto the Simulation
+    tab's two slots by size (smallest at apogee, largest at the main-deploy
+    altitude), whatever each parachute was set to do. Each now opens on its
+    own trigger, so a single main at apogee, a drogue + main dual deploy and
+    a main-only altitude deploy all fly as drawn.
     """
     from core.components import Parachute
 
     stages = list(getattr(assembly, "stages", []) or [])
-    if not stages:
-        return {}
-    areas = sorted(
-        max(0.0, float(c.cd)) * math.pi * (max(0.0, float(c.diameter)) / 2.0) ** 2
-        for c in _descendants(stages[0]) if isinstance(c, Parachute))
-    if not areas:
-        return {}
-    if len(areas) == 1:
-        return {"drogue_cd_area": areas[0], "main_cd_area": 0.0}
-    return {"drogue_cd_area": areas[0], "main_cd_area": areas[-1]}
+    rows = []
+    if stages:
+        rows = [parachute_canopy(c) for c in _descendants(stages[0])
+                if isinstance(c, Parachute) and c.cd_area() > 0.0]
+    return {"recovery_canopies": rows}
 
 
 def build_stages_config(assembly) -> list:

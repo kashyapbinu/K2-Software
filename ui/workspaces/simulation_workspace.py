@@ -60,6 +60,7 @@ class SimulationWorkspace(QWidget):
         self.engine = engine
         self.sim_engine = sim_engine
         self._setup_ui()
+        self._sync_inputs_from_state(self.engine.state)
         self.engine.telemetry_tick.connect(self._on_tick)
         self.engine.state_changed.connect(self._on_state_changed)
         self.sim_engine.sim_started.connect(self._on_sim_started)
@@ -255,6 +256,25 @@ class SimulationWorkspace(QWidget):
 
         self.wind_stack.addWidget(ml_page)
         wl.addWidget(self.wind_stack)
+
+        snd_row = QHBoxLayout()
+        self.btn_sounding = QPushButton(icon("import"), "Import Sounding…")
+        self.btn_sounding.setToolTip(
+            "Load a measured atmosphere: University of Wyoming 'Text: List' "
+            "or CSV (height_m, pressure_hPa, temperature_C, wind_speed_kt, "
+            "wind_dir_deg). Sets the air temperature/pressure profile and, "
+            "when the file has winds, the multi-level wind.")
+        self.btn_sounding.clicked.connect(self._on_import_sounding)
+        snd_row.addWidget(self.btn_sounding)
+        self.btn_sounding_clear = QPushButton("Clear")
+        self.btn_sounding_clear.setToolTip("Go back to the standard atmosphere")
+        self.btn_sounding_clear.clicked.connect(self._on_clear_sounding)
+        snd_row.addWidget(self.btn_sounding_clear)
+        wl.addLayout(snd_row)
+        self.sounding_label = QLabel("")
+        self.sounding_label.setWordWrap(True)
+        self.sounding_label.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px;")
+        wl.addWidget(self.sounding_label)
         wind_group.setLayout(wl)
         left_col.addWidget(wind_group)
 
@@ -327,6 +347,12 @@ class SimulationWorkspace(QWidget):
         self.inflation_spin.valueChanged.connect(
             lambda v: self.engine.update(recovery_inflation_time=v))
         rf.addRow("Inflation Time:", self.inflation_spin)
+
+        self.recovery_note = QLabel("")
+        self.recovery_note.setWordWrap(True)
+        self.recovery_note.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px;")
+        self.recovery_note.setVisible(False)
+        rf.addRow(self.recovery_note)
 
         rec_group.setLayout(rf)
         left_col.addWidget(rec_group)
@@ -519,6 +545,67 @@ class SimulationWorkspace(QWidget):
             settings.get("sim/launch_sites") or "", site.name))
         self.engine.update(launch_site_name="")
         self._reload_sites(select=CUSTOM_SITE)
+
+    # ── Weather sounding ──────────────────────────────────────────
+
+    def _on_import_sounding(self, path: str = None):
+        from PyQt6.QtWidgets import QFileDialog
+        from environment.sounding import SoundingError, read_sounding_file
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Import Sounding", "",
+                "Soundings (*.txt *.csv *.tsv *.dat);;All Files (*)")
+            if not path:
+                return
+        try:
+            snd = read_sounding_file(path)
+        except (OSError, SoundingError) as exc:
+            QMessageBox.warning(self, "Import Sounding", f"Could not read the sounding:\n\n{exc}")
+            return
+        s = self.engine.state
+        site = s.launch_altitude
+        update = {"atmosphere_profile": snd.atmosphere_profile(),
+                  "atmosphere_source": snd.source}
+        layers = snd.wind_layers(site)
+        if layers:
+            update.update(wind_mode="multi_level", wind_layers=layers)
+        self.engine.update(**update)
+
+        lo, hi = snd.levels[0].altitude, snd.levels[-1].altitude
+        p, t = snd.surface(site)
+        notes = []
+        if site < lo:
+            notes.append(f"The pad ({site:.0f} m) is below the lowest level "
+                         f"({lo:.0f} m); the air there is extrapolated.")
+        if hi < site + 3000.0:
+            notes.append(f"The sounding stops at {hi:.0f} m; standard-atmosphere "
+                         f"shape is used above it.")
+        if not layers:
+            notes.append("No wind in the file: the wind setting is unchanged.")
+        self.engine.log_message.emit(
+            f"Sounding '{snd.source}': {len(snd.levels)} levels, "
+            f"{lo:.0f}–{hi:.0f} m; pad {t - 273.15:.1f} °C, {p / 100:.1f} hPa"
+            + (f"; {len(layers)} wind layers" if layers else ""))
+        for n in notes:
+            self.engine.log_message.emit("Sounding: " + n)
+
+    def _on_clear_sounding(self):
+        self.engine.update(atmosphere_profile=[], atmosphere_source="")
+
+    def _show_sounding(self, s):
+        active = bool(getattr(s, "atmosphere_profile", None))
+        self.btn_sounding_clear.setEnabled(active)
+        self.isa_check.setEnabled(not active)
+        if active:
+            self.temp_spin.setEnabled(False)
+            self.sounding_label.setText(
+                f"Air from sounding: {s.atmosphere_source or 'imported profile'} "
+                f"({len(s.atmosphere_profile)} levels). Wind layers are heights "
+                f"above the pad elevation at import; re-import after moving "
+                f"the pad.")
+        else:
+            self.sounding_label.setText("")
+        self.sounding_label.setVisible(active)
 
     def _on_isa_toggled(self, standard_day: bool):
         """Standard day stores 0 (ISA at the site). Unticking starts the pad
@@ -728,6 +815,7 @@ class SimulationWorkspace(QWidget):
         self.temp_spin.setEnabled(not standard_day)
         if not standard_day:
             _show(self.temp_spin, s.ground_temperature)
+        self._show_sounding(s)
         _show(self.wind_spin, s.wind_speed)
         _show(self.wind_dir_spin, s.wind_direction)
         _show(self.wind_turb_spin, gust * 100.0)
@@ -765,6 +853,29 @@ class SimulationWorkspace(QWidget):
                 for col, val in enumerate(layer):
                     self.wind_table.setItem(row, col, QTableWidgetItem(f"{val:.10g}"))
             self.wind_table.blockSignals(False)
+
+        self._show_recovery_source(s)
+
+    def _show_recovery_source(self, s):
+        """The Design tab's parachutes, when there are any, are the recovery;
+        the drogue/main slots here are then not flown, so they are locked."""
+        rows = getattr(s, "recovery_canopies", None) or []
+        for w in (self.drogue_delay_spin, self.main_alt_spin,
+                  self.drogue_cda_spin, self.main_cda_spin):
+            w.setEnabled(not rows)
+        if rows:
+            parts = []
+            for r in rows:
+                when = ("apogee" if r.get("event") == "apogee"
+                        else f"{r.get('altitude', 0):.0f} m")
+                if r.get("delay"):
+                    when += f" + {r['delay']:.1f} s"
+                parts.append(f"{r.get('name', 'Parachute')} "
+                             f"({r.get('cd_area', 0):.2f} m², {when})")
+            self.recovery_note.setText(
+                "From the Design tab: " + "; ".join(parts)
+                + ". Edit the parachutes there.")
+        self.recovery_note.setVisible(bool(rows))
 
     def _on_sim_started(self):
         self.btn_run.setEnabled(False)

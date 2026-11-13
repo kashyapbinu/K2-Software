@@ -32,6 +32,20 @@ SUMMARY_TILES = [
 ]
 
 
+def canopy_line(c: dict) -> str:
+    """One canopy report as a line: when and where it opened, the speed it
+    opened at, its peak force, and the descent rate under it."""
+    name = c.get("name", "Parachute")
+    if c.get("deploy_time") is None:
+        return f"🪂 {name}: did not open"
+    parts = [f"opened at {c['deploy_altitude']:.0f} m, T+{c['deploy_time']:.1f} s",
+             f"{c.get('deploy_speed') or 0.0:.0f} m/s",
+             f"peak {c.get('peak_force', 0.0):.0f} N"]
+    if c.get("descent_rate") is not None:
+        parts.append(f"descent {c['descent_rate']:.1f} m/s")
+    return f"🪂 {name}: " + ", ".join(parts)
+
+
 def summary_text(summary, key: str) -> str:
     """One FlightSummary value as tile text; "—" for a value the flight did
     not produce (None), never a made-up zero."""
@@ -280,6 +294,8 @@ class ResultsWorkspace(QWidget):
         self._show_summary(summary)
         status = summary.final_phase if summary is not None else "In flight"
         text = f"Flight: {status}  |  {history.count} data points"
+        for c in (summary.canopies if summary is not None else []):
+            text += "\n" + canopy_line(c)
         if summary is not None and summary.warnings:
             text += "\n⚠ " + "\n⚠ ".join(summary.warnings)
         self.summary_label.setText(text)

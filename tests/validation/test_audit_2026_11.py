@@ -107,32 +107,33 @@ def test_design_parachutes_reach_the_state():
     from ui.workspaces.design_workspace import DesignWorkspace
 
     asm = canonical_assembly()
-    assert assembly_recovery(asm) == {}          # no parachute: nothing to say
+    assert assembly_recovery(asm) == {"recovery_canopies": []}   # none drawn
 
     tube = asm.stages[0].children[1]
     main = Parachute("Main")
     main.diameter, main.cd = 1.2, 1.5
+    main.deploy_event, main.deploy_altitude = "altitude", 250.0
     asm.add_component(tube, main)
-
-    one = assembly_recovery(asm)
-    area_main = 1.5 * math.pi * 0.6 ** 2
-    assert one["drogue_cd_area"] == pytest.approx(area_main)   # opens at apogee
-    assert one["main_cd_area"] == 0.0
-
     drogue = Parachute("Drogue")
     drogue.diameter, drogue.cd = 0.4, 1.3
+    drogue.deploy_delay = 1.5
     asm.add_component(tube, drogue)
-    two = assembly_recovery(asm)
-    assert two["drogue_cd_area"] == pytest.approx(1.3 * math.pi * 0.2 ** 2)
-    assert two["main_cd_area"] == pytest.approx(area_main)
+
+    rows = assembly_recovery(asm)["recovery_canopies"]
+    area_main = 1.5 * math.pi * 0.6 ** 2
+    assert rows == [
+        {"name": "Main", "cd_area": pytest.approx(area_main), "event": "altitude",
+         "altitude": 250.0, "delay": 0.0},
+        {"name": "Drogue", "cd_area": pytest.approx(1.3 * math.pi * 0.2 ** 2),
+         "event": "apogee", "altitude": 300.0, "delay": 1.5},
+    ]
 
     # ...and the real Design-tab sync writes them.
     _ensure_qapp()
     engine = RocketStateEngine()
     engine._assembly = asm
     DesignWorkspace._sync_to_engine(types.SimpleNamespace(assembly=asm, engine=engine))
-    assert engine.state.main_cd_area == pytest.approx(area_main)
-    assert engine.state.drogue_cd_area == pytest.approx(two["drogue_cd_area"])
+    assert [r["name"] for r in engine.state.recovery_canopies] == ["Main", "Drogue"]
 
 
 def test_design_sync_leaves_recovery_alone_without_a_parachute():
@@ -141,11 +142,15 @@ def test_design_sync_leaves_recovery_alone_without_a_parachute():
     _ensure_qapp()
     asm = canonical_assembly()
     engine = RocketStateEngine()
-    engine.update(drogue_cd_area=0.33, main_cd_area=4.4)
+    engine.update(drogue_cd_area=0.33, main_cd_area=4.4,
+                  recovery_canopies=[{"name": "old", "cd_area": 1.0, "event": "apogee",
+                                      "altitude": 0.0, "delay": 0.0}])
     engine._assembly = asm
     DesignWorkspace._sync_to_engine(types.SimpleNamespace(assembly=asm, engine=engine))
+    # The slots stand; a canopy list left from a parachute since deleted goes.
     assert engine.state.drogue_cd_area == 0.33
     assert engine.state.main_cd_area == 4.4
+    assert engine.state.recovery_canopies == []
 
 
 # ── Monte Carlo sampling ────────────────────────────────────────────────────

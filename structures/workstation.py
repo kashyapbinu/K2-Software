@@ -347,6 +347,9 @@ class RecoveryLoads:
     status: str = "—"
     status_color: str = "#8b949e"
     allowable_N: float = 0.0
+    # Per canopy, in opening order: name, deploy_altitude (m above pad),
+    # inflow_velocity (m/s), shock_N.
+    canopies: list = field(default_factory=list)
 
 
 # Opening-shock amplification (Knacke, "Parachute Recovery Systems", Cx ~ 1.4)
@@ -358,36 +361,75 @@ _EYEBOLT_PROOF_N = 5300.0   # 1/4"-20 forged eyebolt working ~ 0.5 of proof
 def recovery_loads(state, history=None,
                    harness_daf: float = 1.5,
                    eyebolt_kt: float = 2.0) -> RecoveryLoads:
-    """Compute deployment shock loads for drogue + main and the reaction
-    loads they impose on harness, bulkhead, eyebolt and nose-cone joint."""
+    """Opening-shock loads of every canopy the vehicle carries, and the
+    reaction loads they impose on harness, bulkhead, eyebolt and nose-cone
+    joint.
+
+    The canopies are the ones the flight flies (RecoverySystem.for_state),
+    taken in the order they open. A canopy's inflow speed is the terminal
+    speed under the canopies already open at its deploy height; the first
+    one opens at apogee speed (from the flight history when there is one),
+    or, if nothing is open above an altitude trigger, at the free-fall speed
+    from apogee (drag ignored: an upper bound).
+
+    This used to read the two Simulation-tab slots through ``or 0.5`` and
+    ``or 3.0``, so a design with one parachute, or none, was checked against
+    canopies it does not have.
+    """
+    from recovery.parachute_dynamics import APOGEE, RecoverySystem
+
     rl = RecoveryLoads()
     mass = state.total_mass() if callable(getattr(state, "total_mass", None)) else 5.0
     if mass <= 0:
         mass = 5.0
-    drogue_cda = getattr(state, "drogue_cd_area", 0.5) or 0.5
-    main_cda = getattr(state, "main_cd_area", 3.0) or 3.0
-    main_alt = getattr(state, "main_deploy_altitude", 300.0) or 300.0
+    # The mass that hangs from the canopies: the burnt-out vehicle.
+    descent_mass = mass - (getattr(state, "propellant_mass_initial", 0.0) or 0.0)
+    if descent_mass <= 0:
+        descent_mass = mass
 
-    # ── Drogue deploys near apogee: use velocity there if we have history ──
-    v_drogue = 30.0
+    v_apogee = 30.0          # horizontal speed at apogee when no flight was run
     apogee_alt = getattr(state, "max_altitude", 0.0)
     if history is not None and len(history) > 0:
         _, apogee_alt, iap = history.find_max("altitude")
         snap = history.get_snapshot(min(iap + 1, len(history) - 1))
-        v_drogue = max(abs(snap.get("velocity", 30.0)), 10.0)
+        v_apogee = max(abs(snap.get("velocity", 30.0)), 10.0)
+    if apogee_alt <= 0:
+        apogee_alt = 1000.0
     site = _site_altitude(state)
-    _, _, rho_apogee = isa(site + (apogee_alt if apogee_alt > 0 else 1000.0))
-    rl.drogue_deploy_velocity = v_drogue
-    rl.drogue_shock_N = 0.5 * rho_apogee * v_drogue ** 2 * drogue_cda * _SHOCK_FACTOR
 
-    # ── Main deploys low: terminal velocity under drogue is the inflow speed ──
-    _, _, rho_main = isa(site + main_alt)
-    v_main = math.sqrt(2 * mass * G / (rho_main * drogue_cda)) if drogue_cda > 0 else 30.0
-    rl.main_deploy_velocity = v_main
-    rl.main_shock_N = 0.5 * rho_main * v_main ** 2 * main_cda * _SHOCK_FACTOR
+    canopies = RecoverySystem.for_state(state).canopies
+    order = sorted((c for c in canopies if c.event == APOGEE), key=lambda c: c.delay) + \
+        sorted((c for c in canopies if c.event != APOGEE), key=lambda c: -c.altitude)
+    open_area = 0.0
+    for c in order:
+        alt = apogee_alt if c.event == APOGEE else min(c.altitude, apogee_alt)
+        _, _, rho = isa(site + alt)
+        if open_area > 0.0:
+            v_in = math.sqrt(2 * descent_mass * G / (rho * open_area))
+        elif c.event == APOGEE:
+            v_in = v_apogee
+        else:
+            v_in = max(v_apogee, math.sqrt(2 * G * max(apogee_alt - alt, 0.0)))
+        shock = 0.5 * rho * v_in ** 2 * c.cd_area * _SHOCK_FACTOR
+        rl.canopies.append({"name": c.name, "deploy_altitude": alt,
+                            "inflow_velocity": v_in, "shock_N": shock})
+        open_area += c.cd_area
+
+    # The two summary slots the panel shows: the first canopy to open, and
+    # the hardest-opening one after it.
+    if rl.canopies:
+        first = rl.canopies[0]
+        rl.drogue_shock_N, rl.drogue_deploy_velocity = first["shock_N"], first["inflow_velocity"]
+        rest = rl.canopies[1:]
+        if rest:
+            worst = max(rest, key=lambda r: r["shock_N"])
+            rl.main_shock_N, rl.main_deploy_velocity = worst["shock_N"], worst["inflow_velocity"]
+    else:
+        rl.status = "No parachute"
+        return rl
 
     # ── Reaction loads ──
-    peak = max(rl.drogue_shock_N, rl.main_shock_N)
+    peak = max(r["shock_N"] for r in rl.canopies)
     rl.peak_force_N = peak
     rl.harness_tension_N = peak * harness_daf
     rl.nosecone_separation_N = peak           # joint must transmit full shock

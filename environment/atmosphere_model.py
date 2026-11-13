@@ -164,6 +164,69 @@ class Atmosphere:
         return abs(velocity) * characteristic_length / nu
 
 
+class ProfileAtmosphere(Atmosphere):
+    """An atmosphere from measured levels (a weather sounding), with ISA
+    above and below the measurements.
+
+    *levels*: ``[(altitude_m above sea level, pressure_Pa, temperature_K),
+    ...]``. Between levels temperature is interpolated linearly and pressure
+    log-linearly in altitude (exact for an isothermal slab, very close for a
+    lapse layer). Above the top level the ISA shape continues from the top
+    level's values; below the bottom one, ISA's shape continues down from it.
+    Density follows from the ideal-gas law, as in Atmosphere.
+    """
+
+    def __init__(self, levels):
+        super().__init__(0.0)
+        clean = sorted((float(h), float(p), float(t)) for h, p, t in levels)
+        if len(clean) < 2:
+            raise ValueError("an atmosphere profile needs at least two levels")
+        for (h0, _, _), (h1, _, _) in zip(clean, clean[1:]):
+            if h1 <= h0:
+                raise ValueError("profile altitudes must all differ")
+        if any(p <= 0.0 or t <= 0.0 for _, p, t in clean):
+            raise ValueError("profile pressure and temperature must be positive")
+        self.levels = clean
+        self._log_p = [math.log(p) for _, p, _ in clean]
+
+    def _isa(self, altitude: float):
+        return (Atmosphere.temperature(self, altitude),
+                Atmosphere.pressure(self, altitude))
+
+    def _anchored(self, altitude: float, anchor: tuple) -> tuple:
+        """ISA's shape, shifted to pass through *anchor* (h, p, T)."""
+        h_a, p_a, t_a = anchor
+        t_isa_a, p_isa_a = self._isa(h_a)
+        t_isa, p_isa = self._isa(altitude)
+        return (max(1.0, t_isa + (t_a - t_isa_a)), p_isa * (p_a / p_isa_a))
+
+    def _tp(self, altitude: float) -> tuple:
+        lv = self.levels
+        if altitude >= lv[-1][0]:
+            return self._anchored(altitude, lv[-1])
+        if altitude <= lv[0][0]:
+            return self._anchored(altitude, lv[0])
+        lo, hi = 0, len(lv) - 1
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if lv[mid][0] <= altitude:
+                lo = mid
+            else:
+                hi = mid
+        h0, _, t0 = lv[lo]
+        h1, _, t1 = lv[hi]
+        f = (altitude - h0) / (h1 - h0)
+        t = t0 + f * (t1 - t0)
+        p = math.exp(self._log_p[lo] + f * (self._log_p[hi] - self._log_p[lo]))
+        return t, p
+
+    def temperature(self, altitude: float) -> float:
+        return self._tp(altitude)[0] + self.temperature_offset
+
+    def pressure(self, altitude: float) -> float:
+        return self._tp(altitude)[1]
+
+
 class SiteAtmosphere:
     """An Atmosphere read by height above the launch pad.
 
@@ -218,9 +281,15 @@ class SiteAtmosphere:
 
 
 def launch_site_atmosphere(site_altitude: float = 0.0,
-                           ground_temperature: float = 0.0) -> SiteAtmosphere:
+                           ground_temperature: float = 0.0,
+                           profile=None) -> SiteAtmosphere:
     """The atmosphere a flight from this site flies through, read by height
     above the pad. Both flight engines build theirs here.
+
+    *profile*: measured levels ``[(altitude_m ASL, pressure_Pa,
+    temperature_K), ...]`` from a weather sounding. When given it is the air,
+    and *ground_temperature* is not used (the sounding already says how warm
+    the pad is).
 
     *ground_temperature* is the air temperature at the pad (K); 0 means ISA.
     The ISA+ΔT offset is taken against ISA **at the site elevation**, so the
@@ -228,6 +297,8 @@ def launch_site_atmosphere(site_altitude: float = 0.0,
     against the sea-level 288.15 K, which was the same thing only while every
     pad was at sea level.)
     """
+    if profile:
+        return SiteAtmosphere(ProfileAtmosphere(profile), site_altitude)
     atm = Atmosphere()
     if ground_temperature and ground_temperature > 0.0:
         atm.temperature_offset = ground_temperature - atm.temperature(site_altitude)

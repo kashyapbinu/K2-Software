@@ -56,6 +56,26 @@ def flight_warnings(*, landed: bool, apogee: float,
     return out
 
 
+def recovery_fields(canopies: list, peak_total_force: float) -> dict:
+    """The summary's recovery fields from canopy reports
+    (recovery.parachute_dynamics.Canopy.report), the same for both engines.
+
+    drogue_deployed / main_deployed: an apogee- / altitude-triggered canopy
+    opened. drogue_descent_rate: the first canopy's descent rate when a
+    second one opened after it.
+    """
+    opened = sorted((c for c in canopies if c.get("deploy_time") is not None),
+                    key=lambda c: c["deploy_time"])
+    return {
+        "canopies": [dict(c) for c in canopies],
+        "drogue_deployed": any(c["event"] == "apogee" for c in opened),
+        "main_deployed": any(c["event"] == "altitude" for c in opened),
+        "drogue_descent_rate": (opened[0].get("descent_rate")
+                                if len(opened) >= 2 else None),
+        "recovery_shock_force": peak_total_force if opened else None,
+    }
+
+
 @dataclass
 class FlightSummary:
     """Headline numbers for one flight. See the module docstring."""
@@ -79,9 +99,13 @@ class FlightSummary:
     landing_y: Optional[float] = None
     landing_drift: Optional[float] = None
     descent_time: Optional[float] = None
-    recovery_shock_force: Optional[float] = None   # N; interactive engine only
-    drogue_deployed: bool = False     # a canopy with area actually opened
-    main_deployed: bool = False
+    recovery_shock_force: Optional[float] = None   # N, peak summed canopy drag
+    drogue_deployed: bool = False     # an apogee-triggered canopy opened
+    main_deployed: bool = False       # an altitude-triggered canopy opened
+    # One entry per canopy on the vehicle (Canopy.report): trigger, when and
+    # where it opened, how fast the vehicle was going, its peak opening
+    # force, and the descent rate under it.
+    canopies: List[dict] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
     @property
@@ -116,15 +140,12 @@ class FlightSummary:
             rail_exit_time=rail_t,
             stability_at_rail_exit=getattr(result, "stability_at_rail_exit", None),
             min_stability=min_stab,
-            drogue_descent_rate=getattr(result, "drogue_descent_rate", None),
             landing_velocity=result.landing_velocity if landed else None,
             landing_x=result.landing_x if landed else None,
             landing_y=result.landing_y if landed else None,
             landing_drift=result.landing_distance if landed else None,
             descent_time=(result.flight_time - apogee_t
                           if landed and apogee_t is not None else None),
-            recovery_shock_force=None,
-            drogue_deployed=result.drogue_deployed,
-            main_deployed=result.main_deployed,
             warnings=list(result.warnings),
+            **recovery_fields(result.canopies, result.recovery_shock_force),
         )

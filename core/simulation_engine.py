@@ -40,7 +40,8 @@ from physics.aerodynamics import (AeroModel, compute_drag_coefficient,
 from environment.wind_model import WindModel, MultiLevelWindModel
 from vehicle.builder import build_vehicle
 from vehicle.motor import Motor
-from recovery.parachute_dynamics import RecoverySystem
+from recovery.parachute_dynamics import (APOGEE, RecoverySystem,
+                                         recovery_phase_parameters)
 from core.staging import StageManager, StageConfig
 
 logger = logging.getLogger("K2.SimEngine")
@@ -91,8 +92,8 @@ class SimulationEngine(QObject):
         self._max_q = 0.0
         self._max_q_fired = False
         self._apogee_time = 0.0
-        self._drogue_deployed = False
-        self._main_deployed = False
+        self._phase_drogue_delay = 0.0
+        self._phase_main_alt = 0.0
 
         # ── Staging ──
         self.stage_mgr = None           # StageManager (per-stage motors + separation)
@@ -119,7 +120,6 @@ class SimulationEngine(QObject):
         self._sum_min_stab = None
         self._sum_max_sensed = 0.0
         self._sum_touchdown = 0.0
-        self._sum_drogue_rate = None
 
     # ── Public API ────────────────────────────────────────────────
 
@@ -220,8 +220,16 @@ class SimulationEngine(QObject):
 
         # The air at this launch site, read by height above the pad: site
         # elevation, and the pad temperature as an ISA+ΔT offset.
-        self.atmosphere = launch_site_atmosphere(
-            getattr(s, 'launch_altitude', 0.0), getattr(s, 'ground_temperature', 0.0))
+        try:
+            self.atmosphere = launch_site_atmosphere(
+                getattr(s, 'launch_altitude', 0.0), getattr(s, 'ground_temperature', 0.0),
+                getattr(s, 'atmosphere_profile', None) or None)
+        except (TypeError, ValueError) as exc:
+            detail = f"The imported atmosphere profile cannot be used: {exc}"
+            self.engine.update(sim_running=False, emit=False)
+            self.engine.log_message.emit(f"❌ Atmosphere: {detail}")
+            self.sim_failed.emit("Atmosphere profile", detail)
+            return
         self._site_altitude = self.atmosphere.site_altitude
         self._launch_yaw = math.radians(getattr(s, 'launch_azimuth', 0.0))
 
@@ -233,20 +241,22 @@ class SimulationEngine(QObject):
         self._max_q = 0.0
         self._max_q_fired = False
         self._apogee_time = 0.0
-        self._drogue_deployed = False
-        self._main_deployed = False
         self._state_vec = None
 
-        # Build inflation-aware recovery model from the configured Cd×A values.
-        # Replaces the old instant-full-drag CdA constants: a real canopy fills
-        # over ~0.5–1 s, so the drag (and the structural opening shock) ramps in.
-        self.recovery = RecoverySystem.from_cd_areas(
-            drogue_cd_area=getattr(s, 'drogue_cd_area', 0.5),
-            main_cd_area=getattr(s, 'main_cd_area', 3.0),
-            main_deploy_altitude=getattr(s, 'main_deploy_altitude', 300.0),
-            drogue_delay=getattr(s, 'drogue_deploy_delay', 1.0),
-            inflation_time=getattr(s, 'recovery_inflation_time', 0.6),
-        )
+        # Recovery: the Design tab's canopies (each with its own trigger) or
+        # the Simulation tab's drogue/main slots. Inflation-aware: a canopy
+        # fills over its inflation time instead of snapping on.
+        try:
+            self.recovery = RecoverySystem.for_state(s)
+        except (TypeError, ValueError) as exc:
+            self.recovery = None
+            detail = f"A parachute's deploy settings cannot be used: {exc}"
+            self.engine.update(sim_running=False, emit=False)
+            self.engine.log_message.emit(f"❌ Recovery: {detail}")
+            self.sim_failed.emit("Recovery setup", detail)
+            return
+        self._phase_drogue_delay, self._phase_main_alt = \
+            recovery_phase_parameters(self.recovery)
         self._recovery_shock_peak = 0.0
         self._last_descent_vz = 0.0
         self._drogue_descent_rate = 0.0
@@ -339,6 +349,11 @@ class SimulationEngine(QObject):
     def is_running(self):
         return self._running
 
+    @property
+    def _canopy_open(self) -> bool:
+        """A parachute or streamer is out (the airframe hangs from it)."""
+        return self.recovery is not None and self.recovery.any_deployed
+
     # ── Flight sanity / abort ─────────────────────────────────────────
     # Thresholds for declaring a flight broken. Sustained-time gates avoid
     # false aborts from a single transient gust tick.
@@ -415,7 +430,7 @@ class SimulationEngine(QObject):
 
         # Only police attitude during the ascent, above a usable airspeed.
         ascent = self._phase in (FlightPhase.BOOST, FlightPhase.COAST)
-        if not ascent or self._drogue_deployed or self._main_deployed:
+        if not ascent or self._canopy_open:
             self._unstable_time = 0.0
             self._tumble_time = 0.0
             return False
@@ -622,7 +637,7 @@ class SimulationEngine(QObject):
         # Body aero (normal force, moments) is zeroed: under canopy the airframe
         # hangs and no longer weathercocks. Drag still opposes v_rel (which
         # includes wind), so the descent drifts downwind.
-        if (self._drogue_deployed or self._main_deployed) and vz < 0 \
+        if (self._canopy_open) and vz < 0 \
                 and self.recovery is not None:
             F_drag = self.recovery.get_drag_force(rho, v_rel, t)
             F_normal = M_pitch = M_yaw = 0.0
@@ -671,7 +686,7 @@ class SimulationEngine(QObject):
         # crosswind and a headwind of the same strength produce the same force,
         # just pointed differently. Under canopy the airframe hangs and carries
         # no normal force.
-        _deployed = self._drogue_deployed or self._main_deployed
+        _deployed = self._canopy_open
         if v_rel > 0.5 and not _deployed and self.aero_model is not None:
             cn_total_now = aero.get("cn_total", 2.0)
             eff_aoa = min(alpha_total, math.radians(20))
@@ -803,14 +818,17 @@ class SimulationEngine(QObject):
     def _build_summary(self, t_end: float) -> None:
         """Freeze the trackers into self.summary (landing, timeout, abort or
         stop)."""
-        from core.flight_summary import FlightSummary, flight_warnings
+        from core.flight_summary import FlightSummary, flight_warnings, recovery_fields
 
         s = self.engine.state
         landed = self._phase == FlightPhase.LANDED
-        drogue_open = self._drogue_deployed and getattr(s, 'drogue_cd_area', 0.0) > 0.0
-        main_open = self._main_deployed and getattr(s, 'main_cd_area', 0.0) > 0.0
         x, y = (self._state_vec[0], self._state_vec[1]) if self._state_vec else (0.0, 0.0)
         landing_v = self._sum_touchdown if landed else None
+        if landed and self.recovery is not None:
+            self.recovery.touchdown(landing_v)
+        rec = recovery_fields(
+            self.recovery.reports() if self.recovery is not None else [],
+            self.recovery.peak_total_force if self.recovery is not None else 0.0)
         self.summary = FlightSummary(
             source="interactive",
             final_phase=self._phase.value,
@@ -825,22 +843,18 @@ class SimulationEngine(QObject):
             rail_exit_time=self._sum_rail_exit_t,
             stability_at_rail_exit=self._sum_rail_stab,
             min_stability=self._sum_min_stab,
-            drogue_descent_rate=self._sum_drogue_rate,
             landing_velocity=landing_v,
             landing_x=x if landed else None,
             landing_y=y if landed else None,
             landing_drift=math.hypot(x, y) if landed else None,
             descent_time=(t_end - self._sum_apogee_time
                           if landed and self._sum_apogee_time is not None else None),
-            recovery_shock_force=(self._recovery_shock_peak
-                                  if drogue_open or main_open else None),
-            drogue_deployed=drogue_open,
-            main_deployed=main_open,
             warnings=flight_warnings(
                 landed=landed, apogee=self._sum_apogee,
                 min_stability=self._sum_min_stab,
-                canopy_opened=drogue_open or main_open,
+                canopy_opened=self._canopy_open,
                 landing_velocity=landing_v),
+            **rec,
         )
 
     def _estimate_inertia(self, mass: float, s) -> float:
@@ -967,7 +981,7 @@ class SimulationEngine(QObject):
         # ── Recovery attitude stabilization ──
         # Under a deployed parachute the vehicle hangs from the canopy and stops
         # tumbling; zero the rates so the descent stays stable in the viewer.
-        if self._drogue_deployed or self._main_deployed:
+        if self._canopy_open:
             new_vec[6] = math.pi / 2.0   # pitch upright
             new_vec[7] = 0.0             # yaw
             new_vec[9] = 0.0             # pitch_rate
@@ -1060,7 +1074,7 @@ class SimulationEngine(QObject):
 
         # Recovery drag for reporting/structures — mirror the inflation-aware
         # force used in the integrator (_derivatives) so the two stay consistent.
-        if (self._drogue_deployed or self._main_deployed) and new_velocity < 0 \
+        if (self._canopy_open) and new_velocity < 0 \
                 and self.recovery is not None:
             drag_force = self.recovery.get_drag_force(
                 atm_rho, abs(new_velocity), t + adaptive_dt)
@@ -1080,8 +1094,8 @@ class SimulationEngine(QObject):
         prev_phase = self._phase
         self._phase = self.phase_mgr.evaluate(
             self._phase, t + adaptive_dt, new_altitude, new_velocity,
-            thrust, getattr(s, 'main_deploy_altitude', 300.0),
-            drogue_delay=getattr(s, 'drogue_deploy_delay', 1.0),
+            thrust, self._phase_main_alt,
+            drogue_delay=self._phase_drogue_delay,
         )
 
         # ── Events ──
@@ -1104,30 +1118,19 @@ class SimulationEngine(QObject):
                     "max_velocity": s.max_velocity,
                 })
 
-            if self._phase == FlightPhase.DROGUE_DESCENT and not self._drogue_deployed:
-                self._drogue_deployed = True
-                if self.recovery is not None:
-                    self.recovery.drogue.deploy(t + adaptive_dt)
-                    self.recovery.drogue_deployed = True
-                self.event_mgr.fire(SimEvent.DROGUE_DEPLOY, {
+        # ── Recovery: every canopy on its own trigger (shared with batch) ──
+        if self.recovery is not None:
+            for canopy in self.recovery.step(t + adaptive_dt, new_altitude, new_vz,
+                                             atm_rho, abs(new_velocity)):
+                ev = (SimEvent.DROGUE_DEPLOY if canopy.event == APOGEE
+                      else SimEvent.MAIN_DEPLOY)
+                self.event_mgr.fire(ev, {
                     "time": t + adaptive_dt, "altitude": new_altitude,
+                    "name": canopy.name,
                 })
-                logger.info(f"Drogue deployed at {new_altitude:.1f}m")
-
-            if self._phase == FlightPhase.MAIN_DESCENT and not self._main_deployed:
-                self._main_deployed = True
-                # Descent rate reached under the drogue (touchdown velocity is
-                # captured separately at landing). |vz| just before the main fills.
-                self._drogue_descent_rate = abs(new_vz)
-                if self._drogue_deployed and getattr(s, 'drogue_cd_area', 0.0) > 0.0:
-                    self._sum_drogue_rate = abs(new_vz)
-                if self.recovery is not None:
-                    self.recovery.main.deploy(t + adaptive_dt)
-                    self.recovery.main_deployed = True
-                self.event_mgr.fire(SimEvent.MAIN_DEPLOY, {
-                    "time": t + adaptive_dt, "altitude": new_altitude,
-                })
-                logger.info(f"Main chute deployed at {new_altitude:.1f}m")
+            first = self.recovery.deployed[0] if self.recovery.deployed else None
+            if first is not None and first.descent_rate is not None:
+                self._drogue_descent_rate = first.descent_rate
 
         # ── Flight-sanity / divergence guard ──
         # Abort early (before the heavy structural solve) if the flight has gone
@@ -1205,7 +1208,7 @@ class SimulationEngine(QObject):
         struct_res = compute_all(
             force=max(abs(net_force), abs(thrust),
                       new_mass * g_here,
-                      drag_force if (self._drogue_deployed or self._main_deployed) else 0.0),
+                      drag_force if (self._canopy_open) else 0.0),
             diameter=s.diameter,
             wall_thickness=getattr(s, 'wall_thickness', 0.002),
             length=s.length,
@@ -1260,7 +1263,7 @@ class SimulationEngine(QObject):
             propellant_mass=new_prop_mass,
             sim_phase=self._phase.value,
             flight_computer_state=self._phase.fc_state,
-            parachute_deployed=self._drogue_deployed or self._main_deployed,
+            parachute_deployed=self._canopy_open,
             cd=cd,
             axial_stress=struct_res['axial'],
             hoop_stress=struct_res['hoop'],
@@ -1316,7 +1319,7 @@ class SimulationEngine(QObject):
             # with every gust. Meaningless past apogee and under a canopy:
             # NaN there, so plots show a gap rather than a collapse.
             stability_margin=(float('nan')
-                              if (self._drogue_deployed or self._main_deployed
+                              if (self._canopy_open
                                   or self._phase not in (FlightPhase.PRELAUNCH,
                                                          FlightPhase.BOOST,
                                                          FlightPhase.COAST))

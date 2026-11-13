@@ -195,6 +195,12 @@ class ComponentEditor(QWidget):
             s.valueChanged.connect(lambda v: self._set_prop(comp, "line_count", v))
             form.addRow("Lines:", s)
             self._dim(form, "Line Len:", comp, "line_length", " m")
+            cd_area = QLabel(f"{comp.cd_area():.3f} m²")
+            form.addRow("Cd × Area:", cd_area)
+            self._combo(form, "Deploys at:", comp, "deploy_event",
+                        list(Parachute.DEPLOY_EVENTS))
+            self._dim(form, "Deploy Alt:", comp, "deploy_altitude", " m", 0, 0, 30000, 10)
+            self._dim(form, "Deploy Delay:", comp, "deploy_delay", " s", 1, 0, 60, 0.5)
         elif isinstance(comp, ShockCord):
             self._dim(form, "Length:", comp, "length", " m", 2, 0.1, 5.0, 0.1)
         elif isinstance(comp, MassComponent):

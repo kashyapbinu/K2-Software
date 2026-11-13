@@ -31,12 +31,12 @@ from environment.atmosphere_model import launch_site_atmosphere
 from core.flight_dynamics import (attitude_step_limit, resolve_aero_frame,
                                   wrap_angle, yaw_euler_rate)
 from core.flight_phases import FlightPhase, PhaseManager
-from core.flight_summary import flight_warnings
+from core.flight_summary import flight_warnings, recovery_fields
 from core.integrators import get_integrator
 from core.staging import sanitize_thrust_curve, trapezoid_thrust_curve
 from physics.aerodynamics import AeroModel, compute_pitching_moment_coefficient
 from environment.wind_model import WindModel, MultiLevelWindModel
-from recovery.parachute_dynamics import RecoverySystem
+from recovery.parachute_dynamics import RecoverySystem, recovery_phase_parameters
 
 logger = logging.getLogger("K2.BatchSim")
 
@@ -138,6 +138,7 @@ class BatchSimConfig:
     launch_altitude: float = 0.0          # pad elevation above sea level (m)
     launch_azimuth: float = 0.0           # bearing the rail leans toward (deg)
     ground_temperature: float = 0.0       # pad air temperature (K); 0 = ISA
+    atmosphere_profile: list = field(default_factory=list)  # measured air, see RocketState
 
     # ── Environment ───────────────────────────────────────────────
     launch_angle: float = 90.0
@@ -153,7 +154,9 @@ class BatchSimConfig:
     main_deploy_altitude: float = 300.0
     drogue_cd_area: float = 0.5
     main_cd_area: float = 3.0
-    recovery_inflation_time: float = 0.6  # canopy fill time (s); main scaled 2×
+    recovery_inflation_time: float = 0.6  # canopy fill time (s); big canopies 2×
+    # The Design tab's canopies (see RocketState); empty = the two slots above.
+    recovery_canopies: list = field(default_factory=list)
 
     # ── Simulation ────────────────────────────────────────────────
     sim_dt: float = 0.01
@@ -212,6 +215,8 @@ class BatchSimConfig:
             launch_altitude=getattr(state, "launch_altitude", 0.0),
             launch_azimuth=getattr(state, "launch_azimuth", 0.0),
             ground_temperature=getattr(state, "ground_temperature", 0.0),
+            atmosphere_profile=[list(l) for l in
+                                getattr(state, "atmosphere_profile", None) or []],
             # Environment
             launch_angle=getattr(state, "launch_angle", 90.0),
             launch_rod_length=getattr(state, "launch_rod_length", 1.0) or 1.0,
@@ -226,6 +231,8 @@ class BatchSimConfig:
             drogue_cd_area=getattr(state, "drogue_cd_area", 0.5),
             main_cd_area=getattr(state, "main_cd_area", 3.0),
             recovery_inflation_time=getattr(state, "recovery_inflation_time", 0.6),
+            recovery_canopies=[dict(c) for c in
+                               getattr(state, "recovery_canopies", None) or []],
             # Simulation
             sim_dt=getattr(state, "sim_dt", 0.01),
             integrator_name=getattr(state, "integrator_name", "rk4"),
@@ -263,6 +270,10 @@ class BatchSimResult:
     rail_exit_time: Optional[float] = None
     stability_at_rail_exit: Optional[float] = None
     drogue_descent_rate: Optional[float] = None
+    # Canopy reports (recovery.parachute_dynamics.Canopy.report) and the
+    # largest summed canopy drag (N).
+    canopies: List[dict] = field(default_factory=list)
+    recovery_shock_force: float = 0.0
 
     # Static margin (AeroModel.static_margin), minimum over powered and
     # coasting flight from rail exit to apogee. 0.0 when never evaluated.
@@ -322,6 +333,29 @@ def config_problems(config: "BatchSimConfig") -> List[str]:
     if isinstance(config.launch_altitude, (int, float)) and config.launch_altitude > 20000.0:
         problems.append(f"launch_altitude {config.launch_altitude:g} m is above "
                         f"the 20 km a launch pad can sit at")
+
+    for row in config.recovery_canopies or []:
+        try:
+            area = float(row.get("cd_area", 0.0))
+            alt = float(row.get("altitude", 0.0))
+            delay = float(row.get("delay", 0.0))
+            event = row.get("event", "apogee")
+        except (AttributeError, TypeError, ValueError):
+            problems.append(f"recovery canopy {row!r} is not a canopy")
+            continue
+        if not all(math.isfinite(v) for v in (area, alt, delay)) or area < 0 or delay < 0:
+            problems.append(f"recovery canopy {row.get('name', '?')!r} has a "
+                            f"negative or non-numeric area, altitude or delay")
+        if event not in ("apogee", "altitude"):
+            problems.append(f"recovery canopy {row.get('name', '?')!r} has "
+                            f"unknown deploy event {event!r}")
+
+    if config.atmosphere_profile:
+        from environment.atmosphere_model import ProfileAtmosphere
+        try:
+            ProfileAtmosphere(config.atmosphere_profile)
+        except (TypeError, ValueError) as exc:
+            problems.append(f"atmosphere profile: {exc}")
 
     raw = list(config.custom_thrust_curve or [])
     if raw:
@@ -439,7 +473,8 @@ def run_batch_simulation(
     # engine (site elevation + pad temperature). The batch runner used to
     # fly a sea-level ISA day whatever temperature the Simulation tab set.
     atmosphere = launch_site_atmosphere(config.launch_altitude,
-                                        config.ground_temperature)
+                                        config.ground_temperature,
+                                        config.atmosphere_profile or None)
     site_altitude = atmosphere.site_altitude
     launch_yaw = math.radians(config.launch_azimuth)
     phase_mgr = PhaseManager()
@@ -492,13 +527,9 @@ def run_batch_simulation(
     # and counted the drogue OR the main, never both, so the same rocket
     # descended differently here than in the Simulation tab, and a canopy
     # opening at speed registered as a four-digit-g spike.
-    recovery = RecoverySystem.from_cd_areas(
-        drogue_cd_area=config.drogue_cd_area,
-        main_cd_area=config.main_cd_area,
-        main_deploy_altitude=config.main_deploy_altitude,
-        drogue_delay=config.drogue_deploy_delay,
-        inflation_time=config.recovery_inflation_time,
-    )
+    # Each canopy opens on its own trigger (RecoverySystem.step).
+    recovery = RecoverySystem.for_state(config)
+    phase_drogue_delay, phase_main_alt = recovery_phase_parameters(recovery)
 
     # ── Initial 6DOF state vector ─────────────────────────────────
     launch_pitch = math.radians(config.launch_angle)
@@ -524,8 +555,6 @@ def run_batch_simulation(
 
     # ── Tracking state ────────────────────────────────────────────
     phase = FlightPhase.PRELAUNCH
-    drogue_deployed = False
-    main_deployed = False
     prev_dt = config.sim_dt
     initial_prop_mass = config.propellant_mass
     rail_exit_detected = False
@@ -666,8 +695,8 @@ def run_batch_simulation(
             M_pitch = 0.0
             M_yaw = 0.0
 
-        # Recovery drag override (inflation-aware, drogue + main)
-        if (drogue_deployed or main_deployed) and vz < 0:
+        # Recovery drag override (inflation-aware, every open canopy)
+        if recovery.any_deployed and vz < 0:
             F_drag = recovery.get_drag_force(rho, v_rel, t_)
             F_normal = M_pitch = M_yaw = 0.0
 
@@ -710,7 +739,7 @@ def run_batch_simulation(
         # global-X-only pitch term plus a hard-coded `normal_y = 0.0`, which
         # gave the Monte Carlo dispersion no lateral force whatsoever: a
         # crosswind from any bearing pushed the vehicle along X.
-        _deployed = drogue_deployed or main_deployed
+        _deployed = recovery.any_deployed
         if v_rel > 0.5 and not _deployed and aero_model is not None:
             eff_aoa = min(alpha_total, math.radians(20))
             F_normal_mag = q_dyn * ref_area * cn_total * math.sin(eff_aoa)
@@ -929,22 +958,12 @@ def run_batch_simulation(
             prev_phase = phase
             phase = phase_mgr.evaluate(
                 phase, t, cur_z, signed_vel,
-                thrust_now, config.main_deploy_altitude,
-                drogue_delay=config.drogue_deploy_delay,
+                thrust_now, phase_main_alt,
+                drogue_delay=phase_drogue_delay,
             )
 
-            # ── Recovery deployment ───────────────────────────────
-            if phase == FlightPhase.DROGUE_DESCENT and not drogue_deployed:
-                drogue_deployed = True
-                recovery.drogue.deploy(t)
-                recovery.drogue_deployed = True
-
-            if phase == FlightPhase.MAIN_DESCENT and not main_deployed:
-                if drogue_deployed and config.drogue_cd_area > 0.0:
-                    result.drogue_descent_rate = abs(cur_vz)
-                main_deployed = True
-                recovery.main.deploy(t)
-                recovery.main_deployed = True
+            # ── Recovery deployment (shared with the interactive engine) ──
+            recovery.step(t, cur_z, cur_vz, rho, cur_speed)
 
             # ── Ground check ──────────────────────────────────────
             descent_phases = (
@@ -983,14 +1002,15 @@ def run_batch_simulation(
     result.landing_y = state_vec[1]
     result.landing_distance = math.sqrt(state_vec[0]**2 + state_vec[1]**2)
     result.final_phase = phase.value
-    # "Deployed" means a canopy actually opened: the deployment event also
-    # fires for a slot whose drag area is zero.
-    drogue_deployed = drogue_deployed and config.drogue_cd_area > 0.0
-    main_deployed = main_deployed and config.main_cd_area > 0.0
-    result.drogue_deployed = drogue_deployed
-    result.main_deployed = main_deployed
     if phase == FlightPhase.LANDED:
         result.landing_velocity = touchdown_speed
+        recovery.touchdown(touchdown_speed)
+    rec = recovery_fields(recovery.reports(), recovery.peak_total_force)
+    result.canopies = rec["canopies"]
+    result.drogue_deployed = rec["drogue_deployed"]
+    result.main_deployed = rec["main_deployed"]
+    result.drogue_descent_rate = rec["drogue_descent_rate"]
+    result.recovery_shock_force = recovery.peak_total_force
 
     # If stability margin was never updated, reset sentinel
     if result.min_stability_margin == float("inf"):
@@ -1001,7 +1021,7 @@ def run_batch_simulation(
         apogee=result.apogee,
         min_stability=(result.min_stability_margin
                        if result.rail_exit_time is not None else None),
-        canopy_opened=drogue_deployed or main_deployed,
+        canopy_opened=recovery.any_deployed,
         landing_velocity=touchdown_speed)
 
     # Determine success

@@ -503,6 +503,8 @@ class Parachute(RocketComponent):
     component_type = "Parachute"
     category = "Recovery"
 
+    DEPLOY_EVENTS = ("apogee", "altitude")
+
     def __init__(self, name="Parachute"):
         super().__init__(name)
         self.diameter = 0.60
@@ -512,9 +514,18 @@ class Parachute(RocketComponent):
         self.line_length = 0.45
         self.packed_length = 0.05
         self.color = "#ff6633"
+        # When it opens: at apogee (+ delay), or descending through
+        # deploy_altitude (m above the pad, + delay).
+        self.deploy_event = "apogee"
+        self.deploy_altitude = 300.0
+        self.deploy_delay = 0.0
 
     def component_length(self):
         return self.packed_length
+
+    def cd_area(self) -> float:
+        """Drag area Cd × canopy area (m²)."""
+        return max(0.0, self.cd) * math.pi * (max(0.0, self.diameter) / 2.0) ** 2
 
     def _calc_mass(self):
         area = math.pi * (self.diameter / 2)**2
@@ -524,7 +535,10 @@ class Parachute(RocketComponent):
 
     def _props_dict(self):
         return {"diameter": self.diameter, "cd": self.cd, "line_count": self.line_count,
-                "line_length": self.line_length, "packed_length": self.packed_length}
+                "line_length": self.line_length, "packed_length": self.packed_length,
+                "deploy_event": self.deploy_event,
+                "deploy_altitude": self.deploy_altitude,
+                "deploy_delay": self.deploy_delay}
 
 
 class ShockCord(RocketComponent):

@@ -194,7 +194,12 @@ class RocketState:
     main_deploy_altitude: float = 300.0   # meters AGL
     drogue_cd_area: float = 0.5           # Cd × A for drogue (m²)
     main_cd_area: float = 3.0             # Cd × A for main chute (m²)
-    recovery_inflation_time: float = 0.6  # canopy fill time (s); main scaled 2×
+    recovery_inflation_time: float = 0.6  # canopy fill time (s); big canopies 2×
+    # The Design tab's parachutes, each with its own trigger:
+    # [{name, cd_area, event: "apogee"|"altitude", altitude, delay}, ...]
+    # (recovery.parachute_dynamics.RecoverySystem). When present they ARE the
+    # recovery and the drogue/main fields above are not used.
+    recovery_canopies: list = field(default_factory=list)
 
     # ── Multistage (empty → single-stage flight from the scalar fields) ───
     # Ordered ignition-order list of per-stage dicts (see core.staging.StageConfig).
@@ -216,6 +221,11 @@ class RocketState:
     # Projects saved before launch sites hold 288.15, which at a sea-level
     # pad is the same air.
     ground_temperature: float = 0.0
+    # Measured air (environment.sounding): [[altitude_m ASL, pressure_Pa,
+    # temperature_K], ...]. When present it IS the atmosphere and
+    # ground_temperature is not used. Empty = ISA.
+    atmosphere_profile: list = field(default_factory=list)
+    atmosphere_source: str = ""           # where the profile came from
     atm_temperature: float = 288.15
     atm_pressure: float = 101325.0
     atm_density: float = 1.225

@@ -72,6 +72,44 @@ def _text(elem, tag, default=""):
     return default
 
 
+def _read_deployment(chute, elem):
+    """OpenRocket's deploy settings onto a Parachute.
+
+    OpenRocket writes ``deployevent`` (apogee / altitude / ejection /
+    lowerstage / never), ``deployaltitude`` and ``deploydelay`` on the
+    parachute, and newer files repeat them inside a per-configuration
+    ``deploymentconfiguration`` block; the first block is used then.
+
+    K2 triggers at apogee or at an altitude. "ejection" (the motor's
+    ejection charge) is read as apogee — K2 does not model the motor
+    delay; the importer logs that, as it does "lowerstage" and "never",
+    which K2 cannot fly (a "never" parachute is given Cd 0 so it keeps its
+    mass but never adds drag).
+    """
+    src = elem
+    if elem.find("deployevent") is None:
+        nested = elem.find(".//deploymentconfiguration")
+        if nested is not None:
+            src = nested
+    event = _text(src, "deployevent", "apogee").lower()
+    chute.deploy_altitude = _float(src, "deployaltitude", 200.0)
+    chute.deploy_delay = max(0.0, _float(src, "deploydelay", 0.0))
+    if event == "altitude":
+        chute.deploy_event = "altitude"
+    elif event == "apogee":
+        chute.deploy_event = "apogee"
+    elif event == "never":
+        chute.deploy_event = "apogee"
+        chute.cd = 0.0
+        logger.warning("ORK import: parachute '%s' is set to never deploy; "
+                       "imported without drag", chute.name)
+    else:
+        chute.deploy_event = "apogee"
+        logger.warning("ORK import: parachute '%s' deploys on '%s', which K2 "
+                       "does not model; it will open at apogee + %.1f s",
+                       chute.name, event, chute.deploy_delay)
+
+
 def _map_material(ork_material):
     """Best-effort map from OpenRocket material names to K2 materials."""
     m = ork_material.lower()
@@ -243,6 +281,7 @@ def _parse_component(elem, tag_lower):
             comp.cd = 1.5  # default when "auto"
         comp.line_count = int(_float(elem, "linecount", 6))
         comp.line_length = _float(elem, "linelength", 0.45)
+        _read_deployment(comp, elem)
 
     elif isinstance(comp, ShockCord):
         comp.length = _float(elem, "cordlength", 0.60)
