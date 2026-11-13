@@ -7,6 +7,7 @@ Supports forward-compatible deserialization (unknown keys are ignored).
 
 import json
 import logging
+import os
 from pathlib import Path
 from datetime import datetime
 
@@ -48,9 +49,24 @@ def save_project(state: RocketState, filepath: str, assembly=None) -> bool:
         filepath = Path(filepath)
         filepath.parent.mkdir(parents=True, exist_ok=True)
         
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(project_data, f, indent=2, ensure_ascii=False)
-        
+        # Write beside the target, then swap it in. Opening the project file
+        # itself for writing emptied it first, so a crash, a full disk or a
+        # value json could not encode part-way through left a truncated file
+        # where the user's only copy had been.
+        tmp = filepath.with_name(filepath.name + ".tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(project_data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, filepath)
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+
         logger.info(f"Project saved: {filepath}")
         return True
         

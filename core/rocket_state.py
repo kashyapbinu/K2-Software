@@ -12,11 +12,32 @@ Architecture:
     → Console logs changes
 """
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields as dataclass_fields, MISSING
 from PyQt6.QtCore import QObject, pyqtSignal
 import logging
+import math
 
 logger = logging.getLogger("K2.RocketState")
+
+# What one flight writes: where the rocket is, how it is moving, and what the
+# flight came to. Everything else on RocketState is the rocket and the launch
+# setup. A project file keeps the second kind only, and "reset" clears the
+# first kind only.
+FLIGHT_FIELDS = (
+    "x_position", "y_position", "altitude",
+    "velocity_x", "velocity_y", "velocity_z", "velocity",
+    "pitch", "yaw", "roll", "pitch_rate", "yaw_rate", "roll_rate",
+    "acceleration", "mach_number",
+    "max_altitude", "max_velocity", "max_acceleration", "max_mach",
+    "thrust", "drag", "weight", "net_force",
+    "flutter_exceeded",
+    "sim_time", "sim_running", "sim_paused", "sim_phase",
+    "gyro_x", "gyro_y", "gyro_z",
+    "parachute_deployed", "flight_computer_state",
+    "recovery_shock_force", "drogue_descent_rate", "main_descent_rate",
+    "landing_x", "landing_y", "landing_drift", "descent_time",
+    "atm_temperature", "atm_pressure", "atm_density", "dynamic_pressure",
+)
 
 
 @dataclass
@@ -134,7 +155,7 @@ class RocketState:
     launch_rod_length: float = 1.0        # guided length before free flight (m)
     wind_speed: float = 0.0
     wind_direction: float = 0.0           # bearing wind blows FROM (deg)
-    wind_gust_intensity: float = 0.0      # turbulence σ/mean (0 → 0.1 default)
+    wind_gust_intensity: float = 0.0      # turbulence σ/mean (0 = none)
     wind_mode: str = "average"            # "average" | "multi_level"
     wind_layers: list = field(default_factory=list)  # [(alt_m, speed_m_s, dir_deg)]
     temperature_ambient: float = 288.15
@@ -207,18 +228,83 @@ class RocketState:
         prop = self.propellant_mass if self.propellant_mass > 0 else self.propellant_mass_initial
         return self.dry_mass + self.motor_dry_mass + prop
 
+    def flight_mass(self) -> float:
+        """Mass right now: the liftoff mass on the pad, the burning-down mass
+        in flight, and the burnout mass after it.
+
+        total_mass() cannot say this. Its fallback reads an empty tank as
+        "propellant not synced yet", so the moment the motor burned out the
+        live Mass readout jumped back up to the liftoff mass.
+        """
+        if self.sim_time > 0.0:
+            return self.dry_mass + self.motor_dry_mass + max(0.0, self.propellant_mass)
+        return self.total_mass()
+
     def to_dict(self) -> dict:
         d = asdict(self)
-        # Remove non-serializable / transient fields
-        for key in ['sim_running', 'sim_paused']:
+        # The flight in progress is not part of the project: a file saved
+        # after a launch used to reopen at T+230 s, landed, with the last
+        # flight's maxima on a rocket that had not flown.
+        for key in FLIGHT_FIELDS:
             d.pop(key, None)
+        # A spent motor is not the design either.
+        if d.get("propellant_mass_initial", 0.0) > 0.0:
+            d["propellant_mass"] = d["propellant_mass_initial"]
         return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "RocketState":
-        valid_keys = {f.name for f in cls.__dataclass_fields__.values()}
-        filtered = {k: v for k, v in data.items() if k in valid_keys}
-        return cls(**filtered)
+        """Build a state from a saved dict, keeping only values of the right
+        kind. Unknown keys are ignored (forward compatibility) and so are
+        flight fields from files written before those stopped being saved.
+
+        A field holding the wrong type falls back to its default with a
+        warning. `cls(**data)` took anything: a hand-edited or damaged file
+        with ``"dry_mass": "abc"`` loaded as a valid project and failed
+        later, somewhere unrelated, with a TypeError.
+        """
+        if not isinstance(data, dict):
+            raise TypeError("rocket_state must be a JSON object")
+        clean = {}
+        for f in dataclass_fields(cls):
+            if f.name not in data or f.name in FLIGHT_FIELDS:
+                continue
+            default = (f.default if f.default is not MISSING
+                       else f.default_factory())
+            value = _coerce(data[f.name], default)
+            if value is _REJECT:
+                logger.warning(
+                    "Project file: ignoring %s=%r (expected %s); using %r",
+                    f.name, data[f.name], type(default).__name__, default)
+                continue
+            clean[f.name] = value
+        return cls(**clean)
+
+
+_REJECT = object()
+
+
+def _coerce(value, default):
+    """*value* as the type of *default*, or _REJECT if it cannot be one."""
+    if isinstance(default, bool):
+        return value if isinstance(value, bool) else _REJECT
+    if isinstance(default, int):
+        if isinstance(value, bool):
+            return _REJECT
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and math.isfinite(value) and value == int(value):
+            return int(value)
+        return _REJECT
+    if isinstance(default, float):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return _REJECT
+        return float(value) if math.isfinite(value) else _REJECT
+    if isinstance(default, str):
+        return value if isinstance(value, str) else _REJECT
+    if isinstance(default, list):
+        return value if isinstance(value, list) else _REJECT
+    return value
 
 
 class RocketStateEngine(QObject):
@@ -277,10 +363,27 @@ class RocketStateEngine(QObject):
         self.state_changed.emit(self._state)
 
     def reset(self) -> None:
+        """Back to an empty project: rocket, motor and launch setup all go."""
         self._state = RocketState()
         self._estimates = {}
         self._recompute_derived()
         self.log_message.emit("State reset to defaults")
+        self.state_changed.emit(self._state)
+
+    def reset_flight(self) -> None:
+        """Put the rocket back on the pad, leaving the rocket itself alone.
+
+        Clears only what a flight wrote (FLIGHT_FIELDS) and refills the
+        motor. The RESET buttons called reset(), which also threw away the
+        motor, the wind, the launch angle and the recovery setup, while the
+        Simulation tab went on showing the values the user had typed.
+        """
+        blank = RocketState()
+        for name in FLIGHT_FIELDS:
+            setattr(self._state, name, getattr(blank, name))
+        self._state.propellant_mass = self._state.propellant_mass_initial
+        self._recompute_derived()
+        self.log_message.emit("Flight reset — rocket back on the pad")
         self.state_changed.emit(self._state)
 
     def _recompute_derived(self) -> None:

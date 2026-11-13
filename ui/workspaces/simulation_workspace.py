@@ -268,15 +268,23 @@ class SimulationWorkspace(QWidget):
         rf.addRow("Main Deploy Alt:", self.main_alt_spin)
 
         self.drogue_cda_spin = QDoubleSpinBox()
-        self.drogue_cda_spin.setRange(0.01, 10); self.drogue_cda_spin.setValue(0.5)
+        self.drogue_cda_spin.setRange(0, 50); self.drogue_cda_spin.setValue(0.5)
         self.drogue_cda_spin.setSuffix(" m²"); self.drogue_cda_spin.setDecimals(2)
+        self.drogue_cda_spin.setToolTip(
+            "Drag area of the canopy that opens at apogee. Taken from the "
+            "Design tab's parachutes when the design has any (a single "
+            "parachute goes here). 0 = nothing opens at apogee.")
         self.drogue_cda_spin.valueChanged.connect(
             lambda v: self.engine.update(drogue_cd_area=v))
         rf.addRow("Drogue Cd×A:", self.drogue_cda_spin)
 
         self.main_cda_spin = QDoubleSpinBox()
-        self.main_cda_spin.setRange(0.1, 50); self.main_cda_spin.setValue(3.0)
-        self.main_cda_spin.setSuffix(" m²"); self.main_cda_spin.setDecimals(1)
+        self.main_cda_spin.setRange(0, 50); self.main_cda_spin.setValue(3.0)
+        self.main_cda_spin.setSuffix(" m²"); self.main_cda_spin.setDecimals(2)
+        self.main_cda_spin.setToolTip(
+            "Drag area added at the main-deploy altitude. Taken from the "
+            "Design tab when it has two or more parachutes (the largest). "
+            "0 = no second canopy.")
         self.main_cda_spin.valueChanged.connect(
             lambda v: self.engine.update(main_cd_area=v))
         rf.addRow("Main Cd×A:", self.main_cda_spin)
@@ -418,16 +426,19 @@ class SimulationWorkspace(QWidget):
     def _on_reset(self):
         if self.sim_engine.is_running:
             self.sim_engine.stop()
-        self.engine.reset()
-        # Re-derive geometry from the design assembly — reset() blanks it and
-        # a zero-diameter rocket flies dragless (absurd apogees).
-        main = self.window()
-        design = getattr(main, "design_ws", None)
+        # Back on the pad with the same rocket, motor and launch setup.
+        # This called engine.reset(), which wiped all three; only the
+        # geometry was put back, so the next RUN had no motor and flew the
+        # default wind and parachutes under the values still shown here.
+        self.engine.reset_flight()
+        # A multistage flight leaves the dropped stages' mass and length on
+        # the state; the design puts the whole stack back.
+        design = getattr(self.window(), "design_ws", None)
         if design is not None and getattr(design, "assembly", None) is not None:
             try:
                 design._sync_to_engine()
             except Exception:
-                pass
+                logger.warning("Post-reset design re-sync failed", exc_info=True)
         self._reset_ui()
 
     def _on_speed_changed(self, text):
@@ -506,8 +517,8 @@ class SimulationWorkspace(QWidget):
     def _on_wind_table_changed(self, *_):
         self._push_wind_layers()
 
-    def _push_wind_layers(self):
-        """Read the layer table and push it into simulation state."""
+    def _table_wind_layers(self):
+        """The layer table as [(alt, speed, dir)], skipping unfinished rows."""
         layers = []
         for r in range(self.wind_table.rowCount()):
             try:
@@ -517,7 +528,74 @@ class SimulationWorkspace(QWidget):
                 layers.append((alt, max(0.0, spd), drn % 360.0))
             except (ValueError, AttributeError):
                 continue  # skip incomplete/non-numeric rows
-        self.engine.update(wind_layers=layers)
+        return layers
+
+    def _push_wind_layers(self):
+        """Read the layer table and push it into simulation state."""
+        self.engine.update(wind_layers=self._table_wind_layers())
+
+    # ── State → inputs ────────────────────────────────────────────
+
+    def _sync_inputs_from_state(self, s):
+        """Make every input on this tab show what the state holds.
+
+        The inputs only ever wrote to the state. Opening a project that was
+        saved with a 10 m/s wind flew the 10 m/s wind while this tab showed
+        0, and the first spin of any box here then overwrote the saved value
+        with whatever the box happened to hold. Signals are blocked, so
+        showing a value never writes it back.
+        """
+        def _show(spin, value):
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                return
+            if abs(spin.value() - value) > 0.5 * 10 ** (-spin.decimals()):
+                spin.blockSignals(True)
+                spin.setValue(value)
+                spin.blockSignals(False)
+
+        gust = getattr(s, "wind_gust_intensity", 0.0) or 0.0
+        _show(self.angle_spin, s.launch_angle)
+        _show(self.rod_spin, s.launch_rod_length)
+        _show(self.temp_spin, s.ground_temperature)
+        _show(self.wind_spin, s.wind_speed)
+        _show(self.wind_dir_spin, s.wind_direction)
+        _show(self.wind_turb_spin, gust * 100.0)
+        _show(self.wind_ml_turb_spin, gust * 100.0)
+        _show(self.wind_stddev_spin, s.wind_speed * gust)
+        _show(self.drogue_delay_spin, s.drogue_deploy_delay)
+        _show(self.main_alt_spin, s.main_deploy_altitude)
+        _show(self.drogue_cda_spin, s.drogue_cd_area)
+        _show(self.main_cda_spin, s.main_cd_area)
+        _show(self.inflation_spin, s.recovery_inflation_time)
+
+        mode_index = 1 if s.wind_mode == "multi_level" else 0
+        if self.wind_mode_combo.currentIndex() != mode_index:
+            self.wind_mode_combo.blockSignals(True)
+            self.wind_mode_combo.setCurrentIndex(mode_index)
+            self.wind_mode_combo.blockSignals(False)
+            self.wind_stack.setCurrentIndex(mode_index)
+
+        integrator = {"rk4": "RK4", "euler": "Euler"}.get(
+            str(s.integrator_name).lower())
+        if integrator and self.integrator_combo.currentText() != integrator:
+            self.integrator_combo.blockSignals(True)
+            self.integrator_combo.setCurrentText(integrator)
+            self.integrator_combo.blockSignals(False)
+
+        try:
+            layers = [(float(a), float(v), float(d)) for a, v, d in s.wind_layers]
+        except (TypeError, ValueError):
+            layers = None
+        if layers is not None and layers != self._table_wind_layers():
+            self.wind_table.blockSignals(True)
+            self.wind_table.setRowCount(0)
+            for row, layer in enumerate(layers):
+                self.wind_table.insertRow(row)
+                for col, val in enumerate(layer):
+                    self.wind_table.setItem(row, col, QTableWidgetItem(f"{val:.10g}"))
+            self.wind_table.blockSignals(False)
 
     def _on_sim_started(self):
         self.btn_run.setEnabled(False)
@@ -583,6 +661,7 @@ class SimulationWorkspace(QWidget):
         self._update_readouts(state)
 
     def _on_state_changed(self, state):
+        self._sync_inputs_from_state(state)
         self._update_readouts(state)
 
     def _update_readouts(self, s):
@@ -595,7 +674,7 @@ class SimulationWorkspace(QWidget):
         self.readouts["Thrust"].setText(f"{s.thrust:.1f}")
         self.readouts["Drag"].setText(f"{s.drag:.1f}")
         self.readouts["Mach"].setText(f"{s.mach_number:.3f}")
-        self.readouts["Mass"].setText(f"{s.total_mass():.3f}")
+        self.readouts["Mass"].setText(f"{s.flight_mass():.3f}")
         self.readouts["Dyn. Pressure"].setText(f"{s.dynamic_pressure:.0f}")
 
         # Update phase lights

@@ -209,7 +209,7 @@ class AvionicsWorkspace(QWidget):
         self.telem_labels["Acceleration"].setText(f"{s.acceleration:.1f} m/s²")
         self.telem_labels["Mach"].setText(f"{s.mach_number:.3f}")
         self.telem_labels["Thrust"].setText(f"{s.thrust:.1f} N")
-        self.telem_labels["Mass"].setText(f"{s.total_mass():.3f} kg")
+        self.telem_labels["Mass"].setText(f"{s.flight_mass():.3f} kg")
         self.telem_labels["Drag"].setText(f"{s.drag:.1f} N")
 
         self.fc_state.setText(s.flight_computer_state)

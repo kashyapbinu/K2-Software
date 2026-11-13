@@ -5,7 +5,7 @@ Tabbed workspace layout with 7 engineering workspaces.
 Global toolbar and console dock.
 """
 
-import sys, logging
+import sys, logging, json
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QMainWindow, QDockWidget, QFileDialog, QTabWidget,
@@ -81,7 +81,8 @@ class MainWindow(QMainWindow):
         if getattr(sys, "frozen", False) and settings.get("startup/check_updates"):
             QTimer.singleShot(3000, self._startup_update_check)
 
-        logger.info("K2 AeroSim initialized — 11 workspaces ready")
+        logger.info("K2 AeroSim initialized — %d workspaces ready",
+                    self.tab_widget.count())
 
     def _setup_toolbar(self):
         # The toolbar owns the QActions; it is not docked. The actions are
@@ -353,6 +354,8 @@ class MainWindow(QMainWindow):
 
     def _initial_state_push(self):
         self.engine.update(name="Untitled Rocket")
+        # Baseline for the unsaved-changes check: a fresh, untouched project.
+        self._mark_saved()
 
     def _on_state_changed(self, state):
         self.status_motor.setText(f"Motor: {state.motor_designation}")
@@ -419,6 +422,7 @@ class MainWindow(QMainWindow):
                     self.design_ws.set_assembly(assembly)
                 self._current_file = path
                 self._update_title()
+                self._mark_saved()
                 logger.info(f"Opened: {path}")
             else:
                 QMessageBox.critical(self, "Error", f"Failed to load project:\n{path}")
@@ -441,6 +445,7 @@ class MainWindow(QMainWindow):
         if save_project(self.engine.state, path, assembly):
             self._current_file = path
             self._update_title()
+            self._mark_saved()
             self.status_label.setText(f"Saved: {Path(path).name}")
             logger.info(f"Saved: {path}")
         else:
@@ -492,15 +497,9 @@ class MainWindow(QMainWindow):
     def _on_reset(self):
         if self.sim_engine.is_running:
             self.sim_engine.stop()
-        self.engine.reset()
-        # reset() blanks the whole RocketState — including geometry (diameter,
-        # length, CP/CG). The design assembly still exists, so re-derive state
-        # from it or the next flight runs with zero drag reference area.
-        try:
-            if getattr(self.design_ws, "assembly", None) is not None:
-                self.design_ws._sync_to_engine()
-        except Exception as e:
-            logger.warning(f"Post-reset geometry re-sync failed: {e}")
+        # "Reset simulation state": the flight, not the project. engine.reset()
+        # also discarded the motor and the launch setup (see reset_flight).
+        self.simulation_ws._on_reset()
         self._set_sim_status("Idle", theme.TEXT_DIM)
         logger.info("State reset")
 
@@ -552,11 +551,52 @@ class MainWindow(QMainWindow):
         file_info = f" — {Path(self._current_file).name}" if self._current_file else ""
         self.setWindowTitle(f"K2 AeroSim — {name}{file_info}")
 
+    # ── Unsaved changes ──
+
+    def _project_snapshot(self):
+        """What a save would write, as one comparable string (None if it
+        cannot be built)."""
+        try:
+            asm = self.design_ws.get_assembly()
+            return json.dumps(
+                {"state": self.engine.state.to_dict(),
+                 "assembly": asm.to_dict() if asm is not None else None},
+                sort_keys=True, default=str)
+        except Exception:
+            logger.debug("project snapshot failed", exc_info=True)
+            return None
+
+    def _mark_saved(self):
+        self._saved_snapshot = self._project_snapshot()
+
+    def _has_unsaved_changes(self) -> bool:
+        saved = getattr(self, "_saved_snapshot", None)
+        now = self._project_snapshot()
+        return saved is not None and now is not None and now != saved
+
+    def _confirm_quit(self) -> bool:
+        """True if the window may close. Quitting only ever asked "are you
+        sure?", with no way to save from the prompt and no sign that there
+        was anything to lose."""
+        SB = QMessageBox.StandardButton
+        if not self._has_unsaved_changes():
+            return QMessageBox.question(
+                self, "Quit K2 AeroSim", "Are you sure you want to quit?",
+                SB.Yes | SB.No) == SB.Yes
+        reply = QMessageBox.question(
+            self, "Quit K2 AeroSim",
+            "This project has unsaved changes.\n\nSave before quitting?",
+            SB.Save | SB.Discard | SB.Cancel, SB.Save)
+        if reply in (SB.Cancel, SB.No):
+            return False
+        if reply == SB.Save:
+            self._on_save()
+            # Still unsaved: the Save As dialog was cancelled or the write failed.
+            return not self._has_unsaved_changes()
+        return True
+
     def closeEvent(self, event):
-        reply = QMessageBox.question(self, "Quit K2 AeroSim",
-            "Are you sure you want to quit?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.Yes:
+        if self._confirm_quit():
             self._closing = True
             if hasattr(self, "ai_panel"):
                 self.ai_panel.shutdown()
