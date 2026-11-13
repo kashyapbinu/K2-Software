@@ -1,0 +1,50 @@
+name: Tests
+
+# The fast test suite, on every push to a branch and on pull requests.
+#
+# Until this existed nothing in CI ran a single test: the only workflow built
+# the installer from a version tag and published it. This one does not gate
+# the release build — it reports. Read it before tagging.
+#
+# The slow marker (SU2 / CalculiX / OpenRocket benchmarks, minutes each, and
+# needing the solver binaries) is left out; run those locally:
+#   python -m pytest -m slow
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - "**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      # No display and no GPU on the runner.
+      QT_QPA_PLATFORM: offscreen
+      PYVISTA_OFF_SCREEN: "true"
+      QT_API: pyqt6
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          # Same interpreter as the release build (build-windows.yml).
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Fast test suite
+        run: python -m pytest -m "not slow" -q --no-header -p no:cacheprovider
