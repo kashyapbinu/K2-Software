@@ -148,8 +148,30 @@ Branch `fix/post-0.1.10-audit`, local only (nothing pushed since `v0.2.0` at
   `Parachute.deploy_event/altitude/delay`, `.ork` deploy import, structures
   recovery loads from the real canopies, canopy lines in Results).
 
-**Not yet done in A0:** `tests.yml` has never run on GitHub (needs a push, which
-the user has to approve).
+- **A4** `core/apogee_tools.py` (ballast, airbrake area, sensitivity) +
+  `ui/dialogs/apogee_tools_dialog.py`; `airbrake_cd_area` flown by both
+  engines from burnout to apogee.
+- **A5** `core/rules.py` + `ui/widgets/rules_panel.py` (Results "Rules" tab,
+  Monte Carlo "Check Rules" with pass rates). Built-in set is a TEMPLATE
+  with no limits (`data/rules/template.json`).
+- **A6** `core/landing_map.py` (WGS-84 local offsets → lat/long, dispersion
+  ellipse, KML/CSV); Monte Carlo plot uses the same fit. Its axes were
+  mirrored (north drawn on the East axis) — fixed.
+- **A7** `core/technical_report.py` (content model + reportlab PDF); Results
+  tab "Technical Report…".
+- **A8** `ui/units.py` + Settings "Display units"; applied to Results tiles,
+  Simulation live readouts. Input spin boxes are still SI.
+
+**Release A leftovers:**
+- `tests.yml` has never run on GitHub (needs a push, which the user has to
+  approve).
+- Rule presets for real competitions need the organisers' current rulebooks
+  from the user; until then only the template ships.
+- Display units do not yet reach input spin boxes, Monte Carlo statistics,
+  the rules table or the PDF (all SI).
+- Exit check in place: `test_release_a_compat.py` (a v0.2.0-style project
+  flies within 0.5 % of 2610.4 m). Slow suite, version bump, website/README
+  and the tag are still to do — with the user.
 
 **Known open, not started:**
 
