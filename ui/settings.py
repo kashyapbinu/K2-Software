@@ -23,6 +23,8 @@ DEFAULTS = {
     "projects/default_dir": "",       # empty -> core.project_manager default
     "sim/confirm_on_exit": True,
     "sim/launch_sites": "",           # user launch sites, JSON (core.launch_sites)
+    "rules/user_sets": "",            # user rule sets, JSON (core.rules)
+    "display/units": "SI",            # SI | imperial (ui.units)
     # AI assistant (ai/providers.py). Keys live in QSettings — plaintext on disk.
     "ai/provider": "auto",            # auto | gemini | ollama | custom
     "ai/gemini_key": "",

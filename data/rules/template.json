@@ -1,0 +1,16 @@
+{
+ "name": "Template — enter your competition's limits",
+ "source": "",
+ "confirmed": false,
+ "notes": "The rule types competitions usually set, with NO limits filled in. Enter the numbers from your competition's current rulebook (and its section) and save it under your own name. A rule without a limit is reported as 'not evaluated', never as a pass.",
+ "rules": [
+  {"name": "Rail exit velocity", "quantity": "rail_exit_velocity", "comparison": ">=", "limit": null, "citation": ""},
+  {"name": "Stability at rail exit", "quantity": "stability_at_rail_exit", "comparison": ">=", "limit": null, "citation": ""},
+  {"name": "Minimum stability in flight", "quantity": "min_stability", "comparison": ">=", "limit": null, "citation": ""},
+  {"name": "Liftoff thrust-to-weight", "quantity": "liftoff_thrust_to_weight", "comparison": ">=", "limit": null, "citation": ""},
+  {"name": "Descent rate under drogue", "quantity": "drogue_descent_rate", "comparison": "between", "limit": null, "limit_high": null, "citation": ""},
+  {"name": "Descent rate under main", "quantity": "main_descent_rate", "comparison": "<=", "limit": null, "citation": ""},
+  {"name": "Landing distance from pad", "quantity": "landing_drift", "comparison": "<=", "limit": null, "citation": ""},
+  {"name": "Apogee error vs target", "quantity": "apogee_error_pct", "comparison": "<=", "limit": null, "citation": ""}
+ ]
+}
