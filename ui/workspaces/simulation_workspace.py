@@ -295,6 +295,13 @@ class SimulationWorkspace(QWidget):
         self.integrator_combo.currentTextChanged.connect(self._on_integrator_changed)
         sf.addRow("Integrator:", self.integrator_combo)
 
+        self.btn_apogee_tools = QPushButton(icon("target"), "Target Apogee…")
+        self.btn_apogee_tools.setToolTip(
+            "Ballast or airbrake area to hit a target apogee, and how the "
+            "apogee moves with launch-day unknowns.")
+        self.btn_apogee_tools.clicked.connect(self.open_apogee_tools)
+        sf.addRow(self.btn_apogee_tools)
+
         sim_group.setLayout(sf)
         left_col.addWidget(sim_group)
 
@@ -545,6 +552,10 @@ class SimulationWorkspace(QWidget):
             settings.get("sim/launch_sites") or "", site.name))
         self.engine.update(launch_site_name="")
         self._reload_sites(select=CUSTOM_SITE)
+
+    def open_apogee_tools(self):
+        from ui.dialogs.apogee_tools_dialog import ApogeeToolsDialog
+        ApogeeToolsDialog(self.engine, self).exec()
 
     # ── Weather sounding ──────────────────────────────────────────
 

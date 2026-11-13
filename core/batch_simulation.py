@@ -107,6 +107,9 @@ class BatchSimConfig:
     extra_fin_sets: list = field(default_factory=list)
     transitions: list = field(default_factory=list)
 
+    # Airbrake drag area (Cd × A, m²), out from burnout to apogee. 0 = none.
+    airbrake_cd_area: float = 0.0
+
     # ── Mass ──────────────────────────────────────────────────────
     dry_mass: float = 0.0
     propellant_mass: float = 0.0
@@ -190,6 +193,7 @@ class BatchSimConfig:
             fin_body_radius=getattr(state, "fin_body_radius", 0.0),
             extra_fin_sets=[dict(f) for f in getattr(state, "extra_fin_sets", None) or []],
             transitions=[dict(t) for t in getattr(state, "transitions", None) or []],
+            airbrake_cd_area=getattr(state, "airbrake_cd_area", 0.0) or 0.0,
             # Mass
             dry_mass=state.dry_mass,
             propellant_mass=getattr(state, "propellant_mass_initial",
@@ -322,7 +326,7 @@ def config_problems(config: "BatchSimConfig") -> List[str]:
         _check(name, positive=True)
     for name in ("propellant_mass", "motor_dry_mass", "wind_speed",
                  "drogue_cd_area", "main_cd_area", "launch_altitude",
-                 "ground_temperature"):
+                 "ground_temperature", "airbrake_cd_area"):
         _check(name, positive=False)
     try:
         azimuth_ok = math.isfinite(float(config.launch_azimuth))
@@ -694,6 +698,11 @@ def run_batch_simulation(
             F_normal = 0.0
             M_pitch = 0.0
             M_yaw = 0.0
+
+        # Airbrakes: extra drag area, out from burnout to apogee (fixed
+        # deployment; same term in SimulationEngine._derivatives).
+        if config.airbrake_cd_area > 0.0 and phase == FlightPhase.COAST and vz > 0.0:
+            F_drag += q_dyn * config.airbrake_cd_area
 
         # Recovery drag override (inflation-aware, every open canopy)
         if recovery.any_deployed and vz < 0:

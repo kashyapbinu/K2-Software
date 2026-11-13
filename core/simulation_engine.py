@@ -631,6 +631,12 @@ class SimulationEngine(QObject):
             cp = s.cp
             stab_margin = (cp - cg) / max(s.diameter, 0.01)
 
+        # Airbrakes: extra drag area, out from burnout to apogee (fixed
+        # deployment; same term in run_batch_simulation).
+        airbrake = getattr(s, 'airbrake_cd_area', 0.0) or 0.0
+        if airbrake > 0.0 and self._phase == FlightPhase.COAST and vz > 0.0:
+            F_drag += q_dyn * airbrake
+
         # Recovery drag override. Drag now comes from the inflation-aware
         # RecoverySystem (cubic fill curve), so the canopy ramps from zero to
         # full CdA over its inflation time instead of snapping on instantly.

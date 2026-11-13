@@ -69,6 +69,9 @@ class RocketState:
     fin_body_radius: float = 0.0    # radius of the tube the first fin set is on
     extra_fin_sets: list = field(default_factory=list)  # further fin sets (fin_set_fields dicts)
     transitions: list = field(default_factory=list)     # diameter changes (transition_fields dicts)
+    # Airbrake drag area (Cd × A, m²), out from burnout to apogee — a fixed
+    # deployment (core.apogee_tools sizes it). 0 = no airbrakes.
+    airbrake_cd_area: float = 0.0
 
     # ── Mass ──────────────────────────────────────────────────────
     dry_mass: float = 0.0
