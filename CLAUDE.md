@@ -124,31 +124,32 @@ Working habits for this repo:
 - Website: keep the cards / centred / animated look. A flat redesign was
   rejected.
 
-## 5. Current position (2026-11-13)
+## 5. Current position
 
-Branch `fix/post-0.1.10-audit`. `main` and tag `v0.2.0` are at `150cf24`.
+Branch `fix/post-0.1.10-audit`, local only (nothing pushed since `v0.2.0` at
+`150cf24`). Version not bumped.
 
-**Uncommitted in the working tree: the November audit fixes.** 14 files plus
-two new test files and `tests.yml`. Fast suite 435 pass. Slow suite not run.
-Not committed, not pushed, version not bumped.
+**Done** (each with tests; see `git log`):
 
-What those fixes changed (tests: `tests/validation/test_audit_2026_11.py`,
-`test_simulation_tab_sync.py`):
+- November audit fixes (7 commits; `test_audit_2026_11.py`,
+  `test_simulation_tab_sync.py`).
+- **A0** `core/flight_summary.py` — one `FlightSummary` from both engines;
+  one trapezoid thrust curve (`staging.trapezoid_thrust_curve`), one static
+  margin (`AeroModel.static_margin`), one sensed-acceleration definition.
+  Engines agree within 0.02 % on the canonical rocket.
+- **A1** launch site (`launch_altitude/latitude/longitude/azimuth`,
+  `launch_site_atmosphere`, `core/launch_sites.py`, `data/launch_sites.json`);
+  `ground_temperature` 0 = standard day at the site; batch now flies the pad
+  temperature; Monte Carlo absolute wind σ.
+- **A2** weather soundings (`environment/sounding.py`, `ProfileAtmosphere`,
+  `RocketState.atmosphere_profile`).
+- **A3** per-parachute deployment (`RecoverySystem` canopy list with its own
+  triggers in both engines, `RocketState.recovery_canopies`,
+  `Parachute.deploy_event/altitude/delay`, `.ork` deploy import, structures
+  recovery loads from the real canopies, canopy lines in Results).
 
-- Batch rail-exit velocity is read at the rod length (was the rocket's length).
-- Batch runs refuse unflyable configs instead of hanging or flying drag-free.
-- Batch recovery uses `RecoverySystem` like the interactive engine; results
-  carry `landing_velocity`, `warnings`.
-- Monte Carlo: "safe recovery" needs a slow touchdown (`max_landing_velocity`);
-  launch-angle scatter is no longer folded at 90°.
-- Thrust curves are sorted and cleaned in both engines.
-- Design-tab parachutes reach the sim (`assembly_recovery`). One parachute
-  opens at apogee (drogue slot) with main area 0.
-- RESET clears the flight only (`reset_flight`); it used to wipe the motor.
-- Simulation tab shows loaded values; mass readout uses `flight_mass()`.
-- Project save is atomic and omits flight fields; load type-checks fields;
-  quit offers Save / Discard / Cancel.
-- Updater checks installer size and SHA-256.
+**Not yet done in A0:** `tests.yml` has never run on GitHub (needs a push, which
+the user has to approve).
 
 **Known open, not started:**
 
@@ -156,12 +157,20 @@ What those fixes changed (tests: `tests/validation/test_audit_2026_11.py`,
   on a vertical launch. It is the limit of the Euler-angle attitude model,
   gated at 2 % by `test_apogee_does_not_depend_on_wind_bearing`. The fix is
   quaternion attitude in both engines (Release C, item C1).
-- Monte Carlo wind scatter is a percentage of the base speed, so a calm
-  baseline has none. Needs an absolute σ input (folded into A1).
 - Transition and boat-tail drag are not modelled; launch-lug and rail-button
   drag neither.
-- The interactive engine does not report rail-exit velocity at all (A0).
-- Flat Earth, sea-level launch, 100 km ceiling, fixed tilt direction.
+- Flat Earth, 100 km ceiling, batch runner stops at 600 s of flight (a slow
+  descent from a high apogee times out; the interactive engine allows 3600 s).
+- Sounding wind layers are heights above the pad at import time: moving the
+  pad afterwards needs a re-import (the UI says so).
+- Structures and flutter still use ISA (above sea level), not an imported
+  sounding. Flutter is judged at sea level on purpose (worst case).
+- The `.ork` importer maps OpenRocket "ejection" deploys to apogee + delay
+  (K2 does not model the motor delay) and logs it.
+- Launch-site presets: only "Sea level" and an approximate Spaceport America
+  point (the whole spaceport, not the launch area). Real pad coordinates
+  should come from the user.
+- `ShockCord` has no rated strength, so shock-cord margin is not checked.
 - AI assistant: Gemini key is stored in plain text in QSettings.
 - Prism boundary-layer meshing is unsupported (SU2 stalls); RANS polars are not
   trustworthy on the tet-only mesh, so the hybrid Euler + flat-plate friction
