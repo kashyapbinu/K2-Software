@@ -31,8 +31,9 @@ from environment.atmosphere_model import Atmosphere
 from core.flight_dynamics import (attitude_step_limit, resolve_aero_frame,
                                   wrap_angle, yaw_euler_rate)
 from core.flight_phases import FlightPhase, PhaseManager
+from core.flight_summary import flight_warnings
 from core.integrators import get_integrator
-from core.staging import sanitize_thrust_curve
+from core.staging import sanitize_thrust_curve, trapezoid_thrust_curve
 from physics.aerodynamics import AeroModel, compute_pitching_moment_coefficient
 from environment.wind_model import WindModel, MultiLevelWindModel
 from recovery.parachute_dynamics import RecoverySystem
@@ -246,7 +247,16 @@ class BatchSimResult:
     landing_velocity: float = 0.0
     drogue_deployed: bool = False
     main_deployed: bool = False
+    # When the rocket topped out and cleared the rod (None: it never did),
+    # the static margin as it cleared, and the descent rate under the drogue
+    # just before the main-deploy event (None: no drogue canopy open then).
+    apogee_time: Optional[float] = None
+    rail_exit_time: Optional[float] = None
+    stability_at_rail_exit: Optional[float] = None
+    drogue_descent_rate: Optional[float] = None
 
+    # Static margin (AeroModel.static_margin), minimum over powered and
+    # coasting flight from rail exit to apogee. 0.0 when never evaluated.
     min_stability_margin: float = float("inf")
     max_dynamic_pressure: float = 0.0
 
@@ -305,41 +315,12 @@ def config_problems(config: "BatchSimConfig") -> List[str]:
 
 
 def _build_thrust_curve(cfg: BatchSimConfig) -> List[tuple]:
-    """Build a simplified trapezoidal thrust curve from motor params,
-    or return the custom curve in time order."""
+    """The custom curve in time order, or core.staging.trapezoid_thrust_curve
+    from the catalogue numbers (the curve every flight path uses)."""
     if cfg.custom_thrust_curve:
         return sanitize_thrust_curve(cfg.custom_thrust_curve)
-
-    bt = cfg.motor_burn_time
-    avg_t = cfg.motor_avg_thrust
-    max_t = cfg.motor_max_thrust if cfg.motor_max_thrust > 0 else avg_t * 1.4
-
-    if bt <= 0:
-        return []
-
-    # Rated impulse the curve must integrate to (so apogee isn't biased high).
-    total_impulse = cfg.motor_total_impulse if cfg.motor_total_impulse > 0 else avg_t * bt
-
-    # Trapezoid (0 → peak → plateau → 0) with 10% ramp/tail. Solve the plateau
-    # so the area equals total_impulse exactly:
-    #   area = 0.5·(1-ramp_frac)·bt·(max_t + plateau) = total_impulse
-    # The old code hard-coded plateau = avg_t, which over-delivered ~3.5%.
-    ramp_frac = 0.1
-    ramp = bt * ramp_frac
-    plateau = 2.0 * total_impulse / ((1.0 - ramp_frac) * bt) - max_t
-
-    if plateau < 0.0:
-        # Peak alone exceeds the impulse budget — fall back to a triangle whose
-        # area (0.5·max·bt) matches the rated impulse.
-        max_t = 2.0 * total_impulse / bt
-        return [(0.0, 0.0), (ramp, max_t), (bt, 0.0)]
-
-    return [
-        (0.0, 0.0),
-        (ramp, max_t),
-        (bt - ramp, plateau),
-        (bt, 0.0),
-    ]
+    return trapezoid_thrust_curve(cfg.motor_burn_time, cfg.motor_avg_thrust,
+                                  cfg.motor_max_thrust, cfg.motor_total_impulse)
 
 
 def _get_thrust(t: float, curve: List[tuple]) -> float:
@@ -873,6 +854,7 @@ def run_batch_simulation(
             # ── Track maxima ──────────────────────────────────────
             if cur_z > result.apogee:
                 result.apogee = cur_z
+                result.apogee_time = t
             if cur_speed > result.max_velocity:
                 result.max_velocity = cur_speed
             if cur_mach > result.max_mach:
@@ -890,14 +872,6 @@ def run_batch_simulation(
                 failure_reasons.append("Simulation divergence: altitude exceeded 100 km")
                 break
 
-            # Stability margin tracking (only during powered/coast phases)
-            if phase in (FlightPhase.IGNITION, FlightPhase.BOOST, FlightPhase.COAST):
-                if aero_model is not None and diameter > 0:
-                    cg_now = _compute_cg(cur_mass)
-                    sm = aero_model.stability_margin(aero_model.cp_subsonic(), cg_now)
-                    if sm < result.min_stability_margin:
-                        result.min_stability_margin = sm
-
             # Rail exit velocity: the speed as the rocket clears the launch
             # rod — the same `rod_len` that releases the attitude above. It
             # was read at the rocket's own length, so a 0.1 m rod and a 10 m
@@ -911,7 +885,20 @@ def run_batch_simulation(
                 frac = max(0.0, min(1.0, frac))
                 result.rail_exit_velocity = math.sqrt(max(
                     0.0, prev_speed**2 + frac * (cur_speed**2 - prev_speed**2)))
+                result.rail_exit_time = t - adaptive_dt * (1.0 - frac)
                 rail_exit_detected = True
+                if aero_model is not None:
+                    result.stability_at_rail_exit = aero_model.static_margin(
+                        cur_mach, _compute_cg(cur_mass))
+
+            # Static margin (core.flight_summary): from rail exit to apogee,
+            # powered and coasting. It used to include the time on the rail
+            # and used the Mach-0 CP at every Mach.
+            if (rail_exit_detected and aero_model is not None
+                    and phase in (FlightPhase.BOOST, FlightPhase.COAST)):
+                sm = aero_model.static_margin(cur_mach, _compute_cg(cur_mass))
+                if sm < result.min_stability_margin:
+                    result.min_stability_margin = sm
 
             # ── Phase evaluation ──────────────────────────────────
             prev_phase = phase
@@ -928,6 +915,8 @@ def run_batch_simulation(
                 recovery.drogue_deployed = True
 
             if phase == FlightPhase.MAIN_DESCENT and not main_deployed:
+                if drogue_deployed and config.drogue_cd_area > 0.0:
+                    result.drogue_descent_rate = abs(cur_vz)
                 main_deployed = True
                 recovery.main.deploy(t)
                 recovery.main_deployed = True
@@ -982,15 +971,13 @@ def run_batch_simulation(
     if result.min_stability_margin == float("inf"):
         result.min_stability_margin = 0.0
 
-    if result.min_stability_margin < 0.0:
-        result.warnings.append(
-            f"Unstable: stability margin fell to "
-            f"{result.min_stability_margin:.2f} cal")
-    if (phase == FlightPhase.LANDED and result.apogee >= 1.0
-            and not (drogue_deployed or main_deployed)):
-        result.warnings.append(
-            f"Ballistic impact at {touchdown_speed:.0f} m/s — "
-            f"no parachute was out")
+    result.warnings = flight_warnings(
+        landed=phase == FlightPhase.LANDED,
+        apogee=result.apogee,
+        min_stability=(result.min_stability_margin
+                       if result.rail_exit_time is not None else None),
+        canopy_opened=drogue_deployed or main_deployed,
+        landing_velocity=touchdown_speed)
 
     # Determine success
     if failure_reasons:

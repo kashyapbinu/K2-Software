@@ -124,32 +124,47 @@ def sanitize_thrust_curve(points) -> list:
     return clean
 
 
-def build_thrust_curve(cfg: StageConfig) -> list:
-    """Trapezoidal thrust curve normalized to true total impulse (avg×burn).
+def trapezoid_thrust_curve(burn_time: float, avg_thrust: float,
+                           max_thrust: float = 0.0,
+                           total_impulse: float = 0.0) -> list:
+    """A thrust curve for a motor known only by its catalogue numbers.
 
-    Mirrors SimulationEngine._build_thrust_curve so a single-stage manager
-    produces the identical curve to the legacy scalar path.
+    0 → peak over the first 10 % of the burn, a plateau, and back to 0 over
+    the last 10 %. The peak is the rated maximum thrust (1.4 × average when
+    not given) and the plateau is solved so the curve integrates to the rated
+    total impulse (average × burn time when not given). When the peak alone
+    exceeds that impulse it becomes a triangle with the same area.
+
+    The one construction every flight path uses. There were two: the batch
+    runner kept the rated peak, while the interactive engine and the stage
+    manager scaled the whole curve to the impulse, which also scaled the
+    peak. Monte Carlo then saw a 4 % higher peak acceleration and a 1.3 %
+    faster rail exit than the Simulation tab for the same motor.
     """
-    if cfg.custom_thrust_curve:
-        return sanitize_thrust_curve(cfg.custom_thrust_curve)
-
-    bt = cfg.motor_burn_time
-    avg = cfg.motor_avg_thrust
-    mx = cfg.motor_max_thrust if cfg.motor_max_thrust > 0 else avg * 1.4
+    bt = burn_time
     if bt <= 0:
         return []
+    max_t = max_thrust if max_thrust > 0 else avg_thrust * 1.4
+    impulse = total_impulse if total_impulse > 0 else avg_thrust * bt
+    if impulse <= 0 or max_t <= 0:
+        return []
 
-    ramp = bt * 0.1
-    curve = [(0.0, 0.0), (ramp, mx), (bt - ramp, avg), (bt, 0.0)]
-    impulse = sum(
-        0.5 * (curve[i][1] + curve[i + 1][1]) * (curve[i + 1][0] - curve[i][0])
-        for i in range(len(curve) - 1)
-    )
-    target = avg * bt
-    if impulse > 0 and target > 0:
-        scale = target / impulse
-        curve = [(t, f * scale) for t, f in curve]
-    return curve
+    ramp_frac = 0.1
+    ramp = bt * ramp_frac
+    #   area = 0.5·(1 - ramp_frac)·bt·(max_t + plateau) = impulse
+    plateau = 2.0 * impulse / ((1.0 - ramp_frac) * bt) - max_t
+    if plateau < 0.0:
+        return [(0.0, 0.0), (ramp, 2.0 * impulse / bt), (bt, 0.0)]
+    return [(0.0, 0.0), (ramp, max_t), (bt - ramp, plateau), (bt, 0.0)]
+
+
+def build_thrust_curve(cfg: StageConfig) -> list:
+    """The thrust curve one stage flies: its measured curve when it has one,
+    otherwise trapezoid_thrust_curve from its catalogue numbers."""
+    if cfg.custom_thrust_curve:
+        return sanitize_thrust_curve(cfg.custom_thrust_curve)
+    return trapezoid_thrust_curve(cfg.motor_burn_time, cfg.motor_avg_thrust,
+                                  cfg.motor_max_thrust, cfg.motor_total_impulse)
 
 
 def _find_child(component, cls):

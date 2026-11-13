@@ -53,6 +53,7 @@ class FlightResult:
     flight_time_s: float
     landed: bool
     history: object               # HistoryManager — full time series
+    summary: object = None        # core.flight_summary.FlightSummary
 
     def series(self, field: str):
         """(times, values) for a recorded field, e.g. 'altitude', 'velocity'."""
@@ -109,6 +110,7 @@ def run_flight(state: RocketState, max_sim_time: float = 1800.0,
         flight_time_s=flight_time,
         landed=(s.sim_phase == "Landed"),
         history=hist,
+        summary=sim.summary,
     )
 
 

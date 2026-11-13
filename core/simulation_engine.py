@@ -104,6 +104,21 @@ class SimulationEngine(QObject):
         self._last_descent_vz = 0.0      # |vz| of most recent descent tick
         self._drogue_descent_rate = 0.0  # captured at main deploy
 
+        # ── Flight summary (core.flight_summary) ──
+        self.summary = None              # FlightSummary of the last flight
+        self._reset_summary_trackers()
+
+    def _reset_summary_trackers(self):
+        self._sum_apogee = 0.0
+        self._sum_apogee_time = None
+        self._sum_rail_exit_v = None
+        self._sum_rail_exit_t = None
+        self._sum_rail_stab = None
+        self._sum_min_stab = None
+        self._sum_max_sensed = 0.0
+        self._sum_touchdown = 0.0
+        self._sum_drogue_rate = None
+
     # ── Public API ────────────────────────────────────────────────
 
     def start(self):
@@ -230,6 +245,8 @@ class SimulationEngine(QObject):
         self._recovery_shock_peak = 0.0
         self._last_descent_vz = 0.0
         self._drogue_descent_rate = 0.0
+        self.summary = None
+        self._reset_summary_trackers()
         self.spent_stages = []
         self.spent_stage_results = []
         self._flutter_warned = False
@@ -296,6 +313,8 @@ class SimulationEngine(QObject):
         self._phase = FlightPhase.TERMINATED
         self.engine.update(sim_running=False, sim_paused=False,
                           sim_phase=FlightPhase.TERMINATED.value)
+        if self._state_vec is not None:
+            self._build_summary(self.engine.state.sim_time)
         self.event_mgr.fire(SimEvent.SIM_END, {
             "time": self.engine.state.sim_time,
             "reason": "user_stop",
@@ -359,6 +378,7 @@ class SimulationEngine(QObject):
         self._phase = FlightPhase.ABORTED
         self.engine.update(sim_running=False,
                            sim_phase=FlightPhase.ABORTED.value, emit=False)
+        self._build_summary(t)
         self.event_mgr.fire(SimEvent.SIM_ABORT, {
             "time": t, "title": title, "detail": detail,
         })
@@ -452,33 +472,10 @@ class SimulationEngine(QObject):
             self._thrust_curve = curve
             return
 
-        bt = s.motor_burn_time
-        avg_t = s.motor_avg_thrust
-        max_t = s.motor_max_thrust if s.motor_max_thrust > 0 else avg_t * 1.4
-
-        if bt <= 0:
-            self._thrust_curve = []
-            return
-
-        ramp = bt * 0.1
-        curve = [
-            (0.0, 0.0),
-            (ramp, max_t),
-            (bt - ramp, avg_t),
-            (bt, 0.0),
-        ]
-        # Normalize so the curve integrates to the motor's true total impulse
-        # (avg_thrust × burn_time). The raw trapezoid overshoots by ~8% when
-        # max_t = 1.4·avg_t, which inflated every burn's delivered impulse.
-        impulse = sum(
-            0.5 * (curve[i][1] + curve[i + 1][1]) * (curve[i + 1][0] - curve[i][0])
-            for i in range(len(curve) - 1)
-        )
-        target = avg_t * bt
-        if impulse > 0 and target > 0:
-            scale = target / impulse
-            curve = [(t, f * scale) for t, f in curve]
-        self._thrust_curve = curve
+        from core.staging import trapezoid_thrust_curve
+        self._thrust_curve = trapezoid_thrust_curve(
+            s.motor_burn_time, s.motor_avg_thrust, s.motor_max_thrust,
+            s.motor_total_impulse)
 
     def _get_thrust(self, t: float) -> float:
         """Interpolate thrust at time t."""
@@ -685,6 +682,14 @@ class SimulationEngine(QObject):
         ay = (ty + drag_y + normal_y) / mass
         az = (tz + drag_z + normal_z - weight) / mass
 
+        # Peak sensed acceleration (non-gravitational force / mass), over
+        # every derivative evaluation — the batch runner's definition.
+        sensed = math.sqrt((tx + drag_x + normal_x) ** 2
+                           + (ty + drag_y + normal_y) ** 2
+                           + (tz + drag_z + normal_z) ** 2) / mass
+        if sensed > self._sum_max_sensed:
+            self._sum_max_sensed = sensed
+
         # Safety clamp: cap acceleration at 500G to prevent divergence
         MAX_ACCEL = 500.0 * 9.81
         ax = max(-MAX_ACCEL, min(MAX_ACCEL, ax))
@@ -749,6 +754,89 @@ class SimulationEngine(QObject):
         return [vx, vy, vz, ax, ay, az,
                 pitch_rate, yaw_euler_rate(yaw_rate, pitch), roll_rate,
                 pitch_accel, yaw_accel, roll_accel, dm_dt]
+
+    # ── Flight summary ────────────────────────────────────────────
+
+    def _track_summary(self, s, t_now, dt, prev_vec, new_vec, altitude,
+                       mach) -> float:
+        """Update the summary trackers for one accepted step. Returns the
+        static margin at this step (NaN without an aero model).
+
+        Same definitions as run_batch_simulation (see core.flight_summary).
+        """
+        if altitude > self._sum_apogee:
+            self._sum_apogee = altitude
+            self._sum_apogee_time = t_now
+
+        margin = float('nan')
+        if self.aero_model is not None:
+            ms = self.stage_mgr is not None and self.stage_mgr.is_multistage
+            cg = self.stage_mgr.active_cg() if ms else s.cg
+            margin = self.aero_model.static_margin(mach, cg)
+
+        # Rail exit: the step that carries the rocket past the rod top,
+        # interpolated on v² (linear in distance at constant acceleration).
+        # The interactive engine did not report this at all.
+        rod = getattr(s, 'launch_rod_length', 1.0) or 1.0
+        if self._sum_rail_exit_t is None and new_vec[2] >= rod:
+            z0, z1 = max(0.0, prev_vec[2]), new_vec[2]
+            v0 = prev_vec[3] ** 2 + prev_vec[4] ** 2 + prev_vec[5] ** 2
+            v1 = new_vec[3] ** 2 + new_vec[4] ** 2 + new_vec[5] ** 2
+            frac = (rod - z0) / (z1 - z0) if z1 - z0 > 1e-12 else 1.0
+            frac = max(0.0, min(1.0, frac))
+            self._sum_rail_exit_v = math.sqrt(max(0.0, v0 + frac * (v1 - v0)))
+            self._sum_rail_exit_t = t_now - dt * (1.0 - frac)
+            self._sum_rail_stab = margin if math.isfinite(margin) else None
+
+        if (self._sum_rail_exit_t is not None and math.isfinite(margin)
+                and self._phase in (FlightPhase.BOOST, FlightPhase.COAST)):
+            if self._sum_min_stab is None or margin < self._sum_min_stab:
+                self._sum_min_stab = margin
+        # (Peak sensed acceleration is tracked in _derivatives.)
+        return margin
+
+    def _build_summary(self, t_end: float) -> None:
+        """Freeze the trackers into self.summary (landing, timeout, abort or
+        stop)."""
+        from core.flight_summary import FlightSummary, flight_warnings
+
+        s = self.engine.state
+        landed = self._phase == FlightPhase.LANDED
+        drogue_open = self._drogue_deployed and getattr(s, 'drogue_cd_area', 0.0) > 0.0
+        main_open = self._main_deployed and getattr(s, 'main_cd_area', 0.0) > 0.0
+        x, y = (self._state_vec[0], self._state_vec[1]) if self._state_vec else (0.0, 0.0)
+        landing_v = self._sum_touchdown if landed else None
+        self.summary = FlightSummary(
+            source="interactive",
+            final_phase=self._phase.value,
+            apogee=self._sum_apogee,
+            max_velocity=s.max_velocity,
+            max_mach=s.max_mach,
+            max_acceleration=self._sum_max_sensed,
+            max_q=self._max_q,
+            flight_time=t_end,
+            apogee_time=self._sum_apogee_time,
+            rail_exit_velocity=self._sum_rail_exit_v,
+            rail_exit_time=self._sum_rail_exit_t,
+            stability_at_rail_exit=self._sum_rail_stab,
+            min_stability=self._sum_min_stab,
+            drogue_descent_rate=self._sum_drogue_rate,
+            landing_velocity=landing_v,
+            landing_x=x if landed else None,
+            landing_y=y if landed else None,
+            landing_drift=math.hypot(x, y) if landed else None,
+            descent_time=(t_end - self._sum_apogee_time
+                          if landed and self._sum_apogee_time is not None else None),
+            recovery_shock_force=(self._recovery_shock_peak
+                                  if drogue_open or main_open else None),
+            drogue_deployed=drogue_open,
+            main_deployed=main_open,
+            warnings=flight_warnings(
+                landed=landed, apogee=self._sum_apogee,
+                min_stability=self._sum_min_stab,
+                canopy_opened=drogue_open or main_open,
+                landing_velocity=landing_v),
+        )
 
     def _estimate_inertia(self, mass: float, s) -> float:
         """Fallback pitch inertia estimate: thin rod Iyy = m*L^2/12."""
@@ -850,6 +938,7 @@ class SimulationEngine(QObject):
         self._prev_dt = adaptive_dt
 
         # ── Integrate ──
+        prev_vec = list(self._state_vec)
         try:
             new_vec = self.integrator.step(self._state_vec, t, adaptive_dt, self._derivatives)
         except Exception as e:
@@ -863,6 +952,11 @@ class SimulationEngine(QObject):
         if new_vec[2] < 0.0:        # z (altitude)
             new_vec[2] = 0.0
             if new_vec[5] < 0.0:    # vz
+                # Descent rate the vehicle met the ground with; the clamp
+                # erases it. The touchdown rate used to be the last descent
+                # rate seen UNDER A CANOPY, so a flight with no parachute
+                # reported landing at 0 m/s.
+                self._sum_touchdown = -new_vec[5]
                 new_vec[5] = 0.0
 
         # ── Recovery attitude stabilization ──
@@ -1020,6 +1114,8 @@ class SimulationEngine(QObject):
                 # Descent rate reached under the drogue (touchdown velocity is
                 # captured separately at landing). |vz| just before the main fills.
                 self._drogue_descent_rate = abs(new_vz)
+                if self._drogue_deployed and getattr(s, 'drogue_cd_area', 0.0) > 0.0:
+                    self._sum_drogue_rate = abs(new_vz)
                 if self.recovery is not None:
                     self.recovery.main.deploy(t + adaptive_dt)
                     self.recovery.main_deployed = True
@@ -1179,6 +1275,11 @@ class SimulationEngine(QObject):
             gyro_z=gyro_z_val,
         )
 
+        # ── Flight summary trackers (after the tick, so s.cg is live) ──
+        static_margin = self._track_summary(
+            s, t + adaptive_dt, adaptive_dt, prev_vec, new_vec,
+            new_altitude, mach)
+
         # ── Record history ──
         self.history.record(
             time=t + adaptive_dt,
@@ -1203,17 +1304,17 @@ class SimulationEngine(QObject):
             mass=new_mass,
             cg=s.cg,
             cp=aero.get('cp', s.cp),
-            # Static margin is meaningless past apogee: at near-zero airspeed
-            # the AoA pegs at the 45° clamp and drags CP to a garbage position
-            # (margin collapses toward zero), and under a canopy the attitude
-            # is frozen entirely. Record NaN from apogee onward so plots show
-            # a clean gap instead of an artificial collapse.
+            # The static margin the summary reports (AeroModel.static_margin),
+            # so the plot and the Min Stability number are one quantity. It
+            # used to plot the angle-of-attack-dependent margin, which moved
+            # with every gust. Meaningless past apogee and under a canopy:
+            # NaN there, so plots show a gap rather than a collapse.
             stability_margin=(float('nan')
                               if (self._drogue_deployed or self._main_deployed
                                   or self._phase not in (FlightPhase.PRELAUNCH,
                                                          FlightPhase.BOOST,
                                                          FlightPhase.COAST))
-                              else aero.get('stab_margin', s.stability_margin)),
+                              else static_margin),
             phase=self._phase.value,
             cd=cd,
             atm_temperature=atm_temp,
@@ -1242,7 +1343,7 @@ class SimulationEngine(QObject):
             # Recovery summary: landing point, drift radius, descent rates,
             # opening shock, descent duration (apogee → touchdown).
             landing_drift = math.sqrt(new_x ** 2 + new_y ** 2)
-            touchdown_rate = self._last_descent_vz
+            touchdown_rate = self._sum_touchdown
             descent_time = max(0.0, (t + adaptive_dt) - self._apogee_time) \
                 if self._apogee_time > 0 else 0.0
             self.engine.update(
@@ -1253,6 +1354,7 @@ class SimulationEngine(QObject):
                 recovery_shock_force=self._recovery_shock_peak,
                 descent_time=descent_time,
             )
+            self._build_summary(t + adaptive_dt)
             self.event_mgr.fire(SimEvent.LANDING, {
                 "time": t + dt, "flight_time": t + dt,
                 "max_altitude": s.max_altitude,
@@ -1311,6 +1413,7 @@ class SimulationEngine(QObject):
             self._running = False
             self._phase = FlightPhase.TIMEOUT
             self.engine.update(sim_running=False, sim_phase=FlightPhase.TIMEOUT.value)
+            self._build_summary(t + adaptive_dt)
             self.event_mgr.fire(SimEvent.SIM_END, {"time": t + dt, "reason": "timeout"})
             self.sim_finished.emit()
             logger.warning("Simulation timeout (3600s)")

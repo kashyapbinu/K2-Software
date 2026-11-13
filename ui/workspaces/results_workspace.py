@@ -15,6 +15,43 @@ from ui import theme
 
 logger = logging.getLogger("K2.ResultsWS")
 
+# (FlightSummary field, tile label). Formatting lives in summary_text().
+SUMMARY_TILES = [
+    ("apogee", "Apogee"),
+    ("max_velocity", "Max Velocity"),
+    ("max_mach", "Max Mach"),
+    ("max_acceleration", "Max Accel (sensed)"),
+    ("max_q", "Max-Q"),
+    ("rail_exit_velocity", "Rail Exit"),
+    ("stability_at_rail_exit", "Stability @ Rail"),
+    ("min_stability", "Min Stability"),
+    ("drogue_descent_rate", "Drogue Descent"),
+    ("landing_velocity", "Landing Speed"),
+    ("landing_drift", "Drift"),
+    ("flight_time", "Flight Time"),
+]
+
+
+def summary_text(summary, key: str) -> str:
+    """One FlightSummary value as tile text; "—" for a value the flight did
+    not produce (None), never a made-up zero."""
+    value = getattr(summary, key, None) if summary is not None else None
+    if value is None:
+        return "—"
+    if key == "max_acceleration":
+        return f"{value:.0f} m/s² ({value / 9.80665:.1f} g)"
+    if key == "max_q":
+        return f"{value / 1000.0:.1f} kPa"
+    if key == "max_mach":
+        return f"{value:.3f}"
+    if key in ("stability_at_rail_exit", "min_stability"):
+        return f"{value:.2f} cal"
+    if key == "flight_time":
+        return f"{value:.1f} s"
+    if key in ("apogee", "landing_drift"):
+        return f"{value:.0f} m"
+    return f"{value:.1f} m/s"
+
 
 class ReadoutValue(QLabel):
     def __init__(self, text="—", parent=None):
@@ -77,6 +114,25 @@ class ResultsWorkspace(QWidget):
             f"background-color: {theme.PANEL}; border-radius: 6px;")
         self.summary_label.setWordWrap(True)
         layout.addWidget(self.summary_label)
+
+        # Flight summary (core.flight_summary): the headline numbers, from
+        # the same object the rules check and the report read.
+        sum_frame = QFrame()
+        sum_frame.setStyleSheet(f"background-color: {theme.BG}; border: 1px solid {theme.RAISED}; border-radius: 6px;")
+        sg = QGridLayout(sum_frame)
+        sg.setContentsMargins(8, 6, 8, 6)
+        sg.setSpacing(6)
+        self.summary_tiles = {}
+        for i, (key, label) in enumerate(SUMMARY_TILES):
+            col, row = i % 6, (i // 6) * 2
+            header = QLabel(label)
+            header.setStyleSheet(f"color: {theme.TEXT_DIM}; font-weight: 600; font-size: 11px;")
+            header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            sg.addWidget(header, row, col)
+            val = ReadoutValue("—")
+            self.summary_tiles[key] = val
+            sg.addWidget(val, row + 1, col)
+        layout.addWidget(sum_frame)
 
         # Timeline scrubber
         scrub_frame = QFrame()
@@ -178,6 +234,7 @@ class ResultsWorkspace(QWidget):
         history = self._get_history()
         if history is None:
             self.summary_label.setText("No simulation data. Run a simulation first.")
+            self._show_summary(None)
             return
 
         self._history = history
@@ -218,24 +275,29 @@ class ResultsWorkspace(QWidget):
 
         self._plot_landing()
 
-        # Summary
-        s = self.engine.state
-        self.summary_label.setText(
-            f"Apogee: {s.max_altitude:.1f} m  |  Max Vel: {s.max_velocity:.1f} m/s  |  "
-            f"Max Mach: {s.max_mach:.3f}  |  Max Accel: {s.max_acceleration:.1f} m/s²  |  "
-            f"Flight Time: {t_vals[-1]:.2f} s  |  {history.count} data points"
-        )
+        # Summary — every number from the flight's FlightSummary.
+        summary = getattr(self.sim_engine, "summary", None)
+        self._show_summary(summary)
+        status = summary.final_phase if summary is not None else "In flight"
+        text = f"Flight: {status}  |  {history.count} data points"
+        if summary is not None and summary.warnings:
+            text += "\n⚠ " + "\n⚠ ".join(summary.warnings)
+        self.summary_label.setText(text)
         self.summary_label.setStyleSheet(f"color: {theme.OK}; font-size: 13px; padding: 8px; "
             f"background-color: {theme.PANEL}; border: 1px solid {theme.RAISED}; border-radius: 6px; font-weight: 600;")
 
         # Append sim-vs-measured comparison when a flight log is loaded.
-        if self._flight_log:
-            cmp = compare_apogee(s.max_altitude, self._flight_log)
+        if self._flight_log and summary is not None:
+            cmp = compare_apogee(summary.apogee, self._flight_log)
             self.summary_label.setText(
                 self.summary_label.text() +
                 f"\n📈 Log '{self._flight_log['source']}' — "
                 f"Measured apogee: {cmp['measured_apogee']:.1f} m  |  "
                 f"Sim error: {cmp['error_m']:+.1f} m ({cmp['error_pct']:+.1f}%)")
+
+    def _show_summary(self, summary):
+        for key, tile in self.summary_tiles.items():
+            tile.setText(summary_text(summary, key))
 
     def _plot_with_overlay(self, plot, t, y, meas_key, title, xlabel, ylabel, color):
         """Plot the sim series, overlaying the imported measured channel if present."""

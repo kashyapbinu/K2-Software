@@ -829,6 +829,32 @@ class AeroModel:
             return self.body_length * 0.5
         return (self._cn_alpha_nose * self._cp_nose + m_fins + m_trans) / cn_total
 
+    def cp_at_mach(self, mach: float) -> float:
+        """Barrowman CP at *mach* and zero incidence: nose, fin sets and
+        transitions, with the fins' Mach correction. cp_subsonic() is this at
+        Mach 0. Body lift is left out: it only appears with angle of attack,
+        and the static margin is defined at zero incidence."""
+        cn_fins, m_fins = self._sum_terms(self._fin_terms(max(0.0, mach)))
+        cn_trans, m_trans = self._sum_terms(self._transition_terms)
+        cn_total = self._cn_alpha_nose + cn_fins + cn_trans
+        if cn_total <= 0:
+            return self.body_length * 0.5
+        cp = (self._cn_alpha_nose * self._cp_nose + m_fins + m_trans) / cn_total
+        # Same bound compute() applies: supersonic fin terms can overshoot.
+        return max(0.0, min(cp, self.body_length))
+
+    def static_margin(self, mach: float, cg: float) -> float:
+        """Static stability margin (calibers) at *mach*: CP at zero incidence
+        minus CG, over the body diameter.
+
+        The one definition both flight engines report. The interactive
+        engine's per-step margin also carried the angle-of-attack body lift
+        (so it moved with every gust) and the batch runner used the Mach-0 CP
+        all the way to Mach 5, so the Simulation tab and Monte Carlo printed
+        different "minimum stability" for the same flight.
+        """
+        return self.stability_margin(self.cp_at_mach(mach), cg)
+
     def stability_margin(self, cp: float, cg: float) -> float:
         if self.body_diameter <= 0:
             return 0.0
