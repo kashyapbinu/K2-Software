@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import hashlib
 import os
 import ssl
 import subprocess
@@ -88,6 +89,7 @@ class UpdateInfo:
     asset_name: str       # installer filename
     asset_url: str        # browser_download_url
     asset_size: int       # bytes
+    asset_sha256: str = ""  # hex digest published with the release, if any
 
 
 def _http_get_json(url: str) -> dict:
@@ -137,16 +139,32 @@ def fetch_latest() -> Optional[UpdateInfo]:
         asset_name=asset.get("name", f"K2-Setup{suffix}"),
         asset_url=asset["browser_download_url"],
         asset_size=int(asset.get("size", 0)),
+        asset_sha256=_sha256_of(asset.get("digest")),
     )
 
 
-def _download(url: str, dest: str, progress_cb=None, is_cancelled=None) -> None:
+def _sha256_of(digest) -> str:
+    """Hex SHA-256 from a GitHub asset ``digest`` ("sha256:<hex>"), or ""."""
+    text = str(digest or "").strip().lower()
+    if text.startswith("sha256:"):
+        hexpart = text[len("sha256:"):]
+        if len(hexpart) == 64 and all(c in "0123456789abcdef" for c in hexpart):
+            return hexpart
+    return ""
+
+
+def _download(url: str, dest: str, progress_cb=None, is_cancelled=None,
+              expected_size: int = 0, expected_sha256: str = "") -> None:
     """Stream *url* to *dest*. progress_cb(pct:int) called 0..100.
 
-    Raises on failure. Removes the partial file if cancelled.
+    Raises on failure. Removes the partial file if cancelled, and removes the
+    file and raises if it is not the size or SHA-256 the release lists: the
+    caller runs it as an installer, and a connection dropped part-way used to
+    hand over a truncated .exe as if it were complete.
     """
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     ctx = ssl.create_default_context()
+    sha = hashlib.sha256()
     with urllib.request.urlopen(req, timeout=_TIMEOUT, context=ctx) as resp:
         total = int(resp.headers.get("Content-Length", 0))
         read = 0
@@ -164,9 +182,25 @@ def _download(url: str, dest: str, progress_cb=None, is_cancelled=None) -> None:
                 if not buf:
                     break
                 f.write(buf)
+                sha.update(buf)
                 read += len(buf)
                 if progress_cb and total:
                     progress_cb(min(100, int(read * 100 / total)))
+
+    problem = ""
+    want_size = expected_size or total
+    if want_size and read != want_size:
+        problem = (f"download incomplete ({read:,} of {want_size:,} bytes) — "
+                   f"please try again")
+    elif expected_sha256 and sha.hexdigest() != expected_sha256.lower():
+        problem = "downloaded installer does not match the published checksum"
+    if problem:
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        raise RuntimeError(problem)
+
     if progress_cb:
         progress_cb(100)
 
@@ -228,12 +262,15 @@ class UpdateWorker(QThread):
                     self.error.emit("no update selected")
                     return
                 dest = os.path.join(
-                    tempfile.gettempdir(), self._info.asset_name
+                    tempfile.gettempdir(),
+                    os.path.basename(self._info.asset_name) or "K2-Setup.exe",
                 )
                 _download(
                     self._info.asset_url, dest,
                     progress_cb=self.progress.emit,
                     is_cancelled=lambda: self._cancel,
+                    expected_size=self._info.asset_size,
+                    expected_sha256=self._info.asset_sha256,
                 )
                 self.downloaded.emit(dest)
         except urllib.error.URLError as e:
