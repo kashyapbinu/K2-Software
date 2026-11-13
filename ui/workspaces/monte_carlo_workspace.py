@@ -16,7 +16,7 @@ import matplotlib
 matplotlib.use("QtAgg")
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from matplotlib.patches import Ellipse, Circle
+from matplotlib.patches import Circle
 from scipy import stats
 
 from PyQt6.QtWidgets import (
@@ -31,10 +31,33 @@ from ui.icons import icon
 from core.monte_carlo_engine import (
     MonteCarloConfig, MonteCarloEngine, MonteCarloResults,
 )
+from core.batch_simulation import result_diverged
+from core.flight_summary import FlightSummary
+from core.landing_map import ellipse_coverage, fit_dispersion
 
 from ui import theme
 
 logger = logging.getLogger("K2.MonteCarloWS")
+
+
+def landing_points(r) -> list:
+    """(north, east) landing points of the statistics' valid runs; the flight
+    frame is +X north, +Y east."""
+    xs = r.landing_x_values if r.landing_x_values else [run.landing_x for run in r.runs]
+    ys = r.landing_y_values if r.landing_y_values else [run.landing_y for run in r.runs]
+    return [(float(n), float(e)) for n, e in zip(xs, ys)
+            if math.isfinite(n) and math.isfinite(e)]
+
+
+def landing_dispersion(r):
+    """The dispersion ellipse every view of a Monte Carlo run uses."""
+    return fit_dispersion(landing_points(r))
+
+
+def run_summaries(r) -> list:
+    """FlightSummary of every run that is a real flight (no divergence, no
+    refused config), for the rules check."""
+    return [FlightSummary.from_batch(run) for run in r.runs if not result_diverged(run)]
 
 # ── Stylesheet constants ────────────────────────────────────────────────────
 
@@ -319,6 +342,21 @@ class MonteCarloWorkspace(QWidget):
         self.btn_export_pdf.clicked.connect(self._on_export_pdf)
         al.addWidget(self.btn_export_pdf)
 
+        self.btn_export_kml = QPushButton(icon("export"), "LANDING MAP (KML/CSV)")
+        self.btn_export_kml.setToolTip(
+            "Landing points and 1/2/3σ ellipses as latitude/longitude, for "
+            "Google Earth (KML) or a spreadsheet (CSV). Needs the launch "
+            "site's position (Simulation tab).")
+        self.btn_export_kml.setEnabled(False)
+        self.btn_export_kml.clicked.connect(self._on_export_landing_map)
+        al.addWidget(self.btn_export_kml)
+
+        self.btn_rules = QPushButton(icon("check"), "CHECK RULES")
+        self.btn_rules.setToolTip("Pass rate of each competition rule over every flight.")
+        self.btn_rules.setEnabled(False)
+        self.btn_rules.clicked.connect(self._on_check_rules)
+        al.addWidget(self.btn_rules)
+
         g8.setLayout(al)
         lay.addWidget(g8)
 
@@ -510,7 +548,7 @@ class MonteCarloWorkspace(QWidget):
                     w.setText("—")
                 except Exception:
                     pass
-        for b in ("btn_export", "btn_export_pdf"):
+        for b in ("btn_export", "btn_export_pdf", "btn_export_kml", "btn_rules"):
             w = getattr(self, b, None)
             if w is not None:
                 try:
@@ -607,6 +645,8 @@ class MonteCarloWorkspace(QWidget):
         self.btn_cancel.setEnabled(False)
         self.btn_export.setEnabled(True)
         self.btn_export_pdf.setEnabled(True)
+        self.btn_export_kml.setEnabled(True)
+        self.btn_rules.setEnabled(True)
         self.progress_bar.setValue(100)
 
         n_valid = getattr(results, 'n_valid', n)
@@ -715,6 +755,7 @@ class MonteCarloWorkspace(QWidget):
         ax = self._ax_landing
         ax.clear()
         _style_ax(ax, "Landing Dispersion", "East (m)", "North (m)")
+        self._landing_dispersion = landing_dispersion(r)
 
         # Use pre-filtered valid landing values from statistics engine
         xs = np.array(r.landing_x_values) if r.landing_x_values else np.array([run.landing_x for run in r.runs])
@@ -731,38 +772,24 @@ class MonteCarloWorkspace(QWidget):
             self._canvas_landing.draw()
             return
 
-        # All points in the filtered set are physics-valid
-        ax.scatter(xs, ys, c=theme.ACCENT, s=8,
+        # The flight frame is +X north, +Y east (environment.wind_model):
+        # landing_x is NORTH. This plot used to put it on the axis labelled
+        # East, which mirrored the whole map across the diagonal. East is
+        # horizontal and north vertical from here on.
+        ax.scatter(ys, xs, c=theme.ACCENT, s=8,
                    alpha=0.5, label=f"Valid ({len(xs)})", zorder=3)
 
-        # ── Dispersion ellipses ──
-        # Landing scatter is strongly correlated (downrange spread dwarfs
-        # crossrange, and the axis is set by the wind, not by East/North), so
-        # axis-aligned sigma-x / sigma-y boxes misstate it. Use the covariance
-        # eigenvectors for the orientation, and chi-square(2 dof) quantiles for
-        # the radii: a 2-D ellipse drawn at 1 sigma semi-axes holds only 39.3%
-        # of the distribution, not the 68% the label implies.
-        cx, cy = float(np.mean(xs)), float(np.mean(ys))
-        if len(xs) > 2:
-            cov = np.cov(xs, ys)
-            eigvals, eigvecs = np.linalg.eigh(cov)
-            eigvals = np.maximum(eigvals, 0.0)
-            order = np.argsort(eigvals)[::-1]
-            eigvals, eigvecs = eigvals[order], eigvecs[:, order]
-            angle = float(np.degrees(np.arctan2(eigvecs[1, 0], eigvecs[0, 0])))
-            # chi2.ppf([0.393, 0.865, 0.989], df=2) -> the classic 1/2/3 sigma
-            # containment fractions carried over to two dimensions.
-            for chi2, pct_label, alpha_val in [(2.296, "39%", 0.5),
-                                               (6.180, "86%", 0.35),
-                                               (11.829, "99%", 0.2)]:
-                w = 2.0 * math.sqrt(chi2 * eigvals[0])
-                h = 2.0 * math.sqrt(chi2 * eigvals[1])
-                ax.add_patch(Ellipse(
-                    (cx, cy), max(w, 1.0), max(h, 1.0), angle=angle,
-                    fill=False, edgecolor=theme.ACCENT, linewidth=1.2,
-                    alpha=alpha_val, linestyle="--",
-                    label=f"{pct_label} containment",
-                ))
+        # ── Dispersion ellipses: the one fit the KML export and the
+        # technical report use (core.landing_map.fit_dispersion). k-sigma
+        # ellipses of a 2-D normal hold 39 / 86 / 99 % of the landings.
+        disp = self._landing_dispersion
+        if disp is not None:
+            for k, alpha_val in ((1.0, 0.5), (2.0, 0.35), (3.0, 0.2)):
+                poly = disp.polygon(k)
+                ax.plot([e for _, e in poly], [n for n, _ in poly],
+                        color=theme.ACCENT, linewidth=1.2, alpha=alpha_val,
+                        linestyle="--",
+                        label=f"{k:g}σ ({ellipse_coverage(k) * 100:.0f}% containment)")
 
         # ── Containment radii from the pad (range-safety metric) ──
         # R95/R99 = radius from the launch point enclosing 95%/99% of landings.
@@ -799,7 +826,7 @@ class MonteCarloWorkspace(QWidget):
                 # highlight violating landings
                 if n_out:
                     out_mask = d_pad > safe_r
-                    ax.scatter(safety_xs[out_mask], safety_ys[out_mask], c=theme.ERR,
+                    ax.scatter(safety_ys[out_mask], safety_xs[out_mask], c=theme.ERR,
                                s=14, marker="x", zorder=6, label=f"Outside ({n_out})")
                 verdict = "PASS" if ok else "FAIL"
                 # Diverged runs have no meaningful landing point, so they cannot
@@ -820,7 +847,7 @@ class MonteCarloWorkspace(QWidget):
         uxs = getattr(r, "unstable_landing_x", None)
         uys = getattr(r, "unstable_landing_y", None)
         if uxs and uys:
-            ax.scatter(uxs, uys, c=theme.ERR, s=26, marker="D",
+            ax.scatter(uys, uxs, c=theme.ERR, s=26, marker="D",
                        edgecolors=theme.TEXT_BRIGHT, linewidths=0.5, zorder=7,
                        label=f"Unstable ({len(uxs)})")
 
@@ -836,6 +863,55 @@ class MonteCarloWorkspace(QWidget):
 
         self._ax_landing.figure.tight_layout()
         self._canvas_landing.draw()
+
+    # ── Landing map export / rules ─────────────────────────────────
+
+    def landing_set(self):
+        """The current run's landings as a core.landing_map.LandingSet."""
+        from core.landing_map import LandingSet
+        s = self.engine.state
+        return LandingSet(site_name=s.launch_site_name or s.name,
+                          lat0=s.launch_latitude, lon0=s.launch_longitude,
+                          pad_altitude=s.launch_altitude,
+                          landings=landing_points(self._results) if self._results else [])
+
+    def _on_export_landing_map(self, path: str = None):
+        from core.landing_map import to_csv, to_kml
+        if self._results is None:
+            return
+        s = self.engine.state
+        if not (s.launch_latitude or s.launch_longitude) and not path:
+            QMessageBox.warning(
+                self, "Landing Map",
+                "The launch site has no position. Set its latitude and "
+                "longitude in the Simulation tab (Launch Site) first.")
+            return
+        if not path:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Export Landing Map", f"{s.name}_landings.kml",
+                "Google Earth (*.kml);;CSV (*.csv)")
+            if not path:
+                return
+        ls = self.landing_set()
+        text = to_csv(ls) if path.lower().endswith(".csv") else to_kml(ls)
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        logger.info("Landing map exported: %s (%d landings)", path, len(ls.landings))
+
+    def _on_check_rules(self):
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout as _V
+        from ui.widgets.rules_panel import RulesPanel
+        if self._results is None:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Rules check — Monte Carlo")
+        dlg.resize(900, 520)
+        lay = _V(dlg)
+        panel = RulesPanel(dlg)
+        panel.set_flights(run_summaries(self._results), self.engine.state)
+        lay.addWidget(panel)
+        self._rules_dialog = dlg
+        dlg.exec()
 
     def _on_safety_radius_changed(self, _v):
         """Re-draw the dispersion plot when the safety radius changes."""

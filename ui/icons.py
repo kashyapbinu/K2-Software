@@ -66,6 +66,7 @@ _MAP = {
     "open":          "fa5s.folder-open",
     "save":          "fa5s.save",
     "target":        "fa5s.bullseye",
+    "check":         "fa5s.tasks",
     "save_as":       "fa5s.clone",
     "import":        "fa5s.file-import",
     "run":           "fa5s.play",
