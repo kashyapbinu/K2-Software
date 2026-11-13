@@ -529,6 +529,10 @@ class MainWindow(QMainWindow):
         dlg.exec()
         if hasattr(self, "ai_panel"):
             self.ai_panel.reload_provider()
+        # Display units may have changed: redraw what shows numbers.
+        self.simulation_ws._update_readouts(self.engine.state)
+        if self.sim_engine.history.count:
+            self.results_ws.refresh_plots()
 
     def _on_theme_changed(self, mode: str):
         """Repaint what the global stylesheet cannot reach on its own.

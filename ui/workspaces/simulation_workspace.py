@@ -959,14 +959,15 @@ class SimulationWorkspace(QWidget):
         self.time_label.setText(f"T+ {s.sim_time:.2f} s")
         self.phase_label.setText(s.sim_phase)
 
-        self.readouts["Altitude"].setText(f"{s.altitude:.1f}")
-        self.readouts["Velocity"].setText(f"{s.velocity:.1f}")
-        self.readouts["Acceleration"].setText(f"{s.acceleration:.1f}")
-        self.readouts["Thrust"].setText(f"{s.thrust:.1f}")
-        self.readouts["Drag"].setText(f"{s.drag:.1f}")
+        from ui.units import format_value as fv
+        self.readouts["Altitude"].setText(fv(s.altitude, "altitude"))
+        self.readouts["Velocity"].setText(fv(s.velocity, "velocity"))
+        self.readouts["Acceleration"].setText(fv(s.acceleration, "acceleration"))
+        self.readouts["Thrust"].setText(fv(s.thrust, "force"))
+        self.readouts["Drag"].setText(fv(s.drag, "force"))
         self.readouts["Mach"].setText(f"{s.mach_number:.3f}")
-        self.readouts["Mass"].setText(f"{s.flight_mass():.3f}")
-        self.readouts["Dyn. Pressure"].setText(f"{s.dynamic_pressure:.0f}")
+        self.readouts["Mass"].setText(fv(s.flight_mass(), "mass"))
+        self.readouts["Dyn. Pressure"].setText(fv(s.dynamic_pressure, "pressure"))
 
         # Update phase lights
         try:

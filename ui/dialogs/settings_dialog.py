@@ -111,6 +111,17 @@ class SettingsDialog(QDialog):
         f.addRow("", self._hint(
             "Applies immediately, including charts and 3D views."
         ))
+
+        self.cmb_units = QComboBox()
+        self.cmb_units.addItem("SI (m, m/s, kg, N)", "SI")
+        self.cmb_units.addItem("Imperial (ft, ft/s, lb, lbf)", "imperial")
+        idx = self.cmb_units.findData(settings.get("display/units") or "SI")
+        self.cmb_units.setCurrentIndex(max(idx, 0))
+        f.addRow("Display units:", self.cmb_units)
+        f.addRow("", self._hint(
+            "How results are shown (Results, live readouts, Monte Carlo). "
+            "Projects are always saved in SI."
+        ))
         return self._page(g)
 
     def _console_page(self) -> QWidget:
@@ -244,6 +255,7 @@ class SettingsDialog(QDialog):
         mode = self.cmb_theme.currentData()
         settings.set("appearance/theme", mode)
         settings.set("console/log_level", self.cmb_log.currentText())
+        settings.set("display/units", self.cmb_units.currentData())
         settings.set("projects/default_dir", self.edit_dir.text().strip())
         settings.set("startup/check_updates", self.chk_updates.isChecked())
         settings.set("sim/confirm_on_exit", self.chk_confirm_exit.isChecked())
