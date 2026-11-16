@@ -16,7 +16,25 @@ MATERIALS = {
 }
 
 def get_material(name):
-    return MATERIALS.get(name, MATERIALS["Aluminum 6061-T6"])
+    """Properties of ``name`` in this module's dict form.
+
+    Names missing from the table above are read from the structural material
+    library (structures.solvers.base), which is what the Structures tab lists
+    and which knows the Design tab's names. They used to fall back to
+    aluminium without a word: a Kraft Phenolic airframe was given a 276 MPa
+    yield (its own is 60 MPa), so its safety factor read 36.7 where the
+    material gives 8.0, and its thermal stress used aluminium's modulus.
+    """
+    mat = MATERIALS.get(name)
+    if mat is None:
+        from structures.solvers.base import get_structural_material
+        sm = get_structural_material(name)
+        mat = MATERIALS.get(sm.name)
+        if mat is None:
+            mat = {"yield": sm.yield_strength, "ultimate": sm.ultimate_strength,
+                   "E": sm.E, "density": sm.density, "poisson": sm.nu,
+                   "cte": sm.cte, "G": sm.G}
+    return mat
 
 def axial_stress(force, diameter, wall_thickness):
     area = math.pi * diameter * wall_thickness
@@ -139,7 +157,8 @@ def compute_all(force, diameter, wall_thickness, length, material_name,
 def compute_for_condition(condition, diameter, wall_thickness, length, material_name,
                           force=0.0, internal_pressure=0.0, delta_T=0.0,
                           mach=0.0, altitude_m=0.0, vehicle_mass_kg=5.0,
-                          angle_of_attack_deg=2.0, moment_arm_m=0.0):
+                          angle_of_attack_deg=2.0, moment_arm_m=0.0,
+                          drag_force_N=0.0, q_dyn=None, wall_delta_T=0.0):
     """Compute stresses for a specific flight condition.
 
     Returns a dict with physically distinct stress values per condition:
@@ -152,6 +171,13 @@ def compute_for_condition(condition, diameter, wall_thickness, length, material_
 
     For "Recovery Shock", ``force`` is the harness tension (N) from the
     parachute opening-shock model; 0 falls back to a 15 g envelope.
+
+    For "Max-Q", ``force`` is the thrust and ``drag_force_N`` the drag at
+    that instant, and ``q_dyn`` the dynamic pressure when it is known (else
+    it is worked out from Mach and ISA at ``altitude_m``).
+
+    For "Thermal", ``wall_delta_T`` is how far the outer face of the wall is
+    above the wall's mean temperature (K), from a transient heating solve.
     """
     if condition == "Max Thrust" or condition == "max_thrust":
         return _compute_max_thrust(force, diameter, wall_thickness, length,
@@ -164,11 +190,13 @@ def compute_for_condition(condition, diameter, wall_thickness, length, material_
                                   shock_force_N=force)
     elif condition == "Thermal" or condition == "thermal":
         return _compute_thermal(diameter, wall_thickness, length,
-                                 material_name, mach, altitude_m)
+                                 material_name, mach, altitude_m,
+                                 wall_delta_T=wall_delta_T)
     elif condition == "Max-Q":
         return _compute_max_q(force, diameter, wall_thickness, length,
                               material_name, mach, altitude_m,
-                              angle_of_attack_deg, moment_arm_m)
+                              angle_of_attack_deg, moment_arm_m,
+                              drag_force_N=drag_force_N, q_dyn=q_dyn)
     else:
         # Custom / fallback — use generic
         return compute_all(force, diameter, wall_thickness, length, material_name,
@@ -251,15 +279,22 @@ def _compute_max_thrust(force, diameter, wall_thickness, length, material_name,
 
 def _compute_max_q(force, diameter, wall_thickness, length, material_name,
                     mach=0.8, altitude_m=3000.0, angle_of_attack_deg=3.0,
-                    moment_arm_m=0.0):
+                    moment_arm_m=0.0, drag_force_N=0.0, q_dyn=None):
     """Max-Q: aerodynamic bending dominated load case.
 
     Includes:
     1. Bending moment from AoA side force (DOMINANT)
-    2. Fin root bending (fins see highest loads at max-Q)
-    3. Dynamic amplification factor (gust response)
-    4. Structural detail factor for joints/cutouts
-    5. Axial compression from drag + thrust
+    2. Dynamic amplification factor (gust response)
+    3. Structural detail factor for joints/cutouts
+    4. Axial compression: the larger of thrust and drag
+
+    ``drag_force_N`` is the rocket's drag at this instant (from the flight,
+    or the flight's aero model). The compression through any section is what
+    accelerates the mass ahead of it plus the drag ahead of it, which never
+    exceeds the larger of thrust and drag. This used to be thrust plus a drag
+    of 0.5 x q x frontal area: a drag coefficient of 0.5 for every rocket
+    (262 N on the canonical rocket, which flies 342 N), added to the thrust.
+    ``q_dyn`` is the dynamic pressure when the flight recorded it.
     """
     mat = get_material(material_name)
     r = diameter / 2
@@ -279,13 +314,12 @@ def _compute_max_q(force, diameter, wall_thickness, length, material_name,
         T, rho = 288.15, 1.225
     a = math.sqrt(1.4 * 287.05 * T)
     V = mach * a
-    q_dyn = 0.5 * rho * V ** 2
+    if q_dyn is None:
+        q_dyn = 0.5 * rho * V ** 2
 
-    # 1. Axial: thrust + drag
-    Cd = 0.5
+    # 1. Axial: the larger of thrust and drag
     A_ref = math.pi * r ** 2
-    F_drag = q_dyn * Cd * A_ref
-    ax = (abs(force) + F_drag) / area if area > 0 else 0.0
+    ax = max(abs(force), abs(drag_force_N)) / area if area > 0 else 0.0
 
     # 2. Body bending from AoA normal force (slender-body crossflow)
     aoa_rad = math.radians(angle_of_attack_deg)
@@ -381,62 +415,41 @@ def _compute_recovery(diameter, wall_thickness, length, material_name,
 
 
 def _compute_thermal(diameter, wall_thickness, length, material_name,
-                      mach=3.0, altitude_m=10000.0):
-    """Thermal: aerodynamic heating with non-uniform temperature distribution.
+                      mach=3.0, altitude_m=10000.0, wall_delta_T=0.0):
+    """Thermal: stress in the wall from aerodynamic heating.
 
-    Uses partial constraint factor (0.55) to account for:
-    - Free thermal expansion at unconstrained ends
-    - Gradual heating (not instantaneous)
-    - Stress relaxation in ductile materials
+    A free-flying airframe heated evenly is free to grow and carries no
+    stress. What stresses the wall is the temperature difference through
+    it: the hot outer face wants to grow more than the wall as a whole and
+    the closed tube holds it back.
+
+        sigma = E * alpha * (T_outer - T_mean) / (1 - nu)
+
+    ``wall_delta_T`` is that difference (K), from the transient solve over
+    the flight (structures.workstation.thermal_profile). 0 = not known, and
+    the stress is then 0.
+
+    This used to take the wall as being at the steady recovery temperature
+    of the given Mach, 55 % restrained from growing, measured from 20 C:
+    62 MPa for the canonical aluminium rocket, whose skin warms about 7 K in
+    its 2.4 s burn, and 29 MPa at apogee for the cold air there. The air
+    temperatures are still reported.
     """
     mat = get_material(material_name)
-    r = diameter / 2
 
-    # Get atmospheric conditions
-    T_amb = 223.15  # default ~-50C at 10 km
+    T_amb = 223.15
     try:
         from cfd.solvers.base import isa_conditions
         P, T_amb, rho = isa_conditions(altitude_m)
     except Exception:
         pass
-
     gamma = 1.4
     r_recovery = 0.89  # turbulent recovery factor Pr^(1/3)
-
-    # Recovery temperature (adiabatic wall temperature)
     T_recovery = T_amb * (1 + r_recovery * (gamma - 1) / 2 * mach**2)
-    # Stagnation temperature (nose tip)
     T_stag = T_amb * (1 + (gamma - 1) / 2 * mach**2)
 
-    # Non-uniform delta-T distribution (ref = 293.15 K stress-free assembly temp)
-    dT_nose = T_stag - 293.15
-    dT_body = T_recovery - 293.15
-    # Aero skin heating governs the airframe; the motor casing is a separate
-    # load path (internal combustion) and is NOT folded into the aero-skin
-    # thermal stress here. The stagnation nose is the hottest aero station.
-    dT_motor = dT_body  # retained for the display dict only; not a heat source
-
-    dT_max = max(dT_nose, dT_body)
-
-    # Partial constraint: real rocket structures are NOT fully constrained
-    # Free ends, slip joints, gradual heating reduce effective stress
-    constraint_factor = 0.55
-
-    th_full = thermal_stress_shell(mat["E"], mat.get("cte", 23.6e-6), mat["poisson"], dT_max)
-    th = th_full * constraint_factor
-
-    # Thermal gradient-induced bending
-    dT_gradient = abs(dT_nose - dT_body)
-    th_bending = mat["E"] * mat.get("cte", 23.6e-6) * dT_gradient * wall_thickness / (2 * diameter) * constraint_factor if diameter > 0 else 0.0
-
-    # No mechanical loads during purely thermal analysis
-    ax = 0.0
-    hp = 0.0
-    tau = 0.0
-
-    # Von Mises: thermal + thermal bending
-    sx = th + th_bending
-    vm = math.sqrt(sx**2)  # uniaxial thermal
+    th = abs(mat["E"] * mat.get("cte", 0.0) * wall_delta_T / (1 - mat["poisson"]))
+    vm = th
 
     bk = euler_buckling(mat["E"], diameter, wall_thickness, length)
     sbk = shell_buckling(mat["E"], diameter, wall_thickness, mat["poisson"])
@@ -444,13 +457,10 @@ def _compute_thermal(diameter, wall_thickness, length, material_name,
     mos = margin_of_safety(mat["yield"], vm)
 
     return {
-        "axial": ax, "hoop": hp, "longitudinal": 0.0,
-        "shear": tau, "bending": th_bending, "thermal": th,
+        "axial": 0.0, "hoop": 0.0, "longitudinal": 0.0,
+        "shear": 0.0, "bending": 0.0, "thermal": th,
         "von_mises": vm, "buckling": bk, "shell_buckling_stress": sbk,
         "max_stress": vm, "safety_factor": sf, "margin_of_safety": mos,
         "material": mat, "yield_utilization": vm / mat["yield"] if mat["yield"] > 0 else 0,
-        # Extra thermal data for display
-        "dT_nose": dT_nose, "dT_body": dT_body, "dT_motor": dT_motor,
-        "T_stag": T_stag, "T_recovery": T_recovery,
+        "T_stag": T_stag, "T_recovery": T_recovery, "wall_delta_T": wall_delta_T,
     }
-

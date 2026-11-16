@@ -38,6 +38,9 @@ DARK = {
     "ERR": "#e05c55",
     "ERR_DEEP": "#c0453f",
     "INFO": "#6fa8c8",
+    # extra chart series (data only, never chrome)
+    "SERIES_VIOLET": "#a98bd0",
+    "SERIES_TEAL": "#7fbfb0",
     # roles that differ in kind (not just shade) between the palettes
     "FIELD_BG": "#202024",       # input wells
     "SEL_BG": "#202024",         # list / tree selection fill
@@ -73,6 +76,8 @@ LIGHT = {
     "ERR": "#b91c1c",
     "ERR_DEEP": "#991b1b",
     "INFO": "#0369a1",
+    "SERIES_VIOLET": "#7c5cb5",
+    "SERIES_TEAL": "#0f766e",
     "FIELD_BG": "#ffffff",
     "SEL_BG": "#e8effc",
     "BTN_BG": "#ffffff",
@@ -126,18 +131,27 @@ def stylesheet(for_mode: str = None) -> str:
     return _QSS_TEMPLATE.format(**pal)
 
 
-_CHEVRON_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="14" viewBox="0 0 10 14">'
-                '<path d="{d}" fill="none" stroke="{c}" stroke-width="2.2" '
-                'stroke-linecap="round" stroke-linejoin="round"/></svg>')
-_CHEVRON_PATHS = {"left": "M7 2 L2.5 7 L7 12", "right": "M3 2 L7.5 7 L3 12"}
+_GLYPH_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" '
+              'viewBox="0 0 {w} {h}"><path d="{d}" fill="none" stroke="{c}" '
+              'stroke-width="{sw}" stroke-linecap="round" stroke-linejoin="round"/></svg>')
+# name -> (width, height, stroke width, path)
+_GLYPHS = {
+    "LEFT": (10, 14, 2.2, "M7 2 L2.5 7 L7 12"),
+    "RIGHT": (10, 14, 2.2, "M3 2 L7.5 7 L3 12"),
+    "UP": (8, 5, 1.4, "M1 4 L4 1 L7 4"),
+    "DOWN": (8, 5, 1.4, "M1 1 L4 4 L7 1"),
+    "CHECK": (12, 12, 1.8, "M2.5 6.2 L5 8.7 L9.5 3.5"),
+}
 
 
 def _arrow_images(pal: dict) -> dict:
-    """Write chevron SVGs for this palette and return their QSS ``url()`` keys.
+    """Write the small glyph SVGs for this palette and return their QSS ``url()`` keys.
 
-    QSS cannot draw a triangle reliably on tab-bar scroll buttons (the border
-    trick renders as a filled square there), and Qt's stock arrow pixmaps
-    are too small to read, so real images are generated per colour.
+    QSS cannot draw a triangle reliably: the zero-size-box border trick paints
+    a filled square on tab-bar scroll buttons, spin-box steppers and combo-box
+    drop-downs, which is what those controls showed before. Qt's stock arrow
+    pixmaps are too small to read, so real images are generated per colour.
+    Keys are ``<ROLE>_<GLYPH>``, e.g. ``ARROW_LEFT``, ``ARROW_DIM_DOWN``.
     """
     from pathlib import Path
     import hashlib
@@ -150,16 +164,17 @@ def _arrow_images(pal: dict) -> dict:
         d = Path(tempfile.gettempdir()) / "k2_ui_cache"
         d.mkdir(parents=True, exist_ok=True)
     for role, color in (("ARROW", pal["TEXT"]), ("ARROW_DIM", pal["TEXT_FAINT"]),
-                        ("ARROW_HOT", pal["ACCENT"])):
-        for side, path in _CHEVRON_PATHS.items():
-            svg = _CHEVRON_SVG.format(d=path, c=color)
-            f = d / f"chevron_{side}_{hashlib.md5(svg.encode()).hexdigest()[:8]}.svg"
+                        ("ARROW_SOFT", pal["TEXT_DIM"]), ("ARROW_HOT", pal["ACCENT"]),
+                        ("ON_ACCENT", pal["SELECTION_TEXT"])):
+        for name, (w, h, sw, path) in _GLYPHS.items():
+            svg = _GLYPH_SVG.format(w=w, h=h, sw=sw, d=path, c=color)
+            f = d / f"glyph_{name.lower()}_{hashlib.md5(svg.encode()).hexdigest()[:8]}.svg"
             try:
                 if not f.exists():
                     f.write_text(svg, encoding="utf-8")
-                out[f"{role}_{side.upper()}"] = f'url("{f.as_posix()}")'
+                out[f"{role}_{name}"] = f'url("{f.as_posix()}")'
             except Exception:
-                out[f"{role}_{side.upper()}"] = "none"
+                out[f"{role}_{name}"] = "none"
     return out
 
 
@@ -182,17 +197,17 @@ QMenuBar {{
     border-bottom: 1px solid {LINE};
     padding: 2px 4px;
 }}
-QMenuBar::item {{ padding: 5px 11px; border-radius: 4px; background: transparent; }}
+QMenuBar::item {{ padding: 5px 11px; border-radius: 3px; background: transparent; }}
 QMenuBar::item:selected {{ background-color: {RAISED}; color: {TEXT_BRIGHT}; }}
 QMenuBar::item:pressed {{ background-color: {RAISED}; color: {ACCENT}; }}
 
 QMenu {{
     background-color: {PANEL};
     border: 1px solid {LINE};
-    border-radius: 6px;
+    border-radius: 3px;
     padding: 4px;
 }}
-QMenu::item {{ padding: 6px 26px 6px 12px; border-radius: 4px; }}
+QMenu::item {{ padding: 6px 26px 6px 12px; border-radius: 3px; }}
 QMenu::item:selected {{ background-color: {RAISED}; color: {TEXT_BRIGHT}; }}
 QMenu::item:disabled {{ color: {TEXT_FAINT}; }}
 QMenu::separator {{ height: 1px; background-color: {LINE}; margin: 4px 8px; }}
@@ -225,7 +240,7 @@ QTabBar::scroller {{ width: 56px; }}
 QTabBar QToolButton {{
     background-color: {RAISED};
     border: 1px solid {LINE};
-    border-radius: 4px;
+    border-radius: 3px;
     margin: 4px 2px;
     min-width: 22px;
     color: {TEXT};
@@ -251,7 +266,7 @@ QToolButton {{
     background-color: transparent;
     color: {TEXT_DIM};
     border: 1px solid transparent;
-    border-radius: 4px;
+    border-radius: 3px;
     padding: 5px 8px;
 }}
 QToolButton:hover {{ background-color: {RAISED}; color: {TEXT_BRIGHT}; }}
@@ -281,10 +296,9 @@ QFrame {{ border: none; }}
 /* ---- labels ---- */
 QLabel {{ color: {TEXT}; background: transparent; }}
 QLabel[panelTitle="true"] {{
-    color: {TEXT_DIM};
-    font-size: 11px;
+    color: {TEXT_BRIGHT};
+    font-size: 13px;
     font-weight: 600;
-    letter-spacing: 1px;
     padding: 10px 12px 8px 12px;
     border-bottom: 1px solid {LINE};
 }}
@@ -292,7 +306,6 @@ QLabel[heading="true"] {{
     color: {TEXT_DIM};
     font-size: 11px;
     font-weight: 600;
-    letter-spacing: 1px;
     padding: 10px 0px 4px 0px;
 }}
 QLabel[unit="true"] {{ color: {TEXT_FAINT}; font-size: 11px; }}
@@ -311,7 +324,7 @@ QLabel[metric="true"] {{
 QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox, QDateEdit, QTimeEdit {{
     background-color: {FIELD_BG};
     border: 1px solid {LINE};
-    border-radius: 4px;
+    border-radius: 3px;
     padding: 5px 8px;
     color: {TEXT_BRIGHT};
     selection-background-color: {ACCENT_DEEP};
@@ -331,70 +344,71 @@ QLineEdit:disabled, QDoubleSpinBox:disabled, QSpinBox:disabled, QComboBox:disabl
 QDoubleSpinBox::up-button, QSpinBox::up-button,
 QDoubleSpinBox::down-button, QSpinBox::down-button {{
     background-color: transparent;
-    border-left: 1px solid {LINE};
-    width: 17px;
+    border: none;
+    width: 16px;
 }}
+QDoubleSpinBox::up-button, QSpinBox::up-button {{ subcontrol-position: top right; margin: 1px 1px 0px 0px; }}
+QDoubleSpinBox::down-button, QSpinBox::down-button {{ subcontrol-position: bottom right; margin: 0px 1px 1px 0px; }}
 QDoubleSpinBox::up-button:hover, QSpinBox::up-button:hover,
 QDoubleSpinBox::down-button:hover, QSpinBox::down-button:hover {{
     background-color: {LINE};
 }}
-QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {{
-    image: none; width: 0; height: 0;
-    border-left: 3px solid transparent;
-    border-right: 3px solid transparent;
-    border-bottom: 4px solid {TEXT_DIM};
-}}
-QDoubleSpinBox::down-arrow, QSpinBox::down-arrow {{
-    image: none; width: 0; height: 0;
-    border-left: 3px solid transparent;
-    border-right: 3px solid transparent;
-    border-top: 4px solid {TEXT_DIM};
-}}
+QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {{ image: {ARROW_SOFT_UP}; width: 8px; height: 5px; }}
+QDoubleSpinBox::down-arrow, QSpinBox::down-arrow {{ image: {ARROW_SOFT_DOWN}; width: 8px; height: 5px; }}
+QDoubleSpinBox::up-arrow:hover, QSpinBox::up-arrow:hover {{ image: {ARROW_UP}; }}
+QDoubleSpinBox::down-arrow:hover, QSpinBox::down-arrow:hover {{ image: {ARROW_DOWN}; }}
+QDoubleSpinBox::up-arrow:disabled, QSpinBox::up-arrow:disabled,
+QDoubleSpinBox::up-arrow:off, QSpinBox::up-arrow:off {{ image: {ARROW_DIM_UP}; }}
+QDoubleSpinBox::down-arrow:disabled, QSpinBox::down-arrow:disabled,
+QDoubleSpinBox::down-arrow:off, QSpinBox::down-arrow:off {{ image: {ARROW_DIM_DOWN}; }}
 
-QComboBox {{ min-width: 110px; }}
-QComboBox::drop-down {{ border: none; width: 20px; background: transparent; }}
-QComboBox::down-arrow {{
-    width: 0; height: 0;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 5px solid {TEXT_DIM};
-}}
+QComboBox {{ min-width: 90px; }}
+QComboBox::drop-down {{ border: none; width: 22px; background: transparent; }}
+QComboBox::down-arrow {{ image: {ARROW_SOFT_DOWN}; width: 8px; height: 5px; }}
+QComboBox::down-arrow:hover, QComboBox::down-arrow:on {{ image: {ARROW_DOWN}; }}
+QComboBox::down-arrow:disabled {{ image: {ARROW_DIM_DOWN}; }}
 QComboBox QAbstractItemView {{
     background-color: {PANEL};
     border: 1px solid {LINE};
-    border-radius: 6px;
+    border-radius: 3px;
     padding: 4px;
     selection-background-color: {SEL_BG};
     selection-color: {ACCENT};
     outline: none;
 }}
 
-/* ---- cards / group boxes ---- */
+/* ---- group boxes: a titled section under a hairline ----
+   These were bordered, filled cards. A panel of them read as boxes inside
+   boxes, and the border cost 22 px of width per group. */
 QGroupBox {{
-    border: 1px solid {LINE};
-    border-radius: 6px;
-    margin-top: 10px;
-    padding: 16px 10px 10px 10px;
-    background-color: {PANEL};
+    border: none;
+    border-top: 1px solid {LINE};
+    border-radius: 0px;
+    margin-top: 22px;
+    padding: 8px 0px 4px 0px;
+    background-color: transparent;
+    font-size: 11px;
+    font-weight: 600;
 }}
 QGroupBox::title {{
     subcontrol-origin: margin;
     subcontrol-position: top left;
-    left: 10px;
-    padding: 0px 6px;
+    left: 0px;
+    padding: 0px 0px 4px 0px;
     color: {TEXT_DIM};
     font-size: 11px;
     font-weight: 600;
-    letter-spacing: 1px;
-    background-color: {PANEL};
+    letter-spacing: 0.5px;
+    background-color: transparent;
 }}
+QGroupBox:disabled::title {{ color: {TEXT_FAINT}; }}
 
 /* ---- text / console ---- */
 QTextEdit, QPlainTextEdit {{
     background-color: {SUNKEN};
     color: {TEXT};
     border: 1px solid {LINE};
-    border-radius: 6px;
+    border-radius: 3px;
     font-family: {MONO};
     font-size: 12px;
     padding: 6px 8px;
@@ -406,7 +420,7 @@ QTreeView, QTreeWidget, QTableView, QTableWidget, QListView, QListWidget {{
     background-color: {PANEL};
     alternate-background-color: {BG};
     border: 1px solid {LINE};
-    border-radius: 6px;
+    border-radius: 3px;
     outline: none;
     selection-background-color: {SEL_BG};
     selection-color: {ACCENT};
@@ -428,7 +442,6 @@ QHeaderView::section {{
     padding: 6px 8px;
     font-size: 11px;
     font-weight: 600;
-    letter-spacing: 1px;
 }}
 
 /* ---- scrollbars ---- */
@@ -462,7 +475,7 @@ QPushButton {{
     background-color: {BTN_BG};
     color: {TEXT};
     border: 1px solid {LINE};
-    border-radius: 4px;
+    border-radius: 3px;
     padding: 6px 14px;
 }}
 QPushButton:hover {{ background-color: {BTN_HOVER}; color: {TEXT_BRIGHT}; border-color: {LINE_STRONG}; }}
@@ -506,6 +519,11 @@ QCheckBox::indicator:hover, QRadioButton::indicator:hover {{ border-color: {ACCE
 QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
     background-color: {ACCENT}; border-color: {ACCENT};
 }}
+QCheckBox::indicator:checked {{ image: {ON_ACCENT_CHECK}; }}
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{
+    background-color: {PANEL}; border-color: {LINE};
+}}
+QCheckBox::indicator:checked:disabled {{ background-color: {LINE_STRONG}; border-color: {LINE_STRONG}; }}
 
 /* ---- progress / sliders ---- */
 QProgressBar {{
@@ -521,7 +539,7 @@ QProgressBar::chunk {{ background-color: {ACCENT}; border-radius: 3px; }}
 
 QSlider::groove:horizontal {{ height: 4px; background: {LINE}; border-radius: 2px; }}
 QSlider::handle:horizontal {{
-    background: {TEXT_DIM}; width: 12px; margin: -5px 0; border-radius: 6px;
+    background: {TEXT_DIM}; width: 12px; margin: -5px 0; border-radius: 3px;
 }}
 QSlider::handle:horizontal:hover {{ background: {ACCENT}; }}
 QSlider::sub-page:horizontal {{ background: {ACCENT_DEEP}; border-radius: 2px; }}
@@ -533,7 +551,7 @@ QToolTip {{
     background-color: {RAISED};
     color: {TEXT_BRIGHT};
     border: 1px solid {LINE_STRONG};
-    border-radius: 4px;
+    border-radius: 3px;
     padding: 5px 8px;
     font-size: 12px;
 }}
@@ -548,6 +566,30 @@ def value_qss(color: str = None, size: int = 13, weight: int = 600) -> str:
     """Inline style for a numeric read-out, in the active palette."""
     return (f"color:{color or TEXT_BRIGHT}; font-family:{MONO}; "
             f"font-size:{size}px; font-weight:{weight}; "
+            f"padding:2px 0px; background:transparent;")
+
+
+def panel_title_qss() -> str:
+    """Inline style for the title at the top of a workspace side panel.
+
+    Every workspace wrote this out by hand; some set the text in capitals and
+    centred it, others in title case on the left. One style, used by all.
+    """
+    return (f"color:{TEXT_BRIGHT}; font-size:13px; font-weight:600; "
+            f"padding:2px 0px 6px 0px; background:transparent;")
+
+
+def stability_color(verdict) -> str:
+    """Colour of a core.stability verdict: red unstable, amber marginal or
+    overstable, green stable; dim when there is none."""
+    from core import stability as S
+    return {S.UNSTABLE: ERR, S.MARGINAL: WARN, S.STABLE: OK,
+            S.OVERSTABLE: WARN}.get(verdict, TEXT_DIM)
+
+
+def status_qss(color: str = None) -> str:
+    """Inline style for a one-word verdict (Pass / Marginal / Fail)."""
+    return (f"color:{color or TEXT_DIM}; font-size:13px; font-weight:600; "
             f"padding:2px 0px; background:transparent;")
 
 
@@ -574,7 +616,7 @@ def apply_matplotlib_theme():
         "axes.labelsize": 10,
         "axes.grid": True,
         "axes.prop_cycle": mpl.cycler(color=[
-            ACCENT, INFO, OK, WARN, "#a98bd0", ERR, "#7fbfb0", TEXT_DIM,
+            ACCENT, INFO, OK, WARN, SERIES_VIOLET, ERR, SERIES_TEAL, TEXT_DIM,
         ]),
         "grid.color": LINE,
         "grid.linewidth": 0.6,

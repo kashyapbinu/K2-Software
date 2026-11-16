@@ -860,6 +860,12 @@ class AeroModel:
             return 0.0
         return (cp - cg) / self.body_diameter
 
+    def zero_lift_cd(self, mach: float = 0.3) -> float:
+        """Drag coefficient at zero angle of attack and *mach*, in sea-level
+        standard air: the rocket's own Cd0, for anything that quotes one."""
+        v = mach * 340.294
+        return float(self.compute(0.0, mach, 0.5 * 1.225 * v * v, 0.0, v, 0.0)["cd"])
+
     def compute(self, alpha, mach, q_dyn, pitch_rate, v_rel, cg) -> dict:
         """Compute all aerodynamic forces and moments."""
         A = self.ref_area

@@ -37,6 +37,13 @@ FLIGHT_FIELDS = (
     "recovery_shock_force", "drogue_descent_rate", "main_descent_rate",
     "landing_x", "landing_y", "landing_drift", "descent_time",
     "atm_temperature", "atm_pressure", "atm_density", "dynamic_pressure",
+    # The airframe as the last tick found it. These were left out, so Reset
+    # kept them and a project saved after a flight carried that flight's last
+    # instant: a safety factor of 40.5 and a 288 K wall for a rocket that,
+    # once reopened, had not flown.
+    "axial_stress", "hoop_stress", "von_mises_stress", "shear_stress",
+    "thermal_stress", "max_stress", "safety_factor", "margin_of_safety",
+    "wall_temperature", "flutter_margin",
 )
 
 
@@ -197,6 +204,10 @@ class RocketState:
     main_deploy_altitude: float = 300.0   # meters AGL
     drogue_cd_area: float = 0.5           # Cd × A for drogue (m²)
     main_cd_area: float = 3.0             # Cd × A for main chute (m²)
+    # Rated strength (N) of the weakest part of the recovery load path
+    # (harness, eyebolt, bulkhead), entered in the Structures tab. 0 = not
+    # entered: the opening loads are then reported without a safety factor.
+    recovery_hardware_rating: float = 0.0
     recovery_inflation_time: float = 0.6  # canopy fill time (s); big canopies 2×
     # The Design tab's parachutes, each with its own trigger:
     # [{name, cd_area, event: "apogee"|"altitude", altitude, delay}, ...]
@@ -262,9 +273,102 @@ class RocketState:
         "propellant not synced yet", so the moment the motor burned out the
         live Mass readout jumped back up to the liftoff mass.
         """
+        return self.dry_mass + self.motor_dry_mass + self.propellant_now()
+
+    def propellant_now(self) -> float:
+        """Propellant in the motor right now (kg): the rated load on the pad,
+        what is left of it in flight and after. On the pad a ``propellant_mass``
+        of 0 means the load has not been copied in yet, not an empty motor."""
         if self.sim_time > 0.0:
-            return self.dry_mass + self.motor_dry_mass + max(0.0, self.propellant_mass)
-        return self.total_mass()
+            return max(0.0, self.propellant_mass)
+        return self.propellant_mass if self.propellant_mass > 0 else self.propellant_mass_initial
+
+    # ── The rocket on the pad ─────────────────────────────────────
+    # A flight burns the propellant down on this state and leaves it there:
+    # after landing `propellant_mass` is the residue, and `cg`,
+    # `stability_margin` and `weight` are the burnt-out rocket's. Whatever
+    # describes the design (reports, rules, the Design read-outs, load cases)
+    # reads the four methods below, which do not move when the rocket flies.
+    #
+    # They used to read total_mass(), cg and stability_margin. For the
+    # canonical rocket after one flight the technical report printed "Liftoff
+    # mass 6.001 kg" (7.400), "Static margin on the pad 6.78 cal" (5.30) and
+    # a liftoff thrust-to-weight of 18.52 (15.02), and the rules check judged
+    # that 18.52.
+
+    def liftoff_propellant(self) -> float:
+        """The rated propellant load (kg)."""
+        return max(0.0, self.propellant_mass_initial or self.propellant_mass or 0.0)
+
+    def _liftoff_stack(self):
+        """The whole stack as it stands on the pad (a core.staging
+        StageManager, every stage attached and loaded) for a rocket with two
+        or more stages; None for a single stage.
+
+        The flat motor fields hold one motor: the stage the Propulsion tab
+        last showed. Read alone they left the other stages' motors out, so a
+        two-stage rocket's liftoff mass, CG and thrust-to-weight were those
+        of the stack with one motor missing, and of whichever one it was.
+        """
+        stages = self.stages_config or []
+        if len(stages) < 2:
+            return None
+        from core.staging import StageConfig, StageManager
+        try:
+            return StageManager([StageConfig.from_dict(d) for d in stages])
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    def liftoff_mass(self) -> float:
+        """Mass on the pad (kg): airframe, motor case and the full load, of
+        every stage."""
+        stack = self._liftoff_stack()
+        if stack is not None:
+            return stack.total_mass()
+        return ((self.dry_mass or 0.0) + (self.motor_dry_mass or 0.0)
+                + self.liftoff_propellant())
+
+    def liftoff_avg_thrust(self) -> float:
+        """Average thrust (N) of the motor that lifts the rocket off: the
+        first stage to light on a staged rocket."""
+        stack = self._liftoff_stack()
+        if stack is not None:
+            return stack.stages[0].motor_avg_thrust
+        return self.motor_avg_thrust
+
+    def cg_with(self, propellant: float) -> float:
+        """CG (m from the nose tip) with *propellant* kg in the motor.
+
+        The motor (case and propellant) acts at its own centre, half a motor
+        length ahead of ``motor_position`` (its aft end). A state that does
+        not say where its airframe balances or where its motor sits is given
+        45 % and 85 % of the length. The one balance formula:
+        RocketStateEngine keeps ``cg`` with it as the propellant burns.
+        """
+        body_cg = self.dry_cg if self.dry_cg > 0 else self.length * 0.45
+        motor_cg = (max(0.0, self.motor_position - 0.5 * self.motor_length)
+                    if self.motor_position > 0 else self.length * 0.85)
+        motor_m = self.motor_dry_mass + max(0.0, propellant)
+        total = self.dry_mass + motor_m
+        if total <= 0:
+            return self.cg
+        return (self.dry_mass * body_cg + motor_m * motor_cg) / total
+
+    def liftoff_cg(self) -> float:
+        """CG on the pad (m from the nose tip), with the full propellant
+        load: of the whole stack on a staged rocket, as its flight has it at
+        liftoff (StageManager.active_cg)."""
+        stack = self._liftoff_stack()
+        if stack is not None:
+            return stack.active_cg()
+        return self.cg_with(self.liftoff_propellant())
+
+    def pad_stability_margin(self):
+        """Static margin on the pad (calibres): subsonic CP behind the liftoff
+        CG, over the diameter. None for a rocket with no diameter."""
+        if not self.diameter or self.diameter <= 0:
+            return None
+        return (self.cp - self.liftoff_cg()) / self.diameter
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -276,6 +380,17 @@ class RocketState:
         # A spent motor is not the design either.
         if d.get("propellant_mass_initial", 0.0) > 0.0:
             d["propellant_mass"] = d["propellant_mass_initial"]
+        # Nor is the balance it leaves behind. cg and stability_margin follow
+        # the propellant, so a project saved after a flight held the
+        # burnt-out rocket's (0.900 m and 6.78 cal for the canonical rocket's
+        # 1.051 m and 5.30 cal). The main window compares this dict with the
+        # last save to tell whether anything changed, so flying a saved
+        # project and closing it asked "save changes?".
+        if self.sim_time > 0.0:
+            d["cg"] = self.liftoff_cg()
+            margin = self.pad_stability_margin()
+            if margin is not None:
+                d["stability_margin"] = margin
         return d
 
     @classmethod
@@ -342,10 +457,23 @@ class RocketStateEngine(QObject):
     state_changed = pyqtSignal(object)
     log_message = pyqtSignal(str)
     telemetry_tick = pyqtSignal(object)
+    # An analysis started, finished, failed, or its result was dropped
+    # (core.readiness). The Readiness board redraws on it.
+    readiness_changed = pyqtSignal()
+    # The rocket the last flight flew is gone (project opened or blanked) or
+    # is back on the pad (reset_flight). Emitted before state_changed, so
+    # whoever holds a record of that flight has dropped it by the time the
+    # views redraw. SimulationEngine.clear_flight listens.
+    flight_discarded = pyqtSignal()
 
     def __init__(self, state: RocketState = None):
         super().__init__()
         self._state = state or RocketState()
+        from core.readiness import ReadinessTracker
+        self.readiness = ReadinessTracker()
+        # stage key -> the result object the analysis handed over, for other
+        # views to draw from (the replay's Loads overlay). Session only.
+        self.results = {}
         self.auto_estimate_properties = True
         # field -> value this engine estimated for it (see _estimate)
         self._estimates = {}
@@ -381,10 +509,33 @@ class RocketStateEngine(QObject):
         self._recompute_derived()
         self.telemetry_tick.emit(self._state)
 
+    # ── Readiness (which results belong to the rocket as drawn) ──
+    def analysis_started(self, key: str) -> None:
+        """An analysis is reading the state now (core.readiness stage key)."""
+        self.readiness.begin(key, self._state)
+        self.readiness_changed.emit()
+
+    def analysis_done(self, key: str, headline: str = "", verdict=None,
+                      result=None) -> None:
+        """An analysis produced a result; *headline* is its one-line summary
+        and *result* the object other views may draw from."""
+        self.readiness.complete(key, self._state, headline, verdict)
+        if result is not None:
+            self.results[key] = result
+        self.readiness_changed.emit()
+
+    def analysis_abandoned(self, key: str) -> None:
+        """A started analysis failed or was cancelled."""
+        self.readiness.abandon(key)
+        self.readiness_changed.emit()
+
     def set_state(self, state: RocketState) -> None:
         self._state = state
         self._estimates = {}
+        self.readiness.clear()
+        self.results = {}
         self._recompute_derived()
+        self.flight_discarded.emit()
         self.log_message.emit("Project state loaded")
         self.state_changed.emit(self._state)
 
@@ -392,7 +543,10 @@ class RocketStateEngine(QObject):
         """Back to an empty project: rocket, motor and launch setup all go."""
         self._state = RocketState()
         self._estimates = {}
+        self.readiness.clear()
+        self.results = {}
         self._recompute_derived()
+        self.flight_discarded.emit()
         self.log_message.emit("State reset to defaults")
         self.state_changed.emit(self._state)
 
@@ -408,7 +562,11 @@ class RocketStateEngine(QObject):
         for name in FLIGHT_FIELDS:
             setattr(self._state, name, getattr(blank, name))
         self._state.propellant_mass = self._state.propellant_mass_initial
+        # The flight is gone, so nothing built on it is a result any more.
+        self.readiness.forget("flight")
+        self.readiness.forget("rules")
         self._recompute_derived()
+        self.flight_discarded.emit()
         self.log_message.emit("Flight reset — rocket back on the pad")
         self.state_changed.emit(self._state)
 
@@ -421,11 +579,18 @@ class RocketStateEngine(QObject):
         # Motor mass (casing + remaining propellant) acts at the motor's own CG:
         # motor_position is the motor AFT end (flush with mount aft end, OR convention),
         # so the mass centroid sits half the motor length forward of it.
-        motor_m = s.motor_dry_mass + s.propellant_mass
-        motor_cg = max(0.0, s.motor_position - 0.5 * s.motor_length)
-        total_m = s.dry_mass + motor_m
+        #
+        # One formula (RocketState.cg_with) and one propellant figure
+        # (propellant_now) for the balance and the weight, with or without a
+        # design tree. Without one, this used to take the moments of the
+        # propellant actually left and divide by total_mass(), which reads an
+        # exactly empty tank as "not loaded yet" and puts the full load back:
+        # a burnt-out canonical rocket weighed 72.6 N instead of 58.8 N and
+        # its CG sat 0.17 m too far forward.
+        prop = s.propellant_now()
+        total_m = s.dry_mass + s.motor_dry_mass + prop
         if total_m > 0:
-            s.cg = (s.dry_mass * s.dry_cg + motor_m * motor_cg) / total_m
+            s.cg = s.cg_with(prop)
 
         # Skip estimations if we have a high-fidelity assembly active
         if not self.auto_estimate_properties:
@@ -454,14 +619,8 @@ class RocketStateEngine(QObject):
         self._estimate("fin_height", s.fin_span)
         self._estimate("fin_count", 4)
 
-        # ── CG estimation (a declared dry CG / motor position is kept) ──
-        body_cg = s.dry_cg if s.dry_cg > 0 else s.length * 0.45
-        if s.motor_position <= 0:
-            motor_cg = s.length * 0.85
-        total_mass = s.total_mass()
-        if total_mass > 0:
-            s.cg = (s.dry_mass * body_cg
-                    + (s.motor_dry_mass + s.propellant_mass) * motor_cg) / total_mass
+        # (The CG was set above; cg_with fills in a dry CG or motor position
+        # the state does not declare.)
 
         # ── CP and Stability estimation (via AeroModel) ──
         try:
@@ -485,7 +644,7 @@ class RocketStateEngine(QObject):
 
         # ── Weight ──
         from core.constants import G_EARTH
-        s.weight = total_mass * G_EARTH
+        s.weight = total_m * G_EARTH
 
         # ── Net force ──
         s.net_force = s.thrust - s.drag - s.weight

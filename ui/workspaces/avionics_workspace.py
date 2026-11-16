@@ -9,35 +9,31 @@ from PyQt6.QtCore import Qt
 from ui.widgets.gauge_widget import GaugeWidget
 
 from ui import theme
+from ui.widgets.readout import Readout
 
 logger = logging.getLogger("K2.AvionicsWS")
 
 
-class TelemetryLabel(QLabel):
-    def __init__(self, t="—", parent=None):
-        super().__init__(t, parent)
-        self.setStyleSheet(f"color: {theme.TEXT_BRIGHT}; font-family: 'Cascadia Code', monospace; "
-            "font-size: 15px; font-weight: 600; padding: 4px 8px; "
-            f"background-color: {theme.PANEL}; border: 1px solid {theme.RAISED}; border-radius: 6px;")
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-
 class StatusLight(QLabel):
+    """One flight-computer state: a coloured bar over its name when active."""
+
     def __init__(self, label, parent=None):
-        super().__init__(label, parent)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setStyleSheet(f"color: {theme.LINE_STRONG}; font-weight: 600; font-size: 12px; "
-            f"padding: 6px 12px; background-color: {theme.PANEL}; border: 1px solid {theme.RAISED}; border-radius: 6px;")
+        super().__init__(label.title(), parent)
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._active, self._color = False, None
+        self.set_active(False)
+
+    def retheme(self):
+        self.set_active(self._active, self._color)
 
     def set_active(self, active, color=None):
-        color = color or theme.OK
-        if active:
-            self.setStyleSheet(f"color: {color}; font-weight: 700; font-size: 12px; "
-                f"padding: 6px 12px; background-color: #0e0e10; "
-                f"border: 2px solid {color}; border-radius: 6px;")
-        else:
-            self.setStyleSheet(f"color: {theme.LINE_STRONG}; font-weight: 600; font-size: 12px; "
-                f"padding: 6px 12px; background-color: {theme.PANEL}; border: 1px solid {theme.RAISED}; border-radius: 6px;")
+        self._active, self._color = active, color
+        bar = (color or theme.OK) if active else theme.LINE
+        ink = theme.TEXT_BRIGHT if active else theme.TEXT_FAINT
+        self.setStyleSheet(
+            f"color: {ink}; font-size: 11px; font-weight: {600 if active else 400}; "
+            f"padding: 6px 0px 2px 0px; background: transparent; "
+            f"border: none; border-top: 2px solid {bar};")
 
 
 class AvionicsWorkspace(QWidget):
@@ -59,9 +55,8 @@ class AvionicsWorkspace(QWidget):
         layout.setSpacing(14)
 
         # Title bar
-        title = QLabel("FLIGHT COMPUTER TELEMETRY")
-        title.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title = QLabel("Flight Computer Telemetry")
+        title.setStyleSheet(theme.panel_title_qss())
         layout.addWidget(title)
 
         # Gauges row
@@ -85,13 +80,10 @@ class AvionicsWorkspace(QWidget):
         labels = ["Time", "Altitude", "Velocity", "Acceleration", "Mach", "Thrust", "Mass", "Drag"]
         self.telem_labels = {}
         for i, name in enumerate(labels):
-            header = QLabel(name)
-            header.setStyleSheet(f"color: {theme.TEXT_DIM}; font-weight: 600; font-size: 11px;")
-            header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            tg.addWidget(header, 0, i)
-            val = TelemetryLabel("—")
+            val = Readout(name)
             self.telem_labels[name] = val
-            tg.addWidget(val, 1, i)
+            tg.addWidget(val, 0, i)
+            tg.setColumnStretch(i, 1)
 
         telem_group.setLayout(tg)
         layout.addWidget(telem_group)
@@ -103,15 +95,17 @@ class AvionicsWorkspace(QWidget):
         # FC state
         fc_group = QGroupBox("Flight Computer")
         fc_layout = QVBoxLayout(); fc_layout.setSpacing(8)
-        self.fc_state = TelemetryLabel("IDLE")
-        self.fc_state.setStyleSheet(self.fc_state.styleSheet() + "font-size: 20px;")
-        fc_layout.addWidget(self.fc_state)
-
-        self.phase_label = TelemetryLabel("Pre-Launch")
-        fc_layout.addWidget(self.phase_label)
+        fc_row = QHBoxLayout(); fc_row.setSpacing(8)
+        self.fc_state = Readout("Computer state")
+        self.fc_state.setText("IDLE")
+        fc_row.addWidget(self.fc_state)
+        self.phase_label = Readout("Flight phase")
+        self.phase_label.setText("Pre-Launch")
+        fc_row.addWidget(self.phase_label)
+        fc_layout.addLayout(fc_row)
 
         # Status lights
-        sl = QHBoxLayout(); sl.setSpacing(6)
+        sl = QHBoxLayout(); sl.setSpacing(4)
         self.light_armed = StatusLight("ARMED")
         self.light_boost = StatusLight("BOOST")
         self.light_coast = StatusLight("COAST")
@@ -120,8 +114,9 @@ class AvionicsWorkspace(QWidget):
         self.light_land = StatusLight("LANDED")
         for l in [self.light_armed, self.light_boost, self.light_coast,
                   self.light_drogue, self.light_main, self.light_land]:
-            sl.addWidget(l)
+            sl.addWidget(l, 1)
         fc_layout.addLayout(sl)
+        fc_layout.addStretch(1)
 
         fc_group.setLayout(fc_layout)
         bottom.addWidget(fc_group, 2)
@@ -131,12 +126,11 @@ class AvionicsWorkspace(QWidget):
         gl = QGridLayout(); gl.setSpacing(6)
         self.gyro_labels = {}
         for i, axis in enumerate(["X", "Y", "Z"]):
-            h = QLabel(axis); h.setStyleSheet(f"color: {theme.TEXT_DIM}; font-weight: 600;")
-            h.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            gl.addWidget(h, 0, i)
-            v = TelemetryLabel("0.00")
+            v = Readout(f"Rate {axis}")
+            v.setText("0.00")
             self.gyro_labels[axis] = v
-            gl.addWidget(v, 1, i)
+            gl.addWidget(v, 0, i)
+        gl.setRowStretch(1, 1)
         gyro_group.setLayout(gl)
         bottom.addWidget(gyro_group, 1)
 

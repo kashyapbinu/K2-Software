@@ -363,6 +363,11 @@ class MonteCarloEngine(QObject):
         # Create base config from current rocket state
         try:
             base_config = BatchSimConfig.from_rocket_state(self.engine.state)
+        except ValueError as exc:
+            # A rocket this engine does not fly (staged): say so in its words.
+            self._running = False
+            self.analysis_failed.emit(str(exc))
+            return
         except Exception as exc:
             self._running = False
             self.analysis_failed.emit(f"Failed to build base config: {exc}")

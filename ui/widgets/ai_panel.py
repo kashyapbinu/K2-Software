@@ -13,16 +13,16 @@ from __future__ import annotations
 import html
 import logging
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
-from PyQt6.QtGui import QTextCursor, QKeyEvent, QTextBlockFormat
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QUrl
+from PyQt6.QtGui import QTextCursor, QKeyEvent, QTextBlockFormat, QDesktopServices
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextBrowser,
-    QPlainTextEdit, QSizePolicy, QToolButton, QMenu, QFrame, QComboBox,
+    QPlainTextEdit, QSizePolicy, QToolButton, QMenu, QFrame, QLineEdit,
 )
 
 from ui import theme, settings
 from ui.icons import icon
-from ai.providers import build_provider, describe_auto_state, Provider, _setting, gemini_model_setting
+from ai.providers import build_provider, check_gemini_key, Provider, GEMINI_KEY_URL
 from ai.assistant import AssistantSession
 from ai.context import summarize_state, render_context
 from ai.tools import ToolBridge, TOOL_SPECS
@@ -80,6 +80,20 @@ class _Worker(QThread):
         self.finished_turn.emit()
 
 
+class _KeyCheck(QThread):
+    """Asks Gemini whether a key is accepted, off the GUI thread."""
+
+    checked = pyqtSignal(str, bool, str)   # key, ok, sentence
+
+    def __init__(self, key: str, parent=None):
+        super().__init__(parent)
+        self.key = key
+
+    def run(self):
+        ok, why = check_gemini_key(self.key)
+        self.checked.emit(self.key, ok, why)
+
+
 class _Input(QPlainTextEdit):
     submit = pyqtSignal()
 
@@ -101,6 +115,7 @@ class AIPanel(QWidget):
         self.provider: Provider | None = None
         self.session: AssistantSession | None = None
         self._worker: _Worker | None = None
+        self._key_check: _KeyCheck | None = None
         self._stream_buf = ""
         self._assistant_anchor = 0
         self._activity_text = "Thinking"
@@ -136,16 +151,6 @@ class AIPanel(QWidget):
         title_col.addWidget(self.lbl_status)
         h.addLayout(title_col, 1)
 
-        # Backend picker: lets the user spend Gemini quota only when they
-        # want to, and drop to the local model otherwise.
-        self.cmb_backend = QComboBox()
-        self.cmb_backend.setObjectName("aiBackend")
-        self.cmb_backend.setToolTip("Which model answers")
-        self.cmb_backend.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self.cmb_backend.setMaximumWidth(190)
-        self.cmb_backend.currentIndexChanged.connect(self._on_backend_picked)
-        h.addWidget(self.cmb_backend)
-
         self.btn_explain = QToolButton()
         self.btn_explain.setIcon(icon("debrief"))
         self.btn_explain.setToolTip("Debrief the last simulated flight")
@@ -160,7 +165,6 @@ class AIPanel(QWidget):
         self.btn_more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         menu = QMenu(self.btn_more)
         menu.addAction(icon("add"), "New conversation", self.clear_conversation)
-        menu.addAction(icon("refresh"), "Reconnect provider", self.reload_provider)
         menu.addSeparator()
         menu.addAction(icon("settings"), "AI settings…", self._open_settings)
         self.btn_more.setMenu(menu)
@@ -175,6 +179,56 @@ class AIPanel(QWidget):
         self.view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.view.document().setDocumentMargin(12)
         lo.addWidget(self.view, 1)
+
+        # Setup card: shown in place of the transcript until a key is saved.
+        # It used to be a page of instructions pointing at the Settings
+        # dialog; the key is now pasted and checked right here.
+        self.setup = QFrame()
+        self.setup.setObjectName("aiSetup")
+        sl = QVBoxLayout(self.setup)
+        sl.setContentsMargins(16, 16, 16, 16)
+        sl.setSpacing(8)
+        self.lbl_setup_title = QLabel("Set Up the Assistant")
+        self.lbl_setup_title.setObjectName("aiSetupTitle")
+        sl.addWidget(self.lbl_setup_title)
+        self.lbl_setup_body = QLabel(
+            "The assistant runs on Google Gemini. A key is free and takes about "
+            "two minutes: sign in to Google AI Studio, create a key, paste it here.")
+        self.lbl_setup_body.setObjectName("aiSetupBody")
+        self.lbl_setup_body.setWordWrap(True)
+        sl.addWidget(self.lbl_setup_body)
+        self.btn_get_key = QPushButton("Get a Free Key")
+        self.btn_get_key.setToolTip(GEMINI_KEY_URL)
+        self.btn_get_key.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_get_key.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(GEMINI_KEY_URL)))
+        sl.addWidget(self.btn_get_key, 0, Qt.AlignmentFlag.AlignLeft)
+        key_row = QHBoxLayout()
+        key_row.setSpacing(6)
+        self.edit_key = QLineEdit()
+        self.edit_key.setObjectName("aiKey")
+        self.edit_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.edit_key.setPlaceholderText("Paste the key here")
+        self.edit_key.returnPressed.connect(self._save_key)
+        key_row.addWidget(self.edit_key, 1)
+        self.btn_save_key = QPushButton("Save && Test")
+        self.btn_save_key.clicked.connect(self._save_key)
+        key_row.addWidget(self.btn_save_key)
+        sl.addLayout(key_row)
+        self.lbl_setup_result = QLabel("")
+        self.lbl_setup_result.setObjectName("aiSetupResult")
+        self.lbl_setup_result.setWordWrap(True)
+        sl.addWidget(self.lbl_setup_result)
+        self.lbl_setup_note = QLabel(
+            "Questions and a summary of the rocket are sent to Google when you "
+            "ask something. The key is stored in this computer's application "
+            "settings.")
+        self.lbl_setup_note.setObjectName("aiSetupNote")
+        self.lbl_setup_note.setWordWrap(True)
+        sl.addWidget(self.lbl_setup_note)
+        sl.addStretch()
+        self.setup.hide()
+        lo.addWidget(self.setup, 1)
 
         # ── Suggestion chips ──
         self.chips = QWidget()
@@ -238,11 +292,10 @@ class AIPanel(QWidget):
                 border-radius: 11px; padding: 3px 10px; font-size: 11px;
             }}
             #aiChip:hover {{ border-color: {t.ACCENT}; color: {t.ACCENT}; }}
-            #aiBackend {{
-                background: {t.FIELD_BG}; color: {t.TEXT}; border: 1px solid {t.LINE};
-                border-radius: 6px; padding: 2px 6px; font-size: 11px;
-            }}
-            #aiBackend:hover {{ border-color: {t.ACCENT}; }}
+            QFrame#aiSetup {{ background: {t.BG}; }}
+            #aiSetupTitle {{ color: {t.TEXT_BRIGHT}; font-weight: 600; font-size: 13px; }}
+            #aiSetupBody {{ color: {t.TEXT}; font-size: 12px; }}
+            #aiSetupNote {{ color: {t.TEXT_DIM}; font-size: 11px; }}
             #aiActivity {{ color: {t.TEXT_DIM}; font-size: 11px; background: {t.BG}; }}
             #aiComposer {{ background: {t.PANEL}; border-top: 1px solid {t.LINE}; }}
             #aiInput {{
@@ -265,53 +318,16 @@ class AIPanel(QWidget):
         self.btn_send.setToolTip("Stop" if busy else "Send (Enter)")
 
     # ------------------------------------------------------------ provider
-    def _backend_choices(self) -> list[tuple[str, str]]:
-        """(key, label) for the picker; configured backends only, Auto always."""
-        out = [("auto", "Auto")]
-        if _setting("ai/gemini_key"):
-            out.append(("gemini", f"Gemini · {gemini_model_setting()}"))
-        out.append(("ollama", f"Ollama · {_setting('ai/ollama_model', 'local')}"))
-        if _setting("ai/custom_url"):
-            out.append(("custom", f"Custom · {_setting('ai/custom_model', 'model')}"))
-        return out
-
-    def _refresh_backend_combo(self):
-        current = str(_setting("ai/provider", "auto") or "auto").lower()
-        self.cmb_backend.blockSignals(True)
-        self.cmb_backend.clear()
-        for key, label in self._backend_choices():
-            self.cmb_backend.addItem(label, key)
-        idx = self.cmb_backend.findData(current)
-        self.cmb_backend.setCurrentIndex(max(idx, 0))
-        self.cmb_backend.blockSignals(False)
-
-    def _on_backend_picked(self, idx: int):
-        key = self.cmb_backend.itemData(idx)
-        if not key:
-            return
-        if self._busy():
-            # Revert the picker: the provider cannot change mid-turn.
-            self._refresh_backend_combo()
-            return
-        settings.set("ai/provider", key)
-        self.reload_provider()
-
     def reload_provider(self):
-        self._refresh_backend_combo()
         self.provider = build_provider()
-        if self.provider is None:
-            self.session = None
-            self._set_status(False, "No AI backend configured")
-            self._render_setup_card()
-            self._set_enabled(False)
-            return
         ok, why = self.provider.available()
         if not ok:
             self.session = None
             self._set_status(False, why)
-            self._render_setup_card(why)
+            self._show_setup(True)
             self._set_enabled(False)
             return
+        self._show_setup(False)
         history = self.session.history if self.session else []
         self.session = AssistantSession(
             self.provider,
@@ -346,30 +362,40 @@ class AIPanel(QWidget):
             f"and make changes when you ask. Numbers come from K2's solvers, not guesses."
             f"</div>")
 
-    def _render_setup_card(self, why: str = ""):
-        rows = "".join(
-            f"<tr><td style='padding:3px 6px'>{'✔' if ok else '✖'}</td>"
-            f"<td style='padding:3px 6px'>{html.escape(name)}</td>"
-            f"<td style='padding:3px 6px;color:{theme.TEXT_DIM}'>{html.escape(reason)}</td></tr>"
-            for name, ok, reason in describe_auto_state())
-        self.view.setHtml(
-            f"<table width='100%' cellspacing='0' cellpadding='10' bgcolor='{theme.PANEL}'>"
-            f"<tr><td>"
-            f"<div style='font-weight:600; font-size:13px; color:{theme.TEXT_BRIGHT}'>Set up the assistant</div>"
-            f"<div style='color:{theme.TEXT_DIM}; margin:4px 0 8px 0'>{html.escape(why)}</div>"
-            f"<table cellspacing='0'>{rows}</table>"
-            f"<div style='margin-top:10px; font-weight:600'>Free options</div>"
-            f"<ol style='margin:4px 0 0 16px'>"
-            f"<li><b>Gemini</b> (cloud, recommended) — free key at "
-            f"<a href='https://aistudio.google.com/apikey' style='color:{theme.ACCENT}'>aistudio.google.com/apikey</a>, "
-            f"paste it in <i>Settings → AI Assistant</i>.</li>"
-            f"<li><b>Ollama</b> (local, offline) — install from "
-            f"<a href='https://ollama.com/download' style='color:{theme.ACCENT}'>ollama.com</a>, then "
-            f"<code>ollama pull qwen3:1.7b</code>.</li>"
-            f"</ol>"
-            f"<div style='color:{theme.TEXT_DIM}; margin-top:8px'>Then use ⋯ → Reconnect provider.</div>"
-            f"</td></tr></table>")
-        self.chips.hide()
+    def _show_setup(self, on: bool):
+        """Swap the transcript for the key card, or back."""
+        self.setup.setVisible(on)
+        self.view.setVisible(not on)
+        if on:
+            self.chips.hide()
+
+    def _set_setup_result(self, text: str, color: str):
+        self.lbl_setup_result.setStyleSheet(f"color: {color}; font-size: 11px;")
+        self.lbl_setup_result.setText(text)
+
+    def _save_key(self):
+        """Check the pasted key with Gemini; store it only if it is accepted."""
+        key = self.edit_key.text().strip()
+        if not key:
+            self._set_setup_result("Paste a key first.", theme.WARN)
+            return
+        if self._key_check is not None and self._key_check.isRunning():
+            return
+        self.btn_save_key.setEnabled(False)
+        self._set_setup_result("Checking the key" + "…", theme.TEXT_DIM)
+        self._key_check = _KeyCheck(key, self)
+        self._key_check.checked.connect(self._on_key_checked)
+        self._key_check.start()
+
+    def _on_key_checked(self, key: str, ok: bool, why: str):
+        self.btn_save_key.setEnabled(True)
+        if not ok:
+            self._set_setup_result(why, theme.WARN)
+            return
+        settings.set("ai/gemini_key", key)
+        self.edit_key.clear()
+        self._set_setup_result("", theme.TEXT_DIM)
+        self.reload_provider()
 
     def _open_settings(self):
         fn = getattr(self.mw, "_on_settings", None)
@@ -386,7 +412,8 @@ class AIPanel(QWidget):
                 asm = ws.get_assembly()
             except Exception:
                 asm = None
-        return render_context(summarize_state(self.mw.engine.state, asm))
+        flight = getattr(getattr(self.mw, "sim_engine", None), "summary", None)
+        return render_context(summarize_state(self.mw.engine.state, asm, flight))
 
     # ----------------------------------------------------------------- chat
     def send(self):
@@ -511,6 +538,9 @@ class AIPanel(QWidget):
 
     def shutdown(self, wait_ms: int = 3000):
         """Cancel any in-flight turn and wait for the worker thread; call on app close."""
+        k = self._key_check
+        if k is not None and k.isRunning():
+            k.wait(wait_ms)
         w = self._worker
         if w is None:
             return

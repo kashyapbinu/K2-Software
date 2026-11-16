@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (QComboBox, QDoubleSpinBox, QHBoxLayout,
                              QHeaderView, QInputDialog, QLabel, QMessageBox,
@@ -35,6 +35,10 @@ def _fmt(v, unit=""):
 
 
 class RulesPanel(QWidget):
+    # The checklist was re-evaluated (new flight, another rule set, an edited
+    # limit or target).
+    checked = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._summaries = []
@@ -179,7 +183,8 @@ class RulesPanel(QWidget):
                     "" if rule.limit is None else f"{rule.limit:g}",
                     "" if rule.limit_high is None else f"{rule.limit_high:g}",
                     _fmt(res.value, unit) if res else "—",
-                    (res.status if res else "no flight"),
+                    ("no flight" if not res else
+                     "enter a limit" if res.note == R.NO_LIMIT else res.status),
                     _fmt(res.margin, unit) if res else "—",
                     (f"{res.pass_rate * 100:.1f} % of {res.evaluated}"
                      if res and res.pass_rate is not None and self._many else ""),
@@ -202,7 +207,16 @@ class RulesPanel(QWidget):
             n_pass = sum(r.status == R.PASS for r in res)
             n_fail = sum(r.status == R.FAIL for r in res)
             n_na = len(res) - n_pass - n_fail
-            self.summary_label.setText(f"{n_pass} pass, {n_fail} fail, {n_na} not evaluated")
+            text = f"{n_pass} pass, {n_fail} fail, {n_na} not evaluated"
+            n_blank = sum(r.note == R.NO_LIMIT for r in res)
+            if n_blank:
+                # Without this the template reads as a check that never runs.
+                text += (f". {n_blank} rule(s) have no limit: double-click the Limit cell "
+                         f"and type the number from your rulebook.")
+                if rs is not None and rs.builtin:
+                    text += " Save As… keeps them."
+            self.summary_label.setText(text)
+        self.checked.emit()
 
     def _on_cell_edited(self, item):
         if self._filling or item.column() not in (C_LIMIT, C_UPPER):
@@ -221,4 +235,10 @@ class RulesPanel(QWidget):
         else:
             rule.limit_high = value
         rs.confirmed = False       # edited numbers are no longer the cited ones
+        if not rs.builtin:
+            # A limit typed into a saved set used to live only in memory and
+            # was gone at the next start.
+            user = [rs if s.name == rs.name else s
+                    for s in R.parse_user_rule_sets(settings.get(SETTINGS_KEY) or "")]
+            settings.set(SETTINGS_KEY, R.dump_user_rule_sets(user))
         self._on_set_chosen(self.set_combo.currentIndex())

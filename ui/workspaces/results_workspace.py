@@ -12,6 +12,7 @@ from ui.widgets.plot_widget import PlotWidget
 from core.flight_log import parse_flight_log_file, compare_apogee
 
 from ui import theme
+from ui.widgets.readout import Readout
 
 logger = logging.getLogger("K2.ResultsWS")
 
@@ -37,13 +38,13 @@ def canopy_line(c: dict) -> str:
     opened at, its peak force, and the descent rate under it."""
     name = c.get("name", "Parachute")
     if c.get("deploy_time") is None:
-        return f"🪂 {name}: did not open"
+        return f"{name}: did not open"
     parts = [f"opened at {c['deploy_altitude']:.0f} m, T+{c['deploy_time']:.1f} s",
              f"{c.get('deploy_speed') or 0.0:.0f} m/s",
              f"peak {c.get('peak_force', 0.0):.0f} N"]
     if c.get("descent_rate") is not None:
         parts.append(f"descent {c['descent_rate']:.1f} m/s")
-    return f"🪂 {name}: " + ", ".join(parts)
+    return f"{name}: " + ", ".join(parts)
 
 
 def summary_text(summary, key: str) -> str:
@@ -70,17 +71,6 @@ def summary_text(summary, key: str) -> str:
     return format_value(value, "velocity")
 
 
-class ReadoutValue(QLabel):
-    def __init__(self, text="—", parent=None):
-        super().__init__(text, parent)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setStyleSheet(
-            f"color: {theme.TEXT_BRIGHT}; font-family: 'Cascadia Code', monospace; "
-            "font-size: 13px; font-weight: 600; padding: 4px 8px; "
-            f"background-color: {theme.PANEL}; border: 1px solid {theme.RAISED}; border-radius: 6px;"
-        )
-
-
 class ResultsWorkspace(QWidget):
     def __init__(self, engine, sim_engine=None, parent=None):
         super().__init__(parent)
@@ -88,8 +78,49 @@ class ResultsWorkspace(QWidget):
         self.sim_engine = sim_engine
         self._history = None
         self._flight_log = None      # imported real flight log for sim-vs-real overlay
+        # The cursor is the shared replay instant (ui.replay_clock): moving it
+        # here moves the rocket in the Mission Visualizer, and the reverse.
+        self._clock = None
+        self._times = []             # recorded times, for time -> slider index
+        self._following_clock = False
         self._setup_ui()
         self.engine.state_changed.connect(self._check_data)
+        if sim_engine is not None and hasattr(sim_engine, "sim_finished"):
+            from ui.replay_clock import clock_for
+            self._clock = clock_for(sim_engine)
+            self._clock.time_changed.connect(self._on_clock_time)
+        if sim_engine is not None and hasattr(sim_engine, "flight_cleared"):
+            sim_engine.flight_cleared.connect(self._on_flight_cleared)
+
+    def _on_flight_cleared(self):
+        """The engine dropped its flight (project opened, Reset, a new run
+        starting): blank the plots, tiles and cursor that showed it. They
+        used to stay until the next Refresh, and the report took its history
+        from the copy kept here."""
+        self._history = None
+        self._times = []
+        self.reset_workspace()
+
+    def _on_clock_time(self, t: float):
+        """Another view moved the replay instant: bring the cursor to it.
+        A hidden tab waits until it is shown (eight plots redraw per move)."""
+        if not self._times or not self.isVisible():
+            return
+        import bisect
+        i = bisect.bisect_left(self._times, t)
+        if i > 0 and (i == len(self._times) or t - self._times[i - 1] <= self._times[i] - t):
+            i -= 1
+        if i != self.scrub_slider.value():
+            self._following_clock = True
+            try:
+                self.scrub_slider.setValue(i)
+            finally:
+                self._following_clock = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._clock is not None and self._clock.replay is not None:
+            self._on_clock_time(self._clock.time)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -98,8 +129,8 @@ class ResultsWorkspace(QWidget):
 
         # Header
         top = QHBoxLayout()
-        title = QLabel("FLIGHT RESULTS")
-        title.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
+        title = QLabel("Flight Results")
+        title.setStyleSheet(theme.panel_title_qss())
         top.addWidget(title)
         top.addStretch()
 
@@ -135,51 +166,44 @@ class ResultsWorkspace(QWidget):
 
         # Summary
         self.summary_label = QLabel("No simulation data. Run a simulation first.")
-        self.summary_label.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 13px; padding: 8px; "
-            f"background-color: {theme.PANEL}; border-radius: 6px;")
+        self.summary_label.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 12px;")
         self.summary_label.setWordWrap(True)
         layout.addWidget(self.summary_label)
 
         # Flight summary (core.flight_summary): the headline numbers, from
         # the same object the rules check and the report read.
-        sum_frame = QFrame()
-        sum_frame.setStyleSheet(f"background-color: {theme.BG}; border: 1px solid {theme.RAISED}; border-radius: 6px;")
-        sg = QGridLayout(sum_frame)
-        sg.setContentsMargins(8, 6, 8, 6)
+        sg = QGridLayout()
+        sg.setContentsMargins(0, 0, 0, 0)
         sg.setSpacing(6)
         self.summary_tiles = {}
         for i, (key, label) in enumerate(SUMMARY_TILES):
-            col, row = i % 6, (i // 6) * 2
-            header = QLabel(label)
-            header.setStyleSheet(f"color: {theme.TEXT_DIM}; font-weight: 600; font-size: 11px;")
-            header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            sg.addWidget(header, row, col)
-            val = ReadoutValue("—")
+            val = Readout(label)
             self.summary_tiles[key] = val
-            sg.addWidget(val, row + 1, col)
-        layout.addWidget(sum_frame)
+            sg.addWidget(val, i // 6, i % 6)
+            sg.setColumnStretch(i % 6, 1)
+        layout.addLayout(sg)
 
         # Timeline scrubber
-        scrub_frame = QFrame()
-        scrub_frame.setStyleSheet(f"background-color: {theme.PANEL}; border: 1px solid {theme.RAISED}; border-radius: 6px; padding: 4px;")
-        sl = QHBoxLayout(scrub_frame)
-        sl.setContentsMargins(8, 4, 8, 4)
-        sl.addWidget(QLabel("T+"))
+        sl = QHBoxLayout()
+        sl.setContentsMargins(0, 4, 0, 0)
+        sl.setSpacing(10)
+        scrub_caption = QLabel("Cursor")
+        scrub_caption.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600;")
+        sl.addWidget(scrub_caption)
         self.scrub_slider = QSlider(Qt.Orientation.Horizontal)
         self.scrub_slider.setRange(0, 1000)
         self.scrub_slider.setValue(0)
         self.scrub_slider.valueChanged.connect(self._on_scrub)
         sl.addWidget(self.scrub_slider, 1)
-        self.scrub_time = QLabel("0.00 s")
-        self.scrub_time.setStyleSheet(f"color: {theme.ACCENT}; font-family: 'Cascadia Code', monospace; font-weight: 600;")
+        self.scrub_time = QLabel("T+ 0.00 s")
+        self.scrub_time.setStyleSheet(
+            f"color: {theme.TEXT_BRIGHT}; font-family: {theme.MONO}; font-weight: 600;")
         sl.addWidget(self.scrub_time)
-        layout.addWidget(scrub_frame)
+        layout.addLayout(sl)
 
         # Cursor readouts
-        readout_frame = QFrame()
-        readout_frame.setStyleSheet(f"background-color: {theme.BG}; border: 1px solid {theme.RAISED}; border-radius: 6px;")
-        rg = QGridLayout(readout_frame)
-        rg.setContentsMargins(8, 6, 8, 6)
+        rg = QGridLayout()
+        rg.setContentsMargins(0, 0, 0, 0)
         rg.setSpacing(6)
 
         readout_defs = [
@@ -189,21 +213,14 @@ class ResultsWorkspace(QWidget):
         ]
         self.cursor_readouts = {}
         for i, (name, unit) in enumerate(readout_defs):
-            col = i % 6
-            row = (i // 6) * 2
-            header = QLabel(name)
-            header.setStyleSheet(f"color: {theme.TEXT_DIM}; font-weight: 600; font-size: 11px;")
-            header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            rg.addWidget(header, row, col)
-            val = ReadoutValue("—")
+            val = Readout(name, compact=True)
             self.cursor_readouts[name] = (val, unit)
-            rg.addWidget(val, row + 1, col)
-
-        layout.addWidget(readout_frame)
+            rg.addWidget(val, i // 6, i % 6)
+            rg.setColumnStretch(i % 6, 1)
+        layout.addLayout(rg)
 
         # Plot tabs
         self.tabs = QTabWidget()
-        self.tabs.setStyleSheet(f"QTabWidget::pane {{ border: 1px solid {theme.RAISED}; }}")
 
         self.alt_plot = PlotWidget(title="Altitude vs Time", xlabel="Time (s)", ylabel="Altitude (m)")
         self.tabs.addTab(self.alt_plot, "Altitude")
@@ -236,6 +253,7 @@ class ResultsWorkspace(QWidget):
         from ui.widgets.rules_panel import RulesPanel
         self.rules_panel = RulesPanel()
         self.tabs.addTab(self.rules_panel, icon("check"), "Rules")
+        self.rules_panel.checked.connect(self._stamp_rules)
 
         layout.addWidget(self.tabs, 1)
 
@@ -270,6 +288,7 @@ class ResultsWorkspace(QWidget):
         t_vals = history.get_values("time")
         if not t_vals:
             return
+        self._times = list(t_vals)
 
         # Update slider range
         self.scrub_slider.setRange(0, max(1, len(t_vals) - 1))
@@ -294,10 +313,10 @@ class ResultsWorkspace(QWidget):
             "Mass vs Time", "Time (s)", "Mass (kg)", theme.WARN)
 
         self.mach_plot.update_plot(t_vals, history.get_values("mach"),
-            "Mach Number vs Time", "Time (s)", "Mach", "#bc8cff")
+            "Mach Number vs Time", "Time (s)", "Mach", theme.SERIES_VIOLET)
 
         self.stability_plot.update_plot(t_vals, history.get_values("stability_margin"),
-            "Stability Margin vs Time", "Time (s)", "Calibers", "#f778ba")
+            "Stability Margin vs Time", "Time (s)", "Calibers", theme.SERIES_TEAL)
 
         self.dyn_press_plot.update_plot(t_vals, history.get_values("dynamic_pressure"),
             "Dynamic Pressure vs Time", "Time (s)", "q (Pa)", theme.ACCENT_HOVER)
@@ -315,15 +334,14 @@ class ResultsWorkspace(QWidget):
         if summary is not None and summary.warnings:
             text += "\n⚠ " + "\n⚠ ".join(summary.warnings)
         self.summary_label.setText(text)
-        self.summary_label.setStyleSheet(f"color: {theme.OK}; font-size: 13px; padding: 8px; "
-            f"background-color: {theme.PANEL}; border: 1px solid {theme.RAISED}; border-radius: 6px; font-weight: 600;")
+        self.summary_label.setStyleSheet(f"color: {theme.TEXT}; font-size: 12px;")
 
         # Append sim-vs-measured comparison when a flight log is loaded.
         if self._flight_log and summary is not None:
             cmp = compare_apogee(summary.apogee, self._flight_log)
             self.summary_label.setText(
                 self.summary_label.text() +
-                f"\n📈 Log '{self._flight_log['source']}' — "
+                f"\nLog '{self._flight_log['source']}': "
                 f"Measured apogee: {cmp['measured_apogee']:.1f} m  |  "
                 f"Sim error: {cmp['error_m']:+.1f} m ({cmp['error_pct']:+.1f}%)")
 
@@ -354,6 +372,11 @@ class ResultsWorkspace(QWidget):
             margins["structural_sf"] = weakest.margin
             margins["structures_source"] = f"{weakest.name}, Structures workstation"
         out["margins"] = margins
+        # Which of those results were made for an earlier version of the
+        # rocket; the report marks them (core.technical_report).
+        from core.readiness import STALE
+        out["out_of_date"] = {st.stage.key: st.reason
+                              for st in self.engine.readiness.all(s) if st.status == STALE}
         return out
 
     def _on_report(self, path: str = None):
@@ -368,7 +391,25 @@ class ResultsWorkspace(QWidget):
         inp = self.report_inputs()
         rep = build_content(inp.pop("state"), inp.pop("summary"), **inp)
         render_pdf(rep, path)
+        self.engine.analysis_done("report", Path(path).name)
         self.engine.log_message.emit(f"Technical report saved: {path}")
+
+    def _stamp_rules(self, *_):
+        """Record the rules check on the Readiness board: how many rules the
+        flight passed, of those that have a limit. A set with no limits (the
+        built-in template) is not a check, so it stays 'not run'."""
+        from core import rules as R
+        summary = getattr(self.sim_engine, "summary", None)
+        if summary is None or summary.final_phase != "Landed":
+            return
+        judged = [r for r in self.rules_panel.results() if r.status in (R.PASS, R.FAIL)]
+        if not judged:
+            self.engine.readiness.forget("rules")
+            self.engine.readiness_changed.emit()
+            return
+        passed = sum(1 for r in judged if r.status == R.PASS)
+        self.engine.analysis_done("rules", f"{passed} of {len(judged)} rules pass",
+                                  verdict=passed == len(judged))
 
     def _show_summary(self, summary):
         for key, tile in self.summary_tiles.items():
@@ -380,7 +421,7 @@ class ResultsWorkspace(QWidget):
         if log and log.get(meas_key):
             plot.multi_plot([
                 (t, y, color, "Simulated"),
-                (log["time"], log[meas_key], "#f778ba", "Measured"),
+                (log["time"], log[meas_key], theme.SERIES_TEAL, "Measured"),
             ], title, xlabel, ylabel)
         else:
             plot.update_plot(t, y, title, xlabel, ylabel, color)
@@ -411,7 +452,7 @@ class ResultsWorkspace(QWidget):
         # ballistic results carry the landing position + impact speed.
         results = getattr(self.sim_engine, "spent_stage_results", None) or []
         snaps = getattr(self.sim_engine, "spent_stages", None) or []
-        palette = [theme.ACCENT, theme.ERR, theme.WARN, "#bc8cff"]
+        palette = [theme.ACCENT, theme.ERR, theme.WARN, theme.SERIES_VIOLET]
         for i, r in enumerate(results):
             name = snaps[i].get("name") if i < len(snaps) else None
             name = name or f"Stage {r.get('stage', i)}"
@@ -475,9 +516,11 @@ class ResultsWorkspace(QWidget):
         if not snap:
             return
 
-        self.scrub_time.setText(f"{snap.get('time', 0):.2f} s")
+        self.scrub_time.setText(f"T+ {snap.get('time', 0):.2f} s")
         
         t_val = snap.get('time', 0)
+        if self._clock is not None and not self._following_clock:
+            self._clock.seek(t_val)
         self.alt_plot.set_cursor(t_val)
         self.vel_plot.set_cursor(t_val)
         self.accel_plot.set_cursor(t_val)

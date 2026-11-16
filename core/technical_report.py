@@ -35,6 +35,8 @@ class Section:
     notes: List[str] = field(default_factory=list)
     figures: List[Tuple[str, bytes]] = field(default_factory=list)   # (caption, PNG)
     table: Optional[List[List[str]]] = None                          # header + rows
+    # Printed first, in red: this section's result is out of date.
+    warnings: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -49,6 +51,16 @@ class Report:
     def value(self, section: str, label: str) -> Optional[str]:
         s = self.section(section)
         return dict(s.rows).get(label) if s else None
+
+    @property
+    def warnings(self) -> List[str]:
+        """Every out-of-date mark in the report, as "Section: text"."""
+        return [f"{s.title}: {w}" for s in self.sections for w in s.warnings]
+
+
+def _stale(reason: str, what: str = "The numbers below are") -> str:
+    return (f"OUT OF DATE: {reason or 'inputs changed'}. {what} from before "
+            "that change; run the analysis again.")
 
 
 # ── formatting (one place, so the PDF and the tests agree) ────────────────
@@ -86,7 +98,7 @@ MODEL_LIMITS = [
 
 def build_content(state, summary, *, history=None, rule_results=None,
                   rule_set=None, dispersion=None, landings=None,
-                  margins=None, title: str = "") -> Report:
+                  margins=None, out_of_date=None, title: str = "") -> Report:
     """Assemble the report.
 
     state:        RocketState (vehicle, motor, launch setup)
@@ -97,7 +109,13 @@ def build_content(state, summary, *, history=None, rule_results=None,
     landings:     its (north, east) landing points, optional
     margins:      {"flutter_speed": m/s, "structural_sf": x, "structures_source": str}
                   — whatever the Dynamics / Structures tabs produced, optional
+    out_of_date:  {readiness stage key: reason} for each result that was
+                  made from inputs that have since changed (core.readiness).
+                  Its section is printed with a mark saying so. The report
+                  used to print such a result like any other: change a fin
+                  after flying and the PDF still gave the old apogee.
     """
+    stale = out_of_date or {}
     from core.version import __version__
 
     s = state
@@ -107,15 +125,21 @@ def build_content(state, summary, *, history=None, rule_results=None,
                  f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
     # Vehicle
-    liftoff = s.total_mass()
+    # The rocket on the pad (RocketState.liftoff_*), not the state's live
+    # mass, CG and margin: a report is written after the flight, when those
+    # are the burnt-out rocket's. This section used to read them, and for the
+    # canonical rocket printed 6.001 kg, 0.900 m and 6.78 cal under "liftoff"
+    # and "on the pad" (7.400 kg, 1.051 m, 5.30 cal), and a liftoff
+    # thrust-to-weight of 18.52 (15.02).
+    liftoff = s.liftoff_mass()
     weight = liftoff * 9.80665
-    pad_margin = (s.cp - s.cg) / s.diameter if s.diameter > 0 else None
+    pad_margin = s.pad_stability_margin()
     rep.sections.append(Section("Vehicle", [
         ("Length", fmt(s.length, "m", 3)),
         ("Body diameter", fmt(s.diameter * 1000.0, "mm", 1)),
         ("Dry mass (airframe)", fmt(s.dry_mass, "kg", 3)),
         ("Liftoff mass", fmt(liftoff, "kg", 3)),
-        ("CG at liftoff (from nose)", fmt(s.cg, "m", 3)),
+        ("CG at liftoff (from nose)", fmt(s.liftoff_cg(), "m", 3)),
         ("CP, subsonic (from nose)", fmt(s.cp, "m", 3)),
         ("Static margin on the pad", fmt(pad_margin, "cal", 2)),
         ("Fins", f"{s.fin_count}" if s.fin_count else "none"),
@@ -124,12 +148,18 @@ def build_content(state, summary, *, history=None, rule_results=None,
     ]))
 
     # Motor
-    twr = s.motor_avg_thrust / weight if weight > 0 and s.motor_avg_thrust > 0 else None
+    # Liftoff thrust: the first stage to light on a staged rocket.
+    liftoff_thrust = s.liftoff_avg_thrust()
+    twr = liftoff_thrust / weight if weight > 0 and liftoff_thrust > 0 else None
     rep.sections.append(Section("Motor", [
         ("Designation", s.motor_designation),
         ("Total impulse", fmt(s.motor_total_impulse, "N·s", 0)),
         ("Average thrust", fmt(s.motor_avg_thrust, "N", 0)),
-        ("Peak thrust", fmt(s.motor_max_thrust, "N", 0)),
+        # No rated peak: the trapezoid curve assumes one
+        # (staging.trapezoid_thrust_curve). This row used to print "0 N".
+        ("Peak thrust", fmt(s.motor_max_thrust, "N", 0) if s.motor_max_thrust > 0
+         or s.custom_thrust_curve else
+         "not given (1.4 × average assumed for the thrust curve)"),
         ("Burn time", fmt(s.motor_burn_time, "s", 2)),
         ("Propellant mass", fmt(s.propellant_mass_initial, "kg", 3)),
         ("Thrust curve", "measured" if s.custom_thrust_curve else
@@ -176,12 +206,16 @@ def build_content(state, summary, *, history=None, rule_results=None,
             ("Landing distance from pad", fmt(f.landing_drift, "m", 0)),
             ("Flight time", fmt(f.flight_time, "s", 1)),
         ], notes=[f"⚠ {w}" for w in f.warnings])
+        if "flight" in stale:
+            sec.warnings.append(_stale(stale["flight"]))
         if history is not None and len(history) > 0:
             sec.figures.extend(_profile_figures(history))
         rep.sections.append(sec)
 
         # Recovery
         rec = Section("Recovery")
+        if "flight" in stale:
+            rec.warnings.append(_stale(stale["flight"]))
         if f.canopies:
             rec.table = [["Canopy", "Trigger", "Cd×A (m²)", "Opened at", "Speed",
                           "Peak force", "Descent rate"]]
@@ -211,6 +245,8 @@ def build_content(state, summary, *, history=None, rule_results=None,
     else:
         from core.landing_map import ellipse_coverage
         d = dispersion
+        if "monte_carlo" in stale:
+            disp.warnings.append(_stale(stale["monte_carlo"]))
         disp.rows += [
             ("Flights", f"{d.n}"),
             ("Mean landing point", f"{d.mean_north:,.0f} m N, {d.mean_east:,.0f} m E"),
@@ -228,6 +264,8 @@ def build_content(state, summary, *, history=None, rule_results=None,
     marg = Section("Structural and flutter margins")
     vmax = summary.max_velocity if summary is not None else None
     if m.get("flutter_speed"):
+        if "flutter" in stale:
+            marg.warnings.append(_stale(stale["flutter"], "The fin flutter speed is"))
         marg.rows.append(("Fin flutter speed (governing)", fmt(m["flutter_speed"], "m/s", 0)))
         if vmax:
             marg.rows.append(("Flutter margin over max velocity",
@@ -235,6 +273,11 @@ def build_content(state, summary, *, history=None, rule_results=None,
     else:
         marg.rows.append(("Fin flutter", NOT_RUN + " (Dynamics tab)"))
     if m.get("structural_sf"):
+        # The structural margin is worked from the flight's loads, so it is
+        # as old as the flight.
+        if "flight" in stale:
+            marg.warnings.append(_stale(
+                stale["flight"], "The structural safety factor uses the loads of a flight"))
         marg.rows.append(("Governing structural safety factor",
                           fmt(m["structural_sf"], "", 2)
                           + (f" ({m['structures_source']})" if m.get("structures_source") else "")))
@@ -247,6 +290,8 @@ def build_content(state, summary, *, history=None, rule_results=None,
     if not rule_results:
         rules.notes.append(NOT_RUN + ": no rule set evaluated.")
     else:
+        if "rules" in stale or "flight" in stale:
+            rules.warnings.append(_stale(stale.get("rules") or stale["flight"]))
         if rule_set is not None:
             src = rule_set.source or "no source given"
             rules.notes.append(f"Rule set: {rule_set.name} — limits from {src}"
@@ -324,6 +369,13 @@ def render_pdf(report: Report, path: str) -> None:
     width = A4[0] - 36 * mm
     story = [Paragraph(escape(report.title), ss["Title"]),
              Paragraph(escape(report.subtitle), ss["Normal"]), Spacer(1, 6 * mm)]
+    if report.warnings:
+        # On the first page, so nobody has to find the mark in its section.
+        story += [Paragraph(
+            '<font color="#b00020"><b>This report contains results that are out of '
+            'date for the rocket as it is now: '
+            + escape(", ".join(sorted({s.title for s in report.sections if s.warnings})))
+            + '.</b></font>', ss["BodyText"]), Spacer(1, 4 * mm)]
     grid = TableStyle([("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#bbbbbb")),
                        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
                        ("VALIGN", (0, 0), (-1, -1), "TOP")])
@@ -331,6 +383,10 @@ def render_pdf(report: Report, path: str) -> None:
                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white)])
     for sec in report.sections:
         story.append(Paragraph(escape(sec.title), ss["Heading2"]))
+        for w in sec.warnings:
+            story.append(Paragraph(
+                f'<font color="#b00020"><b>{escape(w)}</b></font>', ss["BodyText"]))
+            story.append(Spacer(1, 1.5 * mm))
         if sec.rows:
             t = Table([[escape(a), escape(b)] for a, b in sec.rows],
                       colWidths=[width * 0.5, width * 0.5])

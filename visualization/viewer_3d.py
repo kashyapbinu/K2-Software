@@ -199,7 +199,7 @@ class Viewer3D(QWidget):
         # Top toolbar
         top_layout = QHBoxLayout()
         top_layout.setContentsMargins(10, 5, 10, 5)
-        self.btn_wireframe = QPushButton("Toggle 2D Line / Wireframe Mode")
+        self.btn_wireframe = QPushButton("2D Wireframe")
         self.btn_wireframe.setCheckable(True)
         self.btn_wireframe.clicked.connect(self._toggle_wireframe)
         top_layout.addWidget(self.btn_wireframe)
@@ -246,13 +246,13 @@ class Viewer3D(QWidget):
             # Flat drafting sheet: paper-white in light, ink-dark in dark.
             self.plotter.set_background(_viewport_bg()[1])
             self.plotter.enable_parallel_projection()
-            self.btn_wireframe.setText("Switch to 3D Solid Mode")
+            self.btn_wireframe.setText("3D Solid")
             self._restyle_wireframe_button(active=True)
         else:
             bg, bg_top = _viewport_bg()
             self.plotter.set_background(bg, top=bg_top)
             self.plotter.disable_parallel_projection()
-            self.btn_wireframe.setText("Toggle 2D Line / Wireframe Mode")
+            self.btn_wireframe.setText("2D Wireframe")
             self._restyle_wireframe_button(active=False)
         
         self._rebuild()

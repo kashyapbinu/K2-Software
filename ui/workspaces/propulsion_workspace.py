@@ -413,7 +413,11 @@ class PropulsionWorkspace(QWidget):
             prop, dry = self._sanitized_masses(m)
             self._apply_motor(dict(
                 motor_designation=m["designation"], motor_avg_thrust=m["avg_thrust"],
-                motor_max_thrust=m.get("max_thrust", m["avg_thrust"] * 1.4),
+                # 0 = the catalogue gives no peak. It was stored as 1.4 x the
+                # average, which then read as a rated value in the report and
+                # the structural load cases. The thrust curve still assumes
+                # that peak (staging.trapezoid_thrust_curve), and says so.
+                motor_max_thrust=m.get("max_thrust", 0.0),
                 motor_total_impulse=m["total_impulse"], motor_burn_time=m["burn_time"],
                 propellant_mass=prop, propellant_mass_initial=prop,
                 motor_dry_mass=dry,

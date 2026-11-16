@@ -28,26 +28,49 @@ def liftoff_mass(state) -> float:
     the catalog's L motors). Leaving it out overstated thrust-to-weight by 14%
     for an L1090W on a 6 kg airframe.
     """
-    return ((state.dry_mass or 0.0) + (getattr(state, "motor_dry_mass", 0.0) or 0.0)
-            + (state.propellant_mass_initial or state.propellant_mass or 0.0))
+    return state.liftoff_mass()
+
+
+def zero_lift_cd(state):
+    """The rocket's drag coefficient at zero incidence and Mach 0.3, from the
+    aero model the flight uses; None when no airframe is drawn.
+
+    The assistant was given ``state.cd`` as "cd0". That is 0.45 for every
+    rocket, whatever its nose and fins (the field's default; nothing sets it
+    from the geometry), and a flight used to leave its last instant's value
+    there: 1.57 under the canopy for the canonical rocket.
+    """
+    if not ((state.length or 0.0) > 0 and (state.diameter or 0.0) > 0):
+        return None
+    try:
+        from physics.aerodynamics import AeroModel
+        return AeroModel.from_state(state).zero_lift_cd(0.3)
+    except Exception:
+        return None
 
 
 def _stability_verdict(margin_cal: float) -> str:
-    if margin_cal is None:
-        return "unknown"
-    if margin_cal < 0:
-        return "UNSTABLE (CP ahead of CG)"
-    if margin_cal < 1.0:
-        return "marginal (<1 cal)"
-    if margin_cal > 3.0:
-        return "over-stable (>3 cal, weathercocking risk)"
-    return "stable"
+    """The verdict the Design tab shows (core.stability), in words for the
+    model. It had its own marks: over-stable only above 3 cal, where the
+    screen says OVERSTABLE from 2.5."""
+    from core import stability as S
+    return {
+        S.UNSTABLE: "UNSTABLE (CP ahead of CG)",
+        S.MARGINAL: f"marginal (<{S.MARGINAL_BELOW:g} cal)",
+        S.STABLE: "stable",
+        S.OVERSTABLE: f"over-stable (>{S.OVERSTABLE_ABOVE:g} cal, weathercocking risk)",
+    }.get(S.stability_verdict(margin_cal), "unknown")
 
 
-def summarize_state(state, assembly=None) -> dict:
-    """Structured summary; ``render_context`` turns it into prompt text."""
+def summarize_state(state, assembly=None, flight=None) -> dict:
+    """Structured summary; ``render_context`` turns it into prompt text.
+    ``flight`` is the last flight's ``FlightSummary`` when there is one."""
     d = state.diameter or 0.0
-    margin = _f(state.stability_margin, 2)
+    # The design's balance is the rocket on the pad. state.cg and
+    # state.stability_margin are live: after a flight they are the burnt-out
+    # rocket's, and the assistant was told the canonical rocket had 6.78 cal
+    # (5.30 on the pad).
+    margin = _f(state.pad_stability_margin(), 2)
     geom = {
         "name": state.name,
         "length_m": _f(state.length),
@@ -70,11 +93,11 @@ def summarize_state(state, assembly=None) -> dict:
         "dry_mass_kg": _f(state.dry_mass),
         "propellant_mass_kg": _f(state.propellant_mass_initial or state.propellant_mass),
         "liftoff_mass_kg": _f(liftoff_mass(state)),
-        "cg_from_nose_m": _f(state.cg),
+        "cg_from_nose_m": _f(state.liftoff_cg()),
         "cp_from_nose_m": _f(state.cp),
         "stability_margin_cal": margin,
         "stability_verdict": _stability_verdict(margin),
-        "cd0": _f(state.cd),
+        "cd0": _f(zero_lift_cd(state)),
     }
     motor = {
         "designation": state.motor_designation,
@@ -121,7 +144,7 @@ def summarize_state(state, assembly=None) -> dict:
         out["multistage"] = {"stage_count": len(state.stages_config)}
 
     if state.max_altitude or state.sim_phase not in ("Pre-Launch", "", None):
-        out["last_flight"] = last_flight_summary(state)
+        out["last_flight"] = last_flight_summary(state, flight)
 
     if state.cfd_converged or state.cfd_cd:
         out["cfd"] = {"converged": bool(state.cfd_converged), "mach": _f(state.cfd_mach, 2),
@@ -135,15 +158,23 @@ def summarize_state(state, assembly=None) -> dict:
     return out
 
 
-def last_flight_summary(state) -> dict:
-    return {
+def last_flight_summary(state, flight=None) -> dict:
+    """The last flight as the model is told it. ``flight`` is its
+    ``FlightSummary`` (``SimulationEngine.summary``).
+
+    Peak dynamic pressure and the rail-exit numbers come only from
+    ``flight``; without it they are left out. "max_dynamic_pressure_Pa" used
+    to be ``state.dynamic_pressure``, which is the pressure at this instant:
+    0 Pa once the rocket has landed, so every finished flight was reported
+    with a max-Q of zero.
+    """
+    out = {
         "phase_at_end": state.sim_phase,
         "sim_time_s": _f(state.sim_time, 1),
         "apogee_m": _f(state.max_altitude, 1),
         "max_velocity_m_s": _f(state.max_velocity, 1),
         "max_mach": _f(state.max_mach, 2),
         "max_acceleration_m_s2": _f(state.max_acceleration, 1),
-        "max_dynamic_pressure_Pa": _f(state.dynamic_pressure, 0) if state.dynamic_pressure else None,
         "drogue_descent_rate_m_s": _f(state.drogue_descent_rate, 1),
         "main_descent_rate_m_s": _f(state.main_descent_rate, 1),
         "landing_drift_m": _f(state.landing_drift, 0),
@@ -152,6 +183,19 @@ def last_flight_summary(state) -> dict:
         "parachute_deployed": bool(state.parachute_deployed),
         "flutter_exceeded": bool(state.flutter_exceeded),
     }
+    if flight is not None:
+        # The sensed peak, as the Results tab and the report give it.
+        # state.max_acceleration is the peak of d|v|/dt, about 1 g less on
+        # the way up (185.9 against 195.8 m/s² for the canonical rocket).
+        if flight.max_acceleration is not None:
+            out["max_acceleration_m_s2"] = _f(flight.max_acceleration, 1)
+            out["max_acceleration_g"] = _f(flight.max_acceleration / 9.80665, 2)
+        out["max_dynamic_pressure_Pa"] = _f(flight.max_q, 0)
+        if flight.rail_exit_velocity is not None:
+            out["rail_exit_velocity_m_s"] = _f(flight.rail_exit_velocity, 1)
+        if flight.stability_at_rail_exit is not None:
+            out["stability_at_rail_exit_cal"] = _f(flight.stability_at_rail_exit, 2)
+    return out
 
 
 def _assembly_components(assembly, limit: int = 40) -> list[dict]:

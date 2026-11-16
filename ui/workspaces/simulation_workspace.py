@@ -1,6 +1,7 @@
 """
 K2 AeroSim — Simulation Workspace
-Mission control: Run/Pause/Stop, environment, recovery config, live readouts.
+Transport bar, launch setup on the left, live readouts and a live
+altitude / velocity trace on the right.
 """
 import logging
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
@@ -14,6 +15,7 @@ from core import launch_sites
 from ui.icons import icon
 
 from ui import theme
+from ui.widgets.readout import Readout
 from ui import settings
 
 CUSTOM_SITE = "Custom"
@@ -21,37 +23,127 @@ CUSTOM_SITE = "Custom"
 logger = logging.getLogger("K2.SimWS")
 
 
-class BigReadout(QLabel):
-    def __init__(self, t="—", parent=None):
-        super().__init__(t, parent)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setStyleSheet(f"color: {theme.TEXT_BRIGHT}; font-family: 'Cascadia Code', monospace; "
-            "font-size: 22px; font-weight: 700; padding: 8px; "
-            f"background-color: {theme.PANEL}; border: 1px solid {theme.RAISED}; border-radius: 8px;")
-
-
 class PhaseLight(QLabel):
-    """Status light for a flight phase."""
+    """One segment of the flight-phase strip."""
     def __init__(self, phase: FlightPhase, parent=None):
         super().__init__(phase.value, parent)
         self.phase = phase
         self._color = PHASE_COLORS.get(phase, theme.LINE_STRONG)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._active = False
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.set_active(False)
 
+    def retheme(self):
+        self.set_active(self._active)
+
     def set_active(self, active: bool):
-        if active:
-            self.setStyleSheet(
-                f"color: {self._color}; font-weight: 700; font-size: 11px; "
-                f"padding: 4px 8px; background-color: #0e0e10; "
-                f"border: 2px solid {self._color}; border-radius: 6px;"
-            )
+        self._active = active
+        bar = self._color if active else theme.LINE
+        ink = theme.TEXT_BRIGHT if active else theme.TEXT_FAINT
+        self.setStyleSheet(
+            f"color: {ink}; font-size: 11px; font-weight: {600 if active else 400}; "
+            f"padding: 6px 0px 2px 0px; background: transparent; "
+            f"border: none; border-top: 2px solid {bar};")
+
+
+class LiveTrace(QWidget):
+    """Altitude and velocity against time, drawn while the flight runs.
+
+    Redraws are limited to a few per second and skipped while the tab is
+    hidden, so the trace does not slow the integrator's timer.
+    """
+
+    MIN_REDRAW_S = 0.2
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+        from matplotlib.figure import Figure
+        self.figure = Figure(figsize=(6, 3), dpi=100)
+        self.canvas = FigureCanvasQTAgg(self.figure)
+        self.canvas.wheelEvent = lambda e: e.ignore()
+        self.ax = self.figure.add_subplot(111)
+        self.ax2 = self.ax.twinx()
+        self._alt, = self.ax.plot([], [], linewidth=1.6)
+        self._vel, = self.ax2.plot([], [], linewidth=1.2)
+        self._last_draw = 0.0
+        self._unit_key = None
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.canvas)
+        self.retheme()
+        self.set_data([], [], [])
+
+    def retheme(self):
+        self.figure.patch.set_facecolor(theme.BG)
+        self._alt.set_color(theme.ACCENT)
+        self._vel.set_color(theme.INFO)
+        for ax in (self.ax, self.ax2):
+            ax.set_facecolor("none")
+            ax.tick_params(colors=theme.TEXT_DIM, labelsize=9, length=3)
+            for side, spine in ax.spines.items():
+                spine.set_visible(side != "top")
+                spine.set_color(theme.LINE)
+        self.ax.grid(True, color=theme.LINE, linewidth=0.6, alpha=0.7)
+        self.ax2.grid(False)
+        self.ax.set_xlabel("Time (s)", color=theme.TEXT_DIM, fontsize=9)
+        self.ax.yaxis.label.set_color(theme.ACCENT)
+        self.ax2.yaxis.label.set_color(theme.INFO)
+        self.canvas.draw_idle()
+
+    def set_data(self, t, altitude, velocity, force=True):
+        """Replace the traces. Values are SI; shown in the display units."""
+        import time as _time
+        now = _time.monotonic()
+        if not force and (now - self._last_draw < self.MIN_REDRAW_S
+                          or not self.isVisible()):
+            return
+        self._last_draw = now
+        from ui import units
+        alt_u, vel_u = units.unit_label("altitude"), units.unit_label("velocity")
+        k_alt, k_vel = units.from_si(1.0, "altitude"), units.from_si(1.0, "velocity")
+        n = min(len(t), len(altitude), len(velocity))
+        t = list(t[:n])
+        self._alt.set_data(t, [a * k_alt for a in altitude[:n]])
+        self._vel.set_data(t, [v * k_vel for v in velocity[:n]])
+        self.ax.set_ylabel(f"Altitude ({alt_u})", fontsize=9)
+        self.ax2.set_ylabel(f"Velocity ({vel_u})", fontsize=9)
+        if n >= 2:
+            for ax in (self.ax, self.ax2):
+                # set_ylim on the empty plot switches autoscaling off
+                ax.set_autoscaley_on(True)
+                ax.relim()
+                ax.autoscale_view(scalex=False)
+            self.ax.set_xlim(0, max(t[-1], 1.0))
         else:
-            self.setStyleSheet(
-                f"color: {theme.LINE_STRONG}; font-weight: 600; font-size: 11px; "
-                f"padding: 4px 8px; background-color: {theme.PANEL}; "
-                f"border: 1px solid {theme.RAISED}; border-radius: 6px;"
-            )
+            self.ax.set_xlim(0, 10)
+            self.ax.set_ylim(0, 1000 * k_alt)
+            self.ax2.set_ylim(0, 100 * k_vel)
+        try:
+            self.figure.tight_layout(pad=1.2)
+        except Exception:
+            pass
+        self.canvas.draw_idle()
+
+
+class _FitStack(QStackedWidget):
+    """A stacked widget as tall as the page it shows.
+
+    QStackedWidget is as tall as its tallest page, which left a blank band
+    under the four average-wind fields the height of the wind-layer table.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.currentChanged.connect(lambda _i: self.updateGeometry())
+
+    def sizeHint(self):
+        w = self.currentWidget()
+        return w.sizeHint() if w is not None else super().sizeHint()
+
+    def minimumSizeHint(self):
+        w = self.currentWidget()
+        return w.minimumSizeHint() if w is not None else super().minimumSizeHint()
 
 
 class SimulationWorkspace(QWidget):
@@ -68,58 +160,99 @@ class SimulationWorkspace(QWidget):
         self.sim_engine.sim_failed.connect(self._on_sim_failed)
 
     def _setup_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # ── Transport bar: flight controls, clock, phase, speed ──
+        # Run / Pause / Stop / Reset were four 44 px-high buttons stretched
+        # across the whole tab (about 470 px each) inside their own group box.
+        bar = QFrame()
+        bar.setObjectName("transportBar")
+        bar.setStyleSheet(
+            f"QFrame#transportBar {{ background-color: {theme.PANEL}; "
+            f"border-bottom: 1px solid {theme.LINE}; }}")
+        cl = QHBoxLayout(bar)
+        cl.setContentsMargins(12, 8, 12, 8)
+        cl.setSpacing(6)
+
+        def _transport(key, text, color=None, role=None):
+            b = QPushButton(icon(key, color=color) if color else icon(key), text)
+            if role:
+                b.setProperty(role, True)
+            b.setFixedHeight(30)
+            b.setMinimumWidth(84)
+            cl.addWidget(b)
+            return b
+
+        self.btn_run = _transport("run", "Run", theme.ACCENT, "primary")
+        self.btn_run.clicked.connect(self._on_run)
+        self.btn_pause = _transport("pause", "Pause")
+        self.btn_pause.setEnabled(False)
+        self.btn_pause.clicked.connect(self._on_pause)
+        self.btn_stop = _transport("stop", "Stop")
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.clicked.connect(self._on_stop)
+        self.btn_reset = _transport("reset", "Reset")
+        self.btn_reset.clicked.connect(self._on_reset)
+
+        cl.addSpacing(18)
+        self.time_label = QLabel("T+ 0.00 s")
+        self.time_label.setStyleSheet(
+            f"color: {theme.TEXT_BRIGHT}; font-family: {theme.MONO}; "
+            "font-size: 18px; font-weight: 600;")
+        self.time_label.setMinimumWidth(130)
+        cl.addWidget(self.time_label)
+        self.phase_label = QLabel("Pre-Launch")
+        self.phase_label.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 13px;")
+        cl.addWidget(self.phase_label)
+        cl.addStretch(1)
+
+        speed_caption = QLabel("Speed")
+        speed_caption.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px;")
+        cl.addWidget(speed_caption)
+        self.speed_combo = QComboBox()
+        for s in ["0.25x", "0.5x", "1x", "2x", "5x", "10x"]:
+            self.speed_combo.addItem(s)
+        self.speed_combo.setCurrentText("1x")
+        self.speed_combo.setFixedHeight(30)
+        self.speed_combo.currentTextChanged.connect(self._on_speed_changed)
+        cl.addWidget(self.speed_combo)
+        cl.addSpacing(8)
+        self.btn_apogee_tools = QPushButton(icon("target"), "Target Apogee…")
+        self.btn_apogee_tools.setFixedHeight(30)
+        self.btn_apogee_tools.setToolTip(
+            "Ballast or airbrake area to hit a target apogee, and how the "
+            "apogee moves with launch-day unknowns.")
+        self.btn_apogee_tools.clicked.connect(self.open_apogee_tools)
+        cl.addWidget(self.btn_apogee_tools)
+        outer.addWidget(bar)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(2)
+        self.progress.setStyleSheet(
+            "QProgressBar { border: none; border-radius: 0px; background: transparent; }"
+            f"QProgressBar::chunk {{ border-radius: 0px; background-color: {theme.ACCENT}; }}")
+        outer.addWidget(self.progress)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        outer.addLayout(body, 1)
+
+        # ── Left: launch setup, a fixed-width scrolling column ──
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFixedWidth(348)
         inner = QWidget()
-        layout = QVBoxLayout(inner)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(14)
-
-        # Title
-        title = QLabel("MISSION CONTROL")
-        title.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
-
-        # Controls row
-        ctrl_group = QGroupBox("Simulation Controls")
-        cl = QHBoxLayout(); cl.setSpacing(12)
-
-        self.btn_run = QPushButton(icon("run", color=theme.OK), "RUN")
-        self.btn_run.setProperty("primary", True)
-        self.btn_run.setMinimumHeight(44)
-        self.btn_run.clicked.connect(self._on_run)
-        cl.addWidget(self.btn_run)
-
-        self.btn_pause = QPushButton(icon("pause"), "PAUSE")
-        self.btn_pause.setMinimumHeight(44)
-        self.btn_pause.setEnabled(False)
-        self.btn_pause.clicked.connect(self._on_pause)
-        cl.addWidget(self.btn_pause)
-
-        self.btn_stop = QPushButton(icon("stop", color=theme.ERR), "STOP")
-        self.btn_stop.setProperty("danger", True)
-        self.btn_stop.setMinimumHeight(44)
-        self.btn_stop.setEnabled(False)
-        self.btn_stop.clicked.connect(self._on_stop)
-        cl.addWidget(self.btn_stop)
-
-        self.btn_reset = QPushButton(icon("reset"), "RESET")
-        self.btn_reset.setMinimumHeight(44)
-        self.btn_reset.clicked.connect(self._on_reset)
-        cl.addWidget(self.btn_reset)
-
-        ctrl_group.setLayout(cl)
-        layout.addWidget(ctrl_group)
-
-        # Middle: settings + readouts
-        mid = QHBoxLayout()
-        mid.setSpacing(14)
-
-        # Left column: Environment + Recovery + Integrator
-        left_col = QVBoxLayout()
-        left_col.setSpacing(10)
+        left_col = QVBoxLayout(inner)
+        left_col.setContentsMargins(14, 2, 14, 14)
+        left_col.setSpacing(0)
 
         # Launch site
         left_col.addWidget(self._build_site_group())
@@ -183,7 +316,7 @@ class SimulationWorkspace(QWidget):
         self.wind_mode_combo.currentIndexChanged.connect(self._on_wind_mode_changed)
         wl.addWidget(self.wind_mode_combo)
 
-        self.wind_stack = QStackedWidget()
+        self.wind_stack = _FitStack()
 
         # ── Page 0: Average wind ──
         avg_page = QWidget()
@@ -279,28 +412,14 @@ class SimulationWorkspace(QWidget):
         left_col.addWidget(wind_group)
 
         # Simulation settings
-        sim_group = QGroupBox("Simulation Settings")
+        sim_group = QGroupBox("Solver")
         sf = QFormLayout(); sf.setSpacing(6)
-
-        self.speed_combo = QComboBox()
-        for s in ["0.25x", "0.5x", "1x", "2x", "5x", "10x"]:
-            self.speed_combo.addItem(s)
-        self.speed_combo.setCurrentText("1x")
-        self.speed_combo.currentTextChanged.connect(self._on_speed_changed)
-        sf.addRow("Sim Speed:", self.speed_combo)
 
         self.integrator_combo = QComboBox()
         self.integrator_combo.addItems(["RK4", "Euler"])
         self.integrator_combo.setCurrentText("RK4")
         self.integrator_combo.currentTextChanged.connect(self._on_integrator_changed)
         sf.addRow("Integrator:", self.integrator_combo)
-
-        self.btn_apogee_tools = QPushButton(icon("target"), "Target Apogee…")
-        self.btn_apogee_tools.setToolTip(
-            "Ballast or airbrake area to hit a target apogee, and how the "
-            "apogee moves with launch-day unknowns.")
-        self.btn_apogee_tools.clicked.connect(self.open_apogee_tools)
-        sf.addRow(self.btn_apogee_tools)
 
         sim_group.setLayout(sf)
         left_col.addWidget(sim_group)
@@ -364,37 +483,35 @@ class SimulationWorkspace(QWidget):
         rec_group.setLayout(rf)
         left_col.addWidget(rec_group)
 
-        mid.addLayout(left_col, 1)
+        left_col.addStretch(1)
+        scroll.setWidget(inner)
+        body.addWidget(scroll)
 
-        # Right column: readouts
-        ro_group = QGroupBox("Live Flight Data")
-        rg = QGridLayout(); rg.setSpacing(8)
+        divider = QFrame()
+        divider.setFixedWidth(1)
+        divider.setStyleSheet(f"background-color: {theme.LINE};")
+        body.addWidget(divider)
 
-        readout_defs = [
-            ("Altitude", "m"), ("Velocity", "m/s"), ("Acceleration", "m/s²"),
-            ("Thrust", "N"), ("Drag", "N"), ("Mach", ""),
-            ("Mass", "kg"), ("Dyn. Pressure", "Pa"),
-        ]
+        # ── Right: live data ──
+        right = QVBoxLayout()
+        right.setContentsMargins(16, 14, 16, 12)
+        right.setSpacing(12)
+
+        rg = QGridLayout()
+        rg.setSpacing(8)
+        readout_names = ["Altitude", "Velocity", "Acceleration", "Mach",
+                         "Thrust", "Drag", "Mass", "Dyn. Pressure"]
         self.readouts = {}
-        for i, (name, unit) in enumerate(readout_defs):
+        for i, name in enumerate(readout_names):
             row, col = divmod(i, 4)
-            header = QLabel(f"{name}")
-            header.setStyleSheet(f"color: {theme.TEXT_DIM}; font-weight: 600; font-size: 11px;")
-            header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            rg.addWidget(header, row * 2, col)
-            val = BigReadout("—")
+            val = Readout(name)
             self.readouts[name] = val
-            rg.addWidget(val, row * 2 + 1, col)
+            rg.addWidget(val, row, col)
+            rg.setColumnStretch(col, 1)
+        right.addLayout(rg)
 
-        ro_group.setLayout(rg)
-        mid.addWidget(ro_group, 2)
-
-        layout.addLayout(mid)
-
-        # Phase status lights (all 8 phases)
-        phase_group = QGroupBox("Flight Phase Timeline")
-        pl = QHBoxLayout(); pl.setSpacing(6)
-
+        # Flight phases, one segment each, lit up to the current one
+        pl = QHBoxLayout(); pl.setSpacing(4)
         self.phase_lights = {}
         active_phases = [
             FlightPhase.PRELAUNCH, FlightPhase.IGNITION, FlightPhase.BOOST,
@@ -404,41 +521,12 @@ class SimulationWorkspace(QWidget):
         for phase in active_phases:
             light = PhaseLight(phase)
             self.phase_lights[phase] = light
-            pl.addWidget(light)
+            pl.addWidget(light, 1)
+        right.addLayout(pl)
 
-        phase_group.setLayout(pl)
-        layout.addWidget(phase_group)
-
-        # Timeline / progress
-        time_group = QGroupBox("Mission Timeline")
-        tl = QVBoxLayout()
-        self.time_label = QLabel("T+ 0.00 s")
-        self.time_label.setStyleSheet(f"color: {theme.TEXT_BRIGHT}; font-family: 'Cascadia Code', monospace; "
-            "font-size: 28px; font-weight: 700;")
-        self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        tl.addWidget(self.time_label)
-
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        self.progress.setTextVisible(False)
-        self.progress.setFixedHeight(8)
-        tl.addWidget(self.progress)
-
-        self.phase_label = QLabel("Pre-Launch")
-        self.phase_label.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 14px; font-weight: 600;")
-        self.phase_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        tl.addWidget(self.phase_label)
-
-        time_group.setLayout(tl)
-        layout.addWidget(time_group)
-
-        layout.addStretch()
-
-        scroll.setWidget(inner)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(scroll)
+        self.trace = LiveTrace()
+        right.addWidget(self.trace, 1)
+        body.addLayout(right, 1)
 
     # ── Launch site ───────────────────────────────────────────────
 
@@ -604,10 +692,29 @@ class SimulationWorkspace(QWidget):
         self.engine.update(atmosphere_profile=[], atmosphere_source="")
 
     def _show_sounding(self, s):
+        """While a sounding is loaded it is the air (launch_site_atmosphere
+        ignores ground_temperature). The Air box used to stay ticked as
+        "Standard day (ISA)" and Pad Temperature kept its old value, so the
+        tab said one atmosphere while the flight used another. Now the box
+        shows unticked and the spin box shows the sounding's pad temperature,
+        both greyed out and with signals blocked: nothing is written to the
+        state, and clearing the sounding brings back the saved setting."""
         active = bool(getattr(s, "atmosphere_profile", None))
         self.btn_sounding_clear.setEnabled(active)
         self.isa_check.setEnabled(not active)
         if active:
+            from environment.atmosphere_model import launch_site_atmosphere
+            self.isa_check.blockSignals(True)
+            self.isa_check.setChecked(False)
+            self.isa_check.blockSignals(False)
+            try:
+                pad_t = launch_site_atmosphere(
+                    s.launch_altitude, 0.0, s.atmosphere_profile).temperature(0.0)
+                self.temp_spin.blockSignals(True)
+                self.temp_spin.setValue(pad_t)
+                self.temp_spin.blockSignals(False)
+            except Exception:           # malformed profile: config_problems reports it
+                pass
             self.temp_spin.setEnabled(False)
             self.sounding_label.setText(
                 f"Air from sounding: {s.atmosphere_source or 'imported profile'} "
@@ -672,7 +779,7 @@ class SimulationWorkspace(QWidget):
     def _on_pause(self):
         self.sim_engine.pause()
         self.btn_run.setEnabled(True)
-        self.btn_run.setText("▶  RESUME")
+        self.btn_run.setText("Resume")
 
     def _on_stop(self):
         self.sim_engine.stop()
@@ -826,6 +933,9 @@ class SimulationWorkspace(QWidget):
         self.temp_spin.setEnabled(not standard_day)
         if not standard_day:
             _show(self.temp_spin, s.ground_temperature)
+        else:                           # greyed out: the ISA value it stands for
+            from environment.atmosphere_model import isa_temperature
+            _show(self.temp_spin, isa_temperature(s.launch_altitude))
         self._show_sounding(s)
         _show(self.wind_spin, s.wind_speed)
         _show(self.wind_dir_spin, s.wind_direction)
@@ -901,12 +1011,13 @@ class SimulationWorkspace(QWidget):
 
     def _on_sim_finished(self):
         self.btn_run.setEnabled(True)
-        self.btn_run.setText("▶  RUN")
+        self.btn_run.setText("Run")
         self.btn_pause.setEnabled(False)
         self.btn_stop.setEnabled(False)
         self.angle_spin.setEnabled(True)
         self.integrator_combo.setEnabled(True)
         self.progress.setValue(100)
+        self._update_trace()
 
     def _on_sim_failed(self, title, detail):
         """Flight diverged / unstable / bad config — restore controls and show
@@ -935,7 +1046,7 @@ class SimulationWorkspace(QWidget):
 
     def _reset_ui(self):
         self.btn_run.setEnabled(True)
-        self.btn_run.setText("▶  RUN")
+        self.btn_run.setText("Run")
         self.btn_pause.setEnabled(False)
         self.btn_stop.setEnabled(False)
         self.angle_spin.setEnabled(True)
@@ -945,11 +1056,25 @@ class SimulationWorkspace(QWidget):
         self.phase_label.setText("Pre-Launch")
         for v in self.readouts.values():
             v.setText("—")
+        self.trace.set_data([], [], [])
         for light in self.phase_lights.values():
             light.set_active(False)
 
     def _on_tick(self, state):
         self._update_readouts(state)
+        self._update_trace(force=False)
+
+    def _update_trace(self, force=True):
+        """Draw the recorded flight so far on the live trace."""
+        hist = getattr(self.sim_engine, "history", None)
+        if hist is None or not hasattr(self, "trace"):
+            return
+        times, alt = hist.get_series("altitude")
+        self.trace.set_data(times, alt, hist.get_values("velocity"), force=force)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._update_trace()
 
     def _on_state_changed(self, state):
         self._sync_inputs_from_state(state)

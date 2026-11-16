@@ -41,7 +41,7 @@ class ComponentTree(QWidget):
         layout.setSpacing(8)
 
         # Tree header
-        header = QLabel("ROCKET STRUCTURE")
+        header = QLabel("Rocket Structure")
         header.setProperty("panelTitle", True)
         layout.addWidget(header)
 

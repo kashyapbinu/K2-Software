@@ -60,16 +60,10 @@ class StabilityIndicator(QWidget):
         progress = int((clamped + 2.0) / 6.0 * 100)
         self.bar.setValue(min(max(progress, 0), 100))
 
-        if margin < 0:
-            status, color = "UNSTABLE", theme.ERR
-        elif margin < 0.5:
-            status, color = "MARGINAL–", theme.WARN
-        elif margin < 1.0:
-            status, color = "MARGINAL", theme.WARN
-        elif margin <= 2.5:
-            status, color = "✓ STABLE", theme.OK
-        else:
-            status, color = "OVERSTABLE", theme.WARN
+        # The one verdict (core.stability), as the Design tab shows it.
+        from core.stability import LABELS, stability_verdict
+        verdict = stability_verdict(margin)
+        status, color = LABELS.get(verdict, "—"), theme.stability_color(verdict)
 
         self.status_label.setText(status)
         self.status_label.setStyleSheet(f"font-size: 11px; color: {color}; font-weight: 600;")
@@ -127,12 +121,20 @@ class PropertiesPanel(QWidget):
         outer.addWidget(scroll)
 
     def _on_state_changed(self, state):
-        self.stability_indicator.update_stability(state.stability_margin)
-        self.cg_label.setText(f"{state.cg:.3f} m")
+        # The rocket on the pad (RocketState.liftoff_*): this panel sits
+        # beside the Design tab and describes the design. It read the live
+        # mass, CG, margin and weight, so once a flight had run it showed the
+        # burnt-out rocket (6.001 kg and 6.78 cal for the canonical rocket's
+        # 7.400 kg and 5.30 cal) next to an unchanged drawing.
+        from core.constants import G_EARTH
+        margin = state.pad_stability_margin()
+        mass = state.liftoff_mass()
+        self.stability_indicator.update_stability(margin if margin is not None else 0.0)
+        self.cg_label.setText(f"{state.liftoff_cg():.3f} m")
         self.cp_label.setText(f"{state.cp:.3f} m")
         self.total_length_label.setText(f"{state.length:.3f} m")
-        self.total_mass_label.setText(f"{state.total_mass():.3f} kg")
-        self.weight_label.setText(f"{state.weight:.3f} N")
+        self.total_mass_label.setText(f"{mass:.3f} kg")
+        self.weight_label.setText(f"{mass * G_EARTH:.3f} N")
         self.motor_name_label.setText(state.motor_designation)
         if state.motor_total_impulse > 0:
             self.motor_impulse_label.setText(f"{state.motor_total_impulse:.1f} N·s")

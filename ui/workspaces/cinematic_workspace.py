@@ -163,10 +163,12 @@ class CinematicWorkspace(QWidget):
                 recov = float(mv._spin_recov.value())
         except Exception:
             pass
-        m = max(0.1, (getattr(s, "dry_mass", 0.0) or 0.0)
-                + (getattr(s, "propellant_mass", 0.0) or 0.0))
-        cd_area = max(0.1, getattr(s, "main_cd_area", 1.5) or 1.5)
-        descent = math.sqrt(2.0 * m * 9.81 / (1.225 * cd_area))
+        # The same figure the Mission Visualizer draws its envelope with
+        # (recovery.final_descent_rate); 60 m/s with no parachute.
+        from recovery.parachute_dynamics import final_descent_rate
+        descent = final_descent_rate(s)
+        if descent is None:
+            descent = 60.0
         return {
             "target_apogee": target,
             "recovery_radius": recov,

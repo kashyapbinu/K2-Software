@@ -1200,6 +1200,7 @@ class SU2Solver(CFDSolver):
             #
             # Pressure/wave drag, lift, moments and CP keep their integrated
             # (inviscid) values untouched; only Cd gains the build-up.
+            _analytic_cd_f = 0.0     # friction added below; kept out of the CP's CN
             if getattr(self.config, "euler_analytic_friction", False):
                 from cfd.sweep import analytic_friction_cd, analytic_friction_cd_cad
                 if self.config.external_cad and self.config.cad_info:
@@ -1212,6 +1213,7 @@ class SU2Solver(CFDSolver):
                         result.reference_area_m2)
                 if cd_f is not None:
                     result.cd += cd_f
+                    _analytic_cd_f = cd_f
                     result.cd_friction = cd_f
                     result.force_axial = (result.cd * result.dynamic_pressure
                                           * result.reference_area_m2)
@@ -1262,8 +1264,14 @@ class SU2Solver(CFDSolver):
             # Verified against SU2 v8.5 (finned 1 m test rocket, AoA 4°):
             # CMy=-0.54 → x_cp=0.626 m from nose; CMz was 15x smaller (noise).
             aoa_rad = math.radians(self.config.angle_of_attack_deg)
-            # Normal force coefficient from wind-frame CL/CD (exact, matters >5° AoA)
-            _CN = result.cl * math.cos(aoa_rad) + result.cd * math.sin(aoa_rad)
+            # Normal force coefficient from wind-frame CL/CD (exact, matters >5° AoA).
+            # The solve's own CD: the flat-plate friction added to result.cd
+            # above is an axial force and has no part in the normal force.
+            # With it in, the friction leaked into CN and pulled the CP
+            # forward by Cd_f·sin(α)/CN, about 1.5 % of its distance from the
+            # nose at any incidence (0.23 cal on the canonical rocket).
+            _CN = (result.cl * math.cos(aoa_rad)
+                   + (result.cd - _analytic_cd_f) * math.sin(aoa_rad))
             # True rocket length for clamping — prefer geometry_dict (exact)
             # over ref_length (which may include fin span from STL bbox)
             _true_len = result.ref_length

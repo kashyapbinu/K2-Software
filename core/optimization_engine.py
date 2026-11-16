@@ -33,7 +33,6 @@ from typing import Callable, Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
-from scipy.stats import qmc
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
@@ -204,8 +203,12 @@ def get_default_design_variables(state) -> list:
          getattr(s, "motor_total_impulse", 200) or 200)
     _add("motor_burn_time", "Burn Time", "Propulsion", 0.3, 10.0,
          getattr(s, "motor_burn_time", 1.8) or 1.8)
+    # The rated load, not the live propellant_mass: after a flight that is
+    # the gram of residue left in the motor, and it was offered as the
+    # rocket's current propellant mass.
     _add("propellant_mass", "Propellant Mass", "Propulsion", 0.01, 5.0,
-         getattr(s, "propellant_mass", 0.1) or 0.1)
+         getattr(s, "propellant_mass_initial", 0.0)
+         or getattr(s, "propellant_mass", 0.1) or 0.1)
 
     # Recovery
     _add("drogue_cd_area", "Drogue CdA", "Recovery", 0.05, 2.0,
@@ -685,17 +688,7 @@ def evaluate_candidate(base_config: BatchSimConfig,
     }
 
     # ── Structural analysis ──
-    sf_value = 999.0
-    try:
-        from physics.structures import compute_all
-        d = variables.get("diameter", cfg.diameter)
-        wall = 0.002
-        force = cfg.motor_max_thrust if cfg.motor_max_thrust > 0 else 200.0
-        struct = compute_all(force, d, wall, variables.get("length", cfg.length),
-                             "Aluminum 6061-T6")
-        sf_value = struct.get("safety_factor", 999.0)
-    except Exception:
-        pass
+    sf_value = airframe_safety_factor(cfg, variables)
 
     # ── Aerodynamic CP / stability check ──
     aero_stability = float(np.mean(arr_stab))
@@ -782,6 +775,30 @@ def evaluate_candidate(base_config: BatchSimConfig,
         mc_stats=mc_stats,
         batch_config=cfg,
     )
+
+
+def airframe_safety_factor(cfg, variables: dict = None) -> float:
+    """Yield safety factor of the airframe tube under peak thrust: the
+    rocket's own wall thickness and material (BatchSimConfig carries them
+    from the state), at the candidate's diameter and length.
+
+    0.0 when it cannot be worked out (no wall thickness, material or
+    thrust), so a "Safety Factor >" constraint fails instead of passing on a
+    guess. It used to be computed for a 2 mm aluminium tube under 200 N if
+    the motor had no peak thrust, whatever the rocket was made of, and 999
+    on any error: a 1 mm phenolic airframe met the constraint as aluminium.
+    """
+    variables = variables or {}
+    wall = float(variables.get("wall_thickness", getattr(cfg, "wall_thickness", 0.0)) or 0.0)
+    material = getattr(cfg, "material_name", "") or ""
+    force = float(getattr(cfg, "motor_max_thrust", 0.0) or 0.0)
+    d = float(variables.get("diameter", cfg.diameter) or 0.0)
+    length = float(variables.get("length", cfg.length) or 0.0)
+    if wall <= 0 or not material or force <= 0 or d <= 0:
+        return 0.0
+    from physics.structures import compute_all
+    sf = compute_all(force, d, wall, length, material)["safety_factor"]
+    return float(sf)
 
 
 def _constraint_value(name: str, obj_vals: dict, variables: dict, cfg) -> float:

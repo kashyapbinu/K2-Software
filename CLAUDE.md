@@ -31,6 +31,9 @@ and control included. OpenRocket and RocketPy each cover part of that.
 | `core/flight_dynamics.py` | Aero frame, step limits shared by both integrators |
 | `core/staging.py` | Stages, thrust curves, and the Design → state hops (`assembly_aero_geometry`, `assembly_recovery`) |
 | `core/components.py` | Design-tab component tree (`RocketAssembly`) |
+| `core/readiness.py` | Which analyses belong to the rocket as drawn (`ReadinessTracker` on `engine.readiness`); `engine.analysis_started/done/abandoned` |
+| `core/flight_replay.py`, `ui/replay_clock.py` | A recorded flight addressable by time, and the one shared instant (`clock_for(sim_engine)`) the Mission Visualizer and Results follow |
+| `core/load_overlay.py` | CFD pressure / FE stress as a profile along the body, for the replay's Loads overlay |
 | `core/monte_carlo_engine.py`, `core/optimization_engine.py` | Dispersion and optimiser |
 | `physics/aerodynamics.py` | `AeroModel` (Barrowman + drag build-up) |
 | `recovery/parachute_dynamics.py` | `RecoverySystem`, used by both flight engines |
@@ -42,9 +45,9 @@ and control included. OpenRocket and RocketPy each cover part of that.
 | `validation/`, `tests/validation/` | Benchmarks against OpenRocket, SU2, CalculiX and published data |
 | `website/` | Marketing site (Netlify) |
 
-Built with no UI yet: `core/trade_study.py`, `core/doe_engine.py`,
-`core/sensitivity_analysis.py`, `environment/weather_profiles.py`,
-`environment/turbulence.py`. Dead: `ui/workspaces/aero_workspace.py`,
+Built with no UI yet: `environment/weather_profiles.py`,
+`environment/turbulence.py`. (DOE, sensitivity and trade study are in the
+Optimization tab: "DOE && Surfaces", "Sensitivity", "Trade Study".) Dead: `ui/workspaces/aero_workspace.py`,
 `ui/rocket_params_panel.py`, `plugins/` (a stub).
 
 ## 3. Running and testing
@@ -93,13 +96,43 @@ These rules exist because each was broken at least once.
    opened project flies values the screen does not show.
 6. **New `RocketState` field: decide which kind it is.** Rocket or launch setup
    → it is saved. Written by a flight → add it to `FLIGHT_FIELDS` (not saved,
-   cleared by `reset_flight`).
+   cleared by `reset_flight`). A flight writes those and `propellant_mass`
+   and nothing else: `state.cd` is the rocket's, not the last instant's.
+   `test_flight_lifecycle.py` checks that Reset puts back exactly the state
+   that stood on the pad and that the saved file is the same before and
+   after a flight.
 7. **Validate at the boundary.** Headless runs refuse unflyable input
    (`config_problems`); project load type-checks each field.
 8. **Units.** SI on the state. Fin sweep is degrees on the component and
    radians on the state. Angles and bearings: say which in the field comment.
 9. **Mesher changes** bump `cfd.meshing.MESHER_REVISION`, or resumed sweeps
    reuse the old mesh.
+
+10. **A result belongs to the inputs it read.** An analysis calls
+   `engine.analysis_started(key)` when it reads the state and
+   `engine.analysis_done(key, headline, verdict, result)` when it has a
+   result (`analysis_abandoned` on failure). A new state field the user sets
+   goes into a group in `core.readiness.INPUT_GROUPS`, or changing it will
+   not mark anything out of date.
+   The flight itself (recorder, `summary`, replay) lives on `SimulationEngine`
+   and is dropped in one place, `clear_flight()`: on
+   `engine.flight_discarded` (project opened or blanked, `reset_flight`) and
+   at the top of `start()`. A view that shows the flight listens to
+   `sim_engine.flight_cleared` (`test_flight_lifecycle.py`).
+   A stage built from another stage's result names it in `Stage.needs`
+   (Structures, Rules and Report need Flight); it goes out of date when that
+   result is re-run, stale or dropped. The technical report is given the
+   stale stages (`build_content(out_of_date=...)`) and marks their sections.
+12. **The design is the rocket on the pad.** A flight leaves the state burnt
+   out (`propellant_mass`, and the `cg`, `stability_margin`, `weight` and
+   `total_mass()` that follow it). Anything that describes the design
+   (reports, rules, Design / Properties / Readiness read-outs, load cases)
+   reads `RocketState.liftoff_mass()`, `liftoff_cg()`,
+   `pad_stability_margin()` (`test_pad_values.py`). Peak acceleration is the
+   FlightSummary's sensed one, not `state.max_acceleration` (d|v|/dt).
+11. **One replay instant.** A view that shows "the flight at time t" reads
+   `clock_for(sim_engine)`; it does not keep its own slider position or its
+   own copy of the flight.
 
 Working habits for this repo:
 
@@ -123,6 +156,17 @@ Working habits for this repo:
   `v<version>`, CI publishes. Run the slow suite before a release.
 - Website: keep the cards / centred / animated look. A flat redesign was
   rejected.
+- App UI (restyled 2026-11-13, gated by `test_ui_style_consistency.py`):
+  colours, radii and arrow glyphs come from `ui/theme.py` only. Group boxes
+  are ruled sections, not cards. A caption + value tile is
+  `ui.widgets.readout.Readout`; a panel title uses `theme.panel_title_qss()`,
+  a one-word verdict `theme.status_qss(color)`. No per-widget `QTabBar`
+  styles, no colour emoji, title case not capitals, `&&` for a literal
+  ampersand in a caption. A frame stylesheet needs a selector
+  (`QFrame#name { … }`) or its border lands on every child label.
+- To look at the UI: `scratch/site_shots/k2cap.py` boots the real app
+  off-screen and `PrintWindow` captures it; load
+  `validation.cases.rocket_canonical.canonical_assembly()` for a rocket.
 
 ## 5. Current position
 
@@ -162,6 +206,39 @@ Branch `fix/post-0.1.10-audit`, local only (nothing pushed since `v0.2.0` at
 - **A8** `ui/units.py` + Settings "Display units"; applied to Results tiles,
   Simulation live readouts. Input spin boxes are still SI.
 
+**2.0 work, built 2026-11-14, uncommitted** (tests: `test_readiness.py`,
+`test_flight_replay.py`, `test_load_overlay.py`; fast suite 806 passed):
+
+- **Readiness tab** (first tab; the app still opens on Design): Flight, Monte
+  Carlo, CFD, Structures, Flutter, Rules, Report as Not Run / Running /
+  Current / Out of Date / Fails, with the reason and the next step.
+- **Flight replay**: real-time playback at 0.1×–8×, a timeline with event
+  marks, telemetry / HUD / graphs following the replayed instant, force
+  arrows (thrust, drag, lift, weight, velocity, wind) with CG and CP markers
+  (the "Vectors" box), and the Results cursor on the same clock. The flight
+  recorder gained `aoa`, `lift_*`, `wind_*`.
+- **Loads overlay** in the replay row, off by default: CFD Cp × the instant's
+  dynamic pressure, or the FE static von Mises profile. CFD pressure away
+  from the solved Mach number is an approximation and the caption says which
+  Mach it was solved at.
+- Not done: headlines on the board are SI only; the board does not cover the
+  optimiser.
+- Audit 2026-11-15/16 (uncommitted; `test_flight_lifecycle.py`,
+  `test_pad_values.py`, additions to `test_readiness.py`,
+  `test_technical_report.py`, `test_structures_audit_2026_11.py`,
+  `test_ai_assistant.py`): the flight is dropped with its rocket
+  (`clear_flight`); the report marks out-of-date sections; Structures needs
+  Flight; design read-outs, the report and the rules read the pad rocket
+  (`liftoff_*`); a flight no longer writes `state.cd` or leaves stress
+  telemetry in the project; the landing envelope uses
+  `recovery.final_descent_rate`.
+- Open, for the user to decide: the recorder's `acceleration` is d|v|/dt
+  (Results "Acceleration" plot, Simulation and Mission Visualizer read-outs,
+  flight-log overlay) while the tile, report and rules give the sensed peak,
+  about 1 g more on the way up. Recording sensed acceleration and plotting
+  that would make them agree; which one an imported log's channel is depends
+  on the altimeter.
+
 **Release A leftovers:**
 - `tests.yml` has never run on GitHub (needs a push, which the user has to
   approve).
@@ -179,6 +256,46 @@ Branch `fix/post-0.1.10-audit`, local only (nothing pushed since `v0.2.0` at
   on a vertical launch. It is the limit of the Euler-angle attitude model,
   gated at 2 % by `test_apogee_does_not_depend_on_wind_bearing`. The fix is
   quaternion attitude in both engines (Release C, item C1).
+- Pitch and roll inertia differ between the engines when the rocket has a
+  design tree (an exception to rule 4): the interactive engine takes them
+  from the component tree (`vehicle.inertia_tensor()`, with a stand-in motor
+  0.3 m × 30 mm whose case is 8 % of the dry mass when the catalogue gives
+  none); the batch engine uses a thin rod, m·L²/12, and roll = 0.1 × pitch.
+  Measured 2026-11-16 on the canonical design in an 8 m/s wind: batch apogee
+  −0.38 % and landing range −2.8 % against the Simulation tab on a vertical
+  rail, +0.04 % and +0.2 % at 84°. No wind: identical. Fixing it changes
+  Monte Carlo and optimiser results, so it waits for the user (or C1).
+- The optimiser's "Cd Correction" variable is a ratio to `state.cd` (0.45),
+  not a multiplier: 0.45 means the drag as designed, 0.1 means 22 % of it.
+  Enabled, it lets the optimiser lower drag with no geometry behind it.
+- Stability audit 2026-11-16 (canonical rocket, 4°, against inviscid SU2;
+  results in `cfd_run/validation/stability_euler` and `barrowman_ss_M*`):
+  - Subsonic, Mach 0.5: K2's CP is 0.16 cal ahead of SU2's (1.541 against
+    1.558 m), CN +10.7 %. Classic Barrowman `(1+τ)` would be 0.67 cal ahead.
+    K2's margin is 0.25–0.46 cal above OpenRocket releases that use `(1+τ)`
+    (rocket.ork: 2.88 against 2.63); current OpenRocket source has `(1+τ)²`.
+  - Supersonic: K2's CP is 1.76 / 1.68 / 1.19 cal AHEAD of SU2's at Mach
+    1.5 / 2.5 / 3.5 and CN 28 % low, so supersonic margins read low. Cause:
+    `compute_fin_cn_alpha` takes Busemann's one-surface coefficient
+    (K1 = 2/β, as OpenRocket does); a fin has two surfaces, 4/β. With
+    2·K1 and a tip Mach-cone loss `1 − ct²/(4βA)` the errors become
+    −0.60 / −0.02 / +0.56 cal and +11 / +4 / +0 % (what-if only, NOT
+    applied: it raises supersonic margins, so the user decides).
+  - Multistage, fixed (`test_multistage_stability.py`): each stage now
+    carries `dry_cg` and `motor_position` from the design and
+    `StageManager.active_cg` uses them (it took the airframe at mid-length
+    and the motor at 85 %); `_sync_to_engine` pushes `stages_config` on every
+    design change (it was rebuilt only when the Propulsion tab was shown);
+    `RocketState.liftoff_mass / liftoff_cg / liftoff_avg_thrust` describe the
+    whole stack. Two-stage test rocket: Design tab 1.34 cal and flight 2.19
+    cal at liftoff, now both 2.15.
+  - Monte Carlo, the optimiser and the apogee tools do not fly staged
+    rockets: `BatchSimConfig.from_rocket_state` raises
+    `StagedRocketNotSupported` (they used to fly the stack on one motor:
+    1,256 m against the Simulation tab's 2,536 m). Flying stages in the
+    batch engine is still to do.
+  - `StageManager.pitch_inertia` still takes each stage's mass at its
+    mid-length.
 - Transition and boat-tail drag are not modelled; launch-lug and rail-button
   drag neither.
 - Flat Earth, 100 km ceiling, batch runner stops at 600 s of flight (a slow
@@ -192,7 +309,18 @@ Branch `fix/post-0.1.10-audit`, local only (nothing pushed since `v0.2.0` at
 - Launch-site presets: only "Sea level" and an approximate Spaceport America
   point (the whole spaceport, not the launch area). Real pad coordinates
   should come from the user.
-- `ShockCord` has no rated strength, so shock-cord margin is not checked.
+- `ShockCord` has no rated strength. The recovery safety factor is the harness
+  tension against `RocketState.recovery_hardware_rating`, which the user types
+  in the Structures tab (0 = not entered, no safety factor).
+- Structures (audited 2026-11-14, uncommitted, `test_structures_audit_2026_11.py`):
+  the analytical tabs show only what was analysed from the flown flight. No
+  flight → no results. Failure map = Airframe and Fins; the rest is listed as
+  not modelled. Wall heating is a transient solve over the ascent
+  (`workstation.wall_heating`). Still assumed: design factors (harness × 1.5,
+  Kt 1.5 / 2.5, gust angles 3–5°), body CN-alpha 2.0, the no-flight Mach /
+  altitude presets in the load-case boxes. The Simulation tab's live stress
+  readout (`simulation_engine`, `compute_all`) still puts the wall at the
+  recovery temperature.
 - AI assistant: Gemini key is stored in plain text in QSettings.
 - Prism boundary-layer meshing is unsupported (SU2 stalls); RANS polars are not
   trustworthy on the tet-only mesh, so the hybrid Euler + flat-plate friction

@@ -43,9 +43,9 @@ logger = logging.getLogger("K2.MainWindow")
 class MainWindow(QMainWindow):
     """K2 AeroSim main application window with tabbed workspaces."""
 
-    TAB_ICONS = ["design", "propulsion", "cfd", "structures", "dynamics", "avionics",
+    TAB_ICONS = ["check", "design", "propulsion", "cfd", "structures", "dynamics", "avionics",
                  "simulation", "mission", "mission", "results", "montecarlo", "optimization"]
-    TAB_NAMES = ["Design", "Propulsion", "CFD", "Structures", "Dynamics", "Avionics", "Simulation", "Mission Visualizer", "Advanced Visualizer", "Results", "Monte Carlo", "Optimization"]
+    TAB_NAMES = ["Readiness", "Design", "Propulsion", "CFD", "Structures", "Dynamics", "Avionics", "Simulation", "Mission Visualizer", "Advanced Visualizer", "Results", "Monte Carlo", "Optimization"]
 
     def __init__(self):
         super().__init__()
@@ -165,6 +165,9 @@ class MainWindow(QMainWindow):
 
         # Create workspaces
         from ui.workspaces.dynamics_workspace import DynamicsWorkspace
+        from ui.workspaces.readiness_workspace import ReadinessWorkspace
+        self.readiness_ws = ReadinessWorkspace(self.engine, self)
+        self.readiness_ws.open_tab.connect(self.show_tab)
         self.design_ws = DesignWorkspace(self.engine, self)
         self.propulsion_ws = PropulsionWorkspace(self.engine, self)
         self.structures_ws = StructuresWorkspace(self.engine, self)
@@ -186,7 +189,7 @@ class MainWindow(QMainWindow):
         )
 
         workspaces = [
-            self.design_ws, self.propulsion_ws, self.cfd_ws,
+            self.readiness_ws, self.design_ws, self.propulsion_ws, self.cfd_ws,
             self.structures_ws, self.dynamics_ws, self.avionics_ws, self.simulation_ws,
             self.mission_viz_ws, self.cinematic_ws, self.results_ws,
             self.monte_carlo_ws, self.optimization_ws
@@ -194,11 +197,22 @@ class MainWindow(QMainWindow):
 
         for icon_key, name, ws in zip(self.TAB_ICONS, self.TAB_NAMES, workspaces):
             self.tab_widget.addTab(ws, icon(icon_key), name)
+        # The app opens on the drawing board; Readiness is the overview to
+        # come back to.
+        self.tab_widget.setCurrentWidget(self.design_ws)
 
         self.tab_widget.setCornerWidget(
             self._tab_corner_widget(), Qt.Corner.TopRightCorner
         )
         self.setCentralWidget(self.tab_widget)
+
+    def show_tab(self, name: str):
+        """Bring the workspace tab called *name* to the front."""
+        for i in range(self.tab_widget.count()):
+            if self.tab_widget.tabText(i) == name:
+                self.tab_widget.setCurrentIndex(i)
+                return
+        logger.warning("No tab named %r", name)
 
     def _setup_bottom_dock(self):
         dock = QDockWidget("Console", self)
@@ -391,7 +405,7 @@ class MainWindow(QMainWindow):
     def _reset_all_workspaces(self):
         """Call reset_workspace() on any workspace tab that defines it."""
         for ws in (getattr(self, n, None) for n in (
-                "propulsion_ws", "cfd_ws", "structures_ws", "dynamics_ws",
+                "readiness_ws", "propulsion_ws", "cfd_ws", "structures_ws", "dynamics_ws",
                 "avionics_ws", "simulation_ws", "mission_viz_ws", "cinematic_ws",
                 "results_ws", "monte_carlo_ws", "optimization_ws")):
             if ws is not None and hasattr(ws, "reset_workspace"):
@@ -471,7 +485,7 @@ class MainWindow(QMainWindow):
             self.design_ws.set_assembly(assembly)
             self._current_file = None
             self._update_title()
-            self.tab_widget.setCurrentIndex(0)  # Switch to Design tab
+            self.tab_widget.setCurrentWidget(self.design_ws)
             self.status_label.setText(f"Imported: {Path(path).name}")
             comp_count = sum(1 for _ in assembly.all_components()) - len(assembly.stages)
             self.engine.log_message.emit(

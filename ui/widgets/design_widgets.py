@@ -105,7 +105,7 @@ class MplCanvas(QWidget):
     def style_ax(self, title="", xlabel="", ylabel=""):
         ax = self.ax
         ax.set_facecolor(theme.PANEL)
-        ax.set_title(title, color=theme.ACCENT, fontsize=12, fontweight="bold", pad=10)
+        ax.set_title(title, color=theme.TEXT, fontsize=11, pad=8, loc="left")
         ax.set_xlabel(xlabel, color=theme.TEXT_DIM, fontsize=10)
         ax.set_ylabel(ylabel, color=theme.TEXT_DIM, fontsize=10)
         ax.tick_params(colors=theme.LINE_STRONG, labelsize=9)

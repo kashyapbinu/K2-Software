@@ -7,7 +7,6 @@ mass flow, and ideal thrust coefficients.
 """
 
 import math
-from scipy.optimize import fsolve
 from typing import List
 
 G0 = 9.80665

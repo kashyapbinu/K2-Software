@@ -121,8 +121,15 @@ class ApogeeToolsDialog(QDialog):
         v = self.target_spin.value()
         return v * FOOT if self.unit_combo.currentText() == "ft" else v
 
-    def _cfg(self) -> BatchSimConfig:
-        return BatchSimConfig.from_rocket_state(self.engine.state)
+    def _cfg(self):
+        """The rocket as the batch engine flies it; None, with the reason
+        shown, for one it does not fly (a staged rocket)."""
+        try:
+            return BatchSimConfig.from_rocket_state(self.engine.state)
+        except ValueError as exc:
+            self.status.setText("Not flown")
+            self.output.setPlainText(str(exc))
+            return None
 
     # ── actions ──
     def _start(self, kind, fn):
@@ -139,14 +146,20 @@ class ApogeeToolsDialog(QDialog):
 
     def solve_ballast(self):
         cfg, tgt, pos, ms = self._cfg(), self.target_m(), self.ballast_pos.value(), self.min_stab.value()
+        if cfg is None:
+            return
         self._start("ballast", lambda p: apogee_tools.solve_ballast(cfg, tgt, pos, ms, p))
 
     def solve_airbrake(self):
         cfg, tgt = self._cfg(), self.target_m()
+        if cfg is None:
+            return
         self._start("airbrake", lambda p: apogee_tools.solve_airbrake(cfg, tgt, p))
 
     def sensitivity(self):
         cfg = self._cfg()
+        if cfg is None:
+            return
         self._start("sensitivity", lambda p: apogee_tools.apogee_sensitivity(cfg, p))
 
     def _finish(self):

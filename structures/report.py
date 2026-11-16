@@ -96,10 +96,16 @@ def _recommendations(state, rep):
         recs.append(f"Fin flutter margin is {rep.fin.flutter_margin:.2f}× "
                     f"({rep.fin.flutter_verdict}) — stiffen "
                     f"fins (thicker section / lower aspect ratio) before flight.")
-    if rep.recovery.safety_factor < 2.0:
-        recs.append(f"Recovery hardware SF is {rep.recovery.safety_factor:.2f}; "
-                    f"upsize eyebolt / harness for the {rep.recovery.peak_force_N:.0f} N "
-                    f"peak deployment shock.")
+    if rep.recovery.safety_factor is None:
+        if rep.recovery.peak_force_N > 0:
+            recs.append(f"No recovery hardware rating was entered: check the harness, "
+                        f"eyebolt and bulkhead ratings against the "
+                        f"{rep.recovery.harness_tension_N:.0f} N harness tension.")
+    elif rep.recovery.safety_factor < 2.0:
+        recs.append(f"Recovery hardware SF is {rep.recovery.safety_factor:.2f} "
+                    f"({rep.recovery.rating_N:.0f} N rated against "
+                    f"{rep.recovery.harness_tension_N:.0f} N harness tension); "
+                    f"use stronger hardware.")
     if rep.thermal.exceeds_limit:
         recs.append(f"Skin temperature ({rep.thermal.skin_temp_K:.0f} K) exceeds the "
                     f"material service limit ({rep.thermal.service_limit_K:.0f} K) — "
@@ -180,7 +186,8 @@ def generate_structural_report(path, state, rep, material_name="Aluminum 6061-T6
         ["Diameter", f"{getattr(state,'diameter',0)*1000:.0f} mm"],
         ["Wall Thickness", f"{getattr(state,'wall_thickness',0)*1000:.2f} mm"],
         ["Fin Count", f"{getattr(state,'fin_count',0)}"],
-        ["Total Mass", f"{(state.total_mass() if callable(getattr(state,'total_mass',None)) else 0):.2f} kg"],
+        # Liftoff mass: total_mass() is the burnt-out mass once the rocket has flown.
+        ["Liftoff Mass", f"{(state.liftoff_mass() if callable(getattr(state,'liftoff_mass',None)) else 0):.2f} kg"],
         ["Material", material_name],
     ]))
 
@@ -217,7 +224,11 @@ def generate_structural_report(path, state, rep, material_name="Aluminum 6061-T6
         ["Bulkhead Load", f"{rl.bulkhead_load_N:.0f} N"],
         ["Eye Bolt Load", f"{rl.eyebolt_load_N:.0f} N"],
         ["Peak Deployment Force", f"{rl.peak_force_N:.0f} N"],
-        ["Recovery Safety Factor", f"{rl.safety_factor:.2f}  ({rl.status})"],
+        ["Hardware Rated Strength",
+         f"{rl.rating_N:.0f} N (entered)" if rl.rating_N > 0 else "not entered"],
+        ["Recovery Safety Factor",
+         "Not assessed (no hardware rating)" if rl.safety_factor is None
+         else f"{rl.safety_factor:.2f}  ({rl.status})"],
     ]))
 
     # ── Fin Analysis ──
@@ -239,15 +250,26 @@ def generate_structural_report(path, state, rep, material_name="Aluminum 6061-T6
     # ── Temperature ──
     tp = rep.thermal
     story.append(Paragraph("Temperature Analysis", ss["K2H"]))
-    story.append(_kv_table([
-        ["Skin Temperature", f"{tp.skin_temp_K:.0f} K ({tp.skin_temp_K-273.15:.0f} °C)"],
-        ["Internal Temperature", f"{tp.internal_temp_K:.0f} K"],
-        ["Thermal Gradient", f"{tp.gradient_K:.0f} K"],
-        ["Thermal Expansion", f"{tp.expansion_mm:.2f} mm"],
-        ["Convective Heat Flux", f"{tp.heat_flux_W_m2/1000:.1f} kW/m²"],
-        ["Max Thermal Stress", f"{tp.max_thermal_stress_MPa:.1f} MPa @ {tp.max_stress_altitude:.0f} m"],
-        ["Service Limit", f"{tp.service_limit_K:.0f} K " + ("EXCEEDED" if tp.exceeds_limit else "OK")],
-    ]))
+    if not tp.available:
+        story.append(Paragraph(
+            "Not analysed: wall heating is solved over a recorded flight, and "
+            "none was available.", ss["K2Body"]))
+    else:
+        story.append(Paragraph(
+            "Wall temperature integrated over the recorded ascent (conduction "
+            "through the wall, boundary-layer heating on the outer face), at the "
+            "body station nearest the nose.", ss["K2Body"]))
+        story.append(_kv_table([
+            ["Wall Temperature on the Pad", f"{tp.initial_temp_K:.0f} K"],
+            ["Peak Skin Temperature", f"{tp.skin_temp_K:.0f} K ({tp.skin_temp_K-273.15:.0f} °C)"],
+            ["Inner Face at That Instant", f"{tp.internal_temp_K:.0f} K"],
+            ["Peak Difference Through the Wall", f"{tp.gradient_K:.1f} K"],
+            ["Thermal Expansion", f"{tp.expansion_mm:.2f} mm"],
+            ["Peak Convective Heat Flux", f"{tp.heat_flux_W_m2/1000:.1f} kW/m²"],
+            ["Peak Thermal Stress", f"{tp.max_thermal_stress_MPa:.1f} MPa @ {tp.max_stress_altitude:.0f} m"],
+            ["Air Stagnation Temperature at Peak Mach", f"{tp.stagnation_temp_K:.0f} K"],
+            ["Service Limit", f"{tp.service_limit_K:.0f} K " + ("EXCEEDED" if tp.exceeds_limit else "OK")],
+        ]))
 
     # ── Deflection & Vibration ──
     bd = rep.deflection
@@ -287,6 +309,10 @@ def generate_structural_report(path, state, rep, material_name="Aluminum 6061-T6
         fstyle.add("FONT", (2, i), (2, i), "Helvetica-Bold", 8.5)
     ft.setStyle(fstyle)
     story.append(ft)
+    if getattr(rep.failure, "not_modelled", None):
+        story.append(Paragraph(
+            "Not modelled, no safety factor: " + ", ".join(rep.failure.not_modelled) + ".",
+            ss["K2Body"]))
 
     # ── Safety Score breakdown ──
     story.append(Paragraph("Safety Score Breakdown", ss["K2H"]))
@@ -297,6 +323,9 @@ def generate_structural_report(path, state, rep, material_name="Aluminum 6061-T6
     keymap = {"Yield": "yield", "Buckling": "buckling", "Recovery": "recovery",
               "Fin": "fin", "Thermal": "thermal"}
     for lbl, sf in labels:
+        if sf is None:                     # not assessed: not in the score
+            srows.append([lbl, "not assessed", "—"])
+            continue
         sub = sc.subscores.get(keymap[lbl], 0)
         sfx = "∞" if sf > 1e6 else f"{sf:.2f}"
         srows.append([lbl, sfx, f"{sub:.0f}"])

@@ -9,15 +9,15 @@ Entry point: python main.py
 import sys
 import os
 import logging
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
 
 # ── Ensure project root is in path ──
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ui.main_window import MainWindow
-from ui import theme as ui_theme
-from ui import settings as ui_settings
+# Nothing from Qt or ui/ is imported at module level: main() imports them.
+# Every multiprocessing worker (optimiser) and every `--run-script` helper
+# (CFD meshing) executes this module's top level first. With the whole UI
+# imported here, each of them loaded PyQt, pyvista, VTK and matplotlib —
+# about 6 s — before doing any work.
 
 
 def setup_logging():
@@ -82,6 +82,11 @@ def main():
         import PyQt6.QtWebEngineWidgets  # noqa: F401
     except Exception:
         pass  # WebEngine optional — Cinematic tab shows an install hint instead
+
+    from PyQt6.QtWidgets import QApplication
+    from ui.main_window import MainWindow
+    from ui import theme as ui_theme
+    from ui import settings as ui_settings
 
     from core.version import __version__ as K2_VERSION
     app = QApplication(sys.argv)

@@ -280,17 +280,35 @@ class FlightEffects:
 
 
 class ForceVectors:
-    """Thrust / velocity / drag arrows posed on the rocket each frame.
+    """Force and velocity arrows posed on the rocket each frame, with markers
+    at the centre of gravity and centre of pressure.
 
     Unit pv.Arrow meshes (along +x) built once; per-frame pose via actor
     transforms. Arrow length = base + magnitude-relative growth.
+
+    Live flight shows thrust, velocity and drag (:meth:`update`). The replay
+    shows the whole free-body picture (:meth:`update_forces`): thrust and
+    weight act at the CG, drag and lift at the CP, so the gap between the two
+    markers is the lever arm that turns the rocket into the wind.
     """
 
-    _SPECS = [
-        ("thrust", "#ffa657"),
-        ("velocity", "#58d0ff"),
-        ("drag", "#f85149"),
-    ]
+    # name -> colour. The replay legend reads these, so the swatch and the
+    # arrow cannot differ.
+    COLORS = {
+        "thrust": "#ffa657",
+        "velocity": "#58d0ff",
+        "drag": "#f85149",
+        "lift": "#7ee787",
+        "weight": "#c9ccd1",
+        "wind": "#c792ea",
+        "cg": "#f2cc60",
+        "cp": "#ff7b9c",
+    }
+    ARROWS = ("thrust", "velocity", "drag", "lift", "weight", "wind")
+    MARKERS = ("cg", "cp")
+    # (The arrows are the first six entries of COLORS, in order. Written over
+    # .items() because a class-body comprehension cannot see COLORS itself.)
+    _SPECS = [(n, c) for n, c in COLORS.items()][:len(ARROWS)]
 
     def __init__(self, plotter, vis_scale=30.0):
         self._p = plotter
@@ -306,6 +324,13 @@ class ForceVectors:
             for name, color in self._SPECS:
                 a = self._p.add_mesh(arrow, color=color, name=f"vec_{name}",
                                      smooth_shading=True, ambient=0.6)
+                a.SetVisibility(False)
+                self._actors[name] = a
+            ball = pv.Sphere(radius=1.0, theta_resolution=14, phi_resolution=14)
+            for name in self.MARKERS:
+                a = self._p.add_mesh(ball, color=self.COLORS[name],
+                                     name=f"vec_{name}", smooth_shading=True,
+                                     ambient=0.7)
                 a.SetVisibility(False)
                 self._actors[name] = a
         except Exception as exc:
@@ -364,6 +389,59 @@ class ForceVectors:
         self._pose("velocity", pos, vel_vec, vis_len(speed, 100.0))
         drag_dir = tuple(-c for c in vel_vec)
         self._pose("drag", pos, drag_dir, vis_len(drag_n, 100.0))
+        for name in ("lift", "weight", "wind") + self.MARKERS:
+            self._actors[name].SetVisibility(False)
+
+    @staticmethod
+    def arrow_length(magnitude, reference, base):
+        """Drawn length of an arrow for *magnitude*: zero below a thousandth
+        of *reference*, then growing with the logarithm, so a force ten times
+        larger is visibly longer without leaving the screen."""
+        if magnitude <= reference * 1e-3:
+            return 0.0
+        return base * (0.6 + 0.45 * math.log10(1.0 + 9.0 * magnitude / reference))
+
+    def station(self, tail, axis, rocket_len, from_nose):
+        """Scene position of the point *from_nose* metres behind the nose tip,
+        for a rocket drawn with its tail at *tail*."""
+        d = (rocket_len - max(0.0, min(rocket_len, from_nose))) * self._scale
+        return tuple(tail[i] + axis[i] * d for i in range(3))
+
+    def update_forces(self, tail, forces, rocket_len):
+        """Pose the full free-body picture from core.flight_replay
+        ``FlightReplay.forces()``. *tail* is where the rocket's tail is drawn.
+
+        Forces are scaled against the rocket's own weight, so an arrow as
+        long as the weight arrow is a force of one g; velocities against
+        100 m/s."""
+        if not self._actors:
+            return
+        if not self._visible:
+            for a in self._actors.values():
+                a.SetVisibility(False)
+            return
+        base = self._scale * rocket_len
+        axis = forces["axis"]
+        cg = self.station(tail, axis, rocket_len, forces["cg"])
+        cp = self.station(tail, axis, rocket_len, forces["cp"])
+
+        def mag(v):
+            return math.sqrt(sum(c * c for c in v))
+
+        weight = mag(forces["weight"])
+        ref = max(weight, 1e-6)
+        for name, at in (("thrust", cg), ("weight", cg), ("drag", cp), ("lift", cp)):
+            v = forces[name]
+            self._pose(name, at, v, self.arrow_length(mag(v), ref, base))
+        for name in ("velocity", "wind"):
+            v = forces[name]
+            self._pose(name, cg, v, self.arrow_length(mag(v), 100.0, base))
+        r = 0.045 * base
+        for name, at in (("cg", cg), ("cp", cp)):
+            a = self._actors[name]
+            a.SetVisibility(True)
+            a.SetScale(r, r, r)
+            a.SetPosition(*at)
 
     def set_visible(self, on):
         self._visible = bool(on)

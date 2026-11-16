@@ -223,9 +223,16 @@ class DesignWorkspace(QWidget):
         # Nose and fin dimensions go with the rest. The sim builds its own
         # AeroModel from these flat fields, and sized a generic fin from the
         # body wherever one was still zero.
-        from core.staging import assembly_aero_geometry, assembly_recovery
+        from core.staging import (assembly_aero_geometry, assembly_recovery,
+                                  build_stages_config)
 
         self.engine.update(
+            # The stage list a staged flight reads: each stage's geometry,
+            # mass, balance and motor ([] for a single stage). It was rebuilt
+            # only when the Propulsion tab was shown, so a fin or a mass
+            # changed here was not the one that flew until that tab had been
+            # opened again.
+            stages_config=build_stages_config(asm),
             **assembly_recovery(asm),
             name=asm.name,
             length=asm.total_length(),
@@ -268,24 +275,28 @@ class DesignWorkspace(QWidget):
         self.viewer._rebuild(reset_cam=True)
 
     def _refresh_stability(self, state=None):
-        """Update stability readouts from current engine state."""
-        s = state or self.engine.state
-        self._stab_cp.setText(f"{s.cp:.3f} m")
-        self._stab_cg.setText(f"{s.cg:.3f} m")
-        self._stab_margin.setText(f"{s.stability_margin:.2f} cal")
+        """Show the design's stability: the rocket on the pad, fully loaded.
 
-        if s.stability_margin < 0.5:
-            self._stab_status.setText("UNSTABLE")
-            self._stab_status.setStyleSheet(theme.value_qss(theme.ERR))
-        elif s.stability_margin < 1.0:
-            self._stab_status.setText("MARGINAL")
-            self._stab_status.setStyleSheet(theme.value_qss(theme.WARN))
-        elif s.stability_margin <= 2.5:
-            self._stab_status.setText("✓ STABLE")
-            self._stab_status.setStyleSheet(theme.value_qss(theme.OK))
-        else:
-            self._stab_status.setText("OVERSTABLE")
-            self._stab_status.setStyleSheet(theme.value_qss(theme.WARN))
+        These read state.cg and state.stability_margin, which a flight leaves
+        at the burnt-out rocket's values. After one flight the Design tab
+        gave the canonical rocket a CG of 0.900 m and 6.78 cal; it is drawn
+        with 1.051 m and 5.30 cal.
+        """
+        s = state or self.engine.state
+        margin = s.pad_stability_margin()
+        if margin is None:
+            margin = 0.0
+        self._stab_cp.setText(f"{s.cp:.3f} m")
+        self._stab_cg.setText(f"{s.liftoff_cg():.3f} m")
+        self._stab_margin.setText(f"{margin:.2f} cal")
+
+        # The one verdict (core.stability). This read-out called anything
+        # under 0.5 cal UNSTABLE; the Properties panel beside it said
+        # MARGINAL for the same number.
+        from core.stability import LABELS, stability_verdict
+        verdict = stability_verdict(margin)
+        self._stab_status.setText(LABELS.get(verdict, "—"))
+        self._stab_status.setStyleSheet(theme.value_qss(theme.stability_color(verdict)))
 
     def closeEvent(self, event):
         self.viewer.closeEvent(event)

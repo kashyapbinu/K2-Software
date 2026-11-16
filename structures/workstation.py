@@ -92,6 +92,8 @@ class FlightLoads:
     # that): the flight's height above the pad plus the launch-site elevation.
     maxq_altitude: float = 0.0    # m
     maxq_time: float = 0.0        # s
+    maxq_thrust: float = 0.0      # N, thrust at the max-Q instant
+    maxq_drag: float = 0.0        # N, drag at the max-Q instant
     maxmach_altitude: float = 0.0  # m (altitude at peak Mach — peak heating)
     maxthrust_mach: float = 0.0    # Mach at the peak-thrust instant
     maxthrust_altitude: float = 0.0  # m (altitude at peak thrust — early boost)
@@ -100,9 +102,17 @@ class FlightLoads:
     moment_arm: float = 0.0       # m, |x_CP - x_CG| at max-Q (bending arm)
 
     @classmethod
-    def from_history(cls, history, state=None) -> "FlightLoads":
+    def from_history(cls, history, state=None, summary=None) -> "FlightLoads":
         """Extract peak loads from a HistoryManager. Returns available=False
-        when no flight data exists."""
+        when no flight data exists.
+
+        ``summary`` is that flight's FlightSummary when there is one. Its
+        peak acceleration is the sensed one (what loads the airframe, and
+        what the Results tab and the report give). Without it the peak is
+        the recorder's d|v|/dt, about 1 g less on the way up: the Structures
+        tab showed a load factor of 19.0 G for a flight the Results tab gave
+        20.0 g.
+        """
         if history is None or len(history) == 0:
             return cls.from_state(state)
 
@@ -110,6 +120,8 @@ class FlightLoads:
         _, v_max, _ = history.find_max("velocity")
         _, m_max, idx_m = history.find_max("mach")
         _, a_max, _ = history.find_max("acceleration")
+        if getattr(summary, "max_acceleration", None):
+            a_max = summary.max_acceleration
         _, thr_max, idx_thr = history.find_max("thrust")
 
         snap = history.get_snapshot(idx_q) if idx_q is not None else {}
@@ -117,7 +129,7 @@ class FlightLoads:
         snap_thr = history.get_snapshot(idx_thr) if idx_thr is not None else {}
         site = _site_altitude(state)
         wind = getattr(state, "wind_speed", 0.0) if state else 0.0
-        mass = snap.get("mass", 0.0) or (state.total_mass() if state else 5.0)
+        mass = snap.get("mass", 0.0) or (vehicle_mass(state) if state else 5.0)
         # Bending moment arm at max-Q = distance between centre of pressure and
         # centre of gravity (recorded per-tick by the sim).
         arm = abs(snap.get("cp", 0.0) - snap.get("cg", 0.0))
@@ -133,6 +145,7 @@ class FlightLoads:
             maxthrust_mach=snap_thr.get("mach", 0.0),
             maxthrust_altitude=site + snap_thr.get("altitude", 0.0),
             maxq_time=t_q, wind_speed=wind,
+            maxq_thrust=snap.get("thrust", 0.0), maxq_drag=snap.get("drag", 0.0),
             vehicle_mass=mass if mass > 0 else 5.0,
             moment_arm=arm,
         )
@@ -144,7 +157,7 @@ class FlightLoads:
             return cls(available=False, source="none")
         has = (getattr(state, "max_velocity", 0.0) > 0
                or getattr(state, "max_mach", 0.0) > 0)
-        mass = state.total_mass() if callable(getattr(state, "total_mass", None)) else 5.0
+        mass = vehicle_mass(state)
         return cls(
             available=has, source="state" if has else "none",
             max_velocity=getattr(state, "max_velocity", 0.0),
@@ -167,6 +180,55 @@ class FlightLoads:
         if self.max_velocity:
             return self.max_velocity
         return self.max_mach * speed_of_sound(isa(self.maxq_altitude or 3000.0)[1])
+
+
+def vehicle_mass(state) -> float:
+    """Liftoff mass of the vehicle (kg): airframe, motor case and the full
+    propellant load (RocketState.liftoff_mass).
+
+    The load cases, the modal estimate and the reports took
+    ``state.total_mass()``, which is the live mass: the liftoff mass before
+    a flight and the burnt-out mass after one. The same rocket gave two sets
+    of structural numbers depending on whether it had been flown (canonical
+    rocket: 7.4 kg, then 6.0 kg). An instant of the flight that recorded its
+    own mass (FlightLoads.from_history) still uses that.
+
+    5 kg for an object that carries no mass at all (a bare stand-in state).
+    """
+    for name in ("liftoff_mass", "total_mass"):
+        fn = getattr(state, name, None)
+        if callable(fn):
+            mass = fn()
+            if isinstance(mass, (int, float)) and mass > 0:
+                return float(mass)
+    return 5.0
+
+
+def aero_drag(state, mach: float, altitude_asl: float) -> float:
+    """Drag (N) of this rocket at zero angle of attack, at ``mach`` and
+    ``altitude_asl`` (m above sea level, ISA), from the aero model the
+    flight uses (physics.aerodynamics.AeroModel). For a load case typed in
+    by hand, where no flight recorded the drag."""
+    if mach <= 0:
+        return 0.0
+    from physics.aerodynamics import AeroModel
+    _, T, rho = isa(altitude_asl)
+    v = mach * speed_of_sound(T)
+    q = 0.5 * rho * v * v
+    out = AeroModel.from_state(state).compute(0.0, mach, q, 0.0, v, getattr(state, "cg", 0.0))
+    return abs(float(out["F_drag"]))
+
+
+def flight_known(state, history) -> bool:
+    """True when there is a flight to take the loads from: a recorded
+    history, or the maxima a flight left on the state.
+
+    The functions below still run without one, on stand-in conditions (fins
+    and deflection at Mach 0.6 and 3000 m, heating at Mach 1.0 and 10 km,
+    canopies opening at 30 m/s from 1000 m). Those are not this rocket's
+    loads; a caller that shows results to the user asks this first.
+    """
+    return FlightLoads.from_history(history, state).available
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -258,7 +320,7 @@ def find_worst_case(state, history, material_name: str,
     L = state.length
     mat = get_structural_material(material_name)
     indices = _event_indices(history, state)
-    mass = state.total_mass() if callable(getattr(state, "total_mass", None)) else 5.0
+    mass = vehicle_mass(state)
     # One recovery-shock model for the whole report: harness tension from the
     # real CdA + deploy velocity (recovery_loads), not a separate 15 g guess.
     rec_force = recovery_loads(state, history).harness_tension_N
@@ -284,7 +346,7 @@ def find_worst_case(state, history, material_name: str,
             force = max(thrust, abs(snap.get("net_force", 0.0)), 1.0)
         elif name in ("Max-Q", "Max Mach", "Coast"):
             cond = "Max-Q"
-            force = max(thrust, drag, 1.0)
+            force = thrust
         elif name == "Apogee":
             cond = "Max Thrust"
             force = max(mass * G, 1.0)
@@ -301,14 +363,18 @@ def find_worst_case(state, history, material_name: str,
             cond, d, t, L, material_name,
             force=force, mach=mach, altitude_m=alt,
             vehicle_mass_kg=mass, angle_of_attack_deg=aoa,
-            moment_arm_m=arm,
+            moment_arm_m=arm, drag_force_N=drag, q_dyn=q,
         )
         vm = r["von_mises"]
         sf = r["safety_factor"]
 
-        # Buckling margin: applied axial stress / critical shell stress
+        # Buckling margin: applied axial compression / critical shell stress.
+        # The compression is the larger of thrust and the drag the flight
+        # recorded (it was thrust or 0.5 x q x frontal area). A parachute
+        # pulls the airframe in tension, which does not buckle it.
         area = math.pi * d * t if (d > 0 and t > 0) else 1.0
-        sigma_axial = max(force, q * 0.5 * math.pi * (d / 2) ** 2) / area
+        compression = 0.0 if cond == "Recovery Shock" else max(force, drag)
+        sigma_axial = compression / area
         sigma_cr = shell_buckling(mat.E, d, t, mat.nu)
         buck_margin = sigma_axial / sigma_cr if sigma_cr > 0 else 0.0
 
@@ -343,10 +409,12 @@ class RecoveryLoads:
     peak_force_N: float = 0.0
     drogue_deploy_velocity: float = 0.0
     main_deploy_velocity: float = 0.0
-    safety_factor: float = 0.0
+    # None: not assessed. K2 holds no rated strength for the harness,
+    # eyebolt or bulkhead, so there is nothing to divide the load by.
+    safety_factor: Optional[float] = None
+    rating_N: float = 0.0          # RocketState.recovery_hardware_rating
     status: str = "—"
     status_color: str = "#8b949e"
-    allowable_N: float = 0.0
     # Per canopy, in opening order: name, deploy_altitude (m above pad),
     # inflow_velocity (m/s), shock_N.
     canopies: list = field(default_factory=list)
@@ -354,13 +422,10 @@ class RecoveryLoads:
 
 # Opening-shock amplification (Knacke, "Parachute Recovery Systems", Cx ~ 1.4)
 _SHOCK_FACTOR = 1.4
-# Representative hardware allowables (forged steel eyebolt + glassed bulkhead)
-_EYEBOLT_PROOF_N = 5300.0   # 1/4"-20 forged eyebolt working ~ 0.5 of proof
 
 
 def recovery_loads(state, history=None,
-                   harness_daf: float = 1.5,
-                   eyebolt_kt: float = 2.0) -> RecoveryLoads:
+                   harness_daf: float = 1.5) -> RecoveryLoads:
     """Opening-shock loads of every canopy the vehicle carries, and the
     reaction loads they impose on harness, bulkhead, eyebolt and nose-cone
     joint.
@@ -372,6 +437,16 @@ def recovery_loads(state, history=None,
     or, if nothing is open above an altitude trigger, at the free-fall speed
     from apogee (drag ignored: an upper bound).
 
+    The safety factor is the harness tension against
+    ``state.recovery_hardware_rating``, the rated strength the user entered
+    for the weakest part of the load path; with none entered there is no
+    safety factor. The result used to carry one against a 5300 N eyebolt
+    nobody had entered (a 1/4"-20 forged eyebolt, assumed),
+    and an "eyebolt load" of twice the shock (a stress concentration applied
+    to a force), so any rocket with a parachute was told its recovery
+    hardware was SAFE (6.99 on the canonical rocket). The eyebolt carries
+    the harness tension.
+
     This used to read the two Simulation-tab slots through ``or 0.5`` and
     ``or 3.0``, so a design with one parachute, or none, was checked against
     canopies it does not have.
@@ -379,11 +454,20 @@ def recovery_loads(state, history=None,
     from recovery.parachute_dynamics import APOGEE, RecoverySystem
 
     rl = RecoveryLoads()
-    mass = state.total_mass() if callable(getattr(state, "total_mass", None)) else 5.0
+    mass = vehicle_mass(state)
     if mass <= 0:
         mass = 5.0
-    # The mass that hangs from the canopies: the burnt-out vehicle.
-    descent_mass = mass - (getattr(state, "propellant_mass_initial", 0.0) or 0.0)
+    # The mass that hangs from the canopies: the burnt-out vehicle. It is
+    # read as dry mass + motor case. It used to be total_mass() minus the
+    # propellant load, and after a flight total_mass() is already the
+    # burnt-out mass, so the propellant came off twice: the canonical rocket
+    # hung 4.6 kg instead of 6.0 kg and its main opening shock read 379 N
+    # where the same rocket, before flying, read 494 N.
+    dry = getattr(state, "dry_mass", None)
+    if dry is not None and dry > 0:
+        descent_mass = dry + (getattr(state, "motor_dry_mass", 0.0) or 0.0)
+    else:
+        descent_mass = mass - (getattr(state, "propellant_mass_initial", 0.0) or 0.0)
     if descent_mass <= 0:
         descent_mass = mass
 
@@ -434,13 +518,17 @@ def recovery_loads(state, history=None,
     rl.harness_tension_N = peak * harness_daf
     rl.nosecone_separation_N = peak           # joint must transmit full shock
     rl.bulkhead_load_N = peak                 # reacted through aft bulkhead
-    rl.eyebolt_load_N = peak * eyebolt_kt     # stress concentration at thread
+    rl.eyebolt_load_N = rl.harness_tension_N  # the harness pulls on it
 
-    # ── Safety factor vs hardware allowable (eyebolt governs) ──
-    rl.allowable_N = _EYEBOLT_PROOF_N
-    gov = max(rl.eyebolt_load_N, rl.harness_tension_N)
-    rl.safety_factor = rl.allowable_N / gov if gov > 0 else float("inf")
-    rl.status, rl.status_color = _status_from_sf(rl.safety_factor)
+    # Safety factor against the rating the user entered for the weakest part
+    # of the recovery load path. None when there is none.
+    rating = getattr(state, "recovery_hardware_rating", 0.0) or 0.0
+    rl.rating_N = rating
+    if rating > 0 and rl.harness_tension_N > 0:
+        rl.safety_factor = rating / rl.harness_tension_N
+        rl.status, rl.status_color = _status_from_sf(rl.safety_factor)
+    else:
+        rl.status = "Enter the hardware rating to get a safety factor"
     return rl
 
 
@@ -549,7 +637,7 @@ def modal_estimate(state, material_name: str,
     r_i = d / 2 - t
     I = (math.pi / 4) * (r_o ** 4 - r_i ** 4)
     EI = mat.E * I
-    mass = state.total_mass() if callable(getattr(state, "total_mass", None)) else 5.0
+    mass = vehicle_mass(state)
     if mass <= 0:
         mass = 5.0
     me.total_mass_kg = mass
@@ -663,10 +751,15 @@ def fin_analysis(state, flight: FlightLoads, material_name: str) -> FinAnalysis:
     root = getattr(state, "fin_root_chord", 0.0) or 0.0
     tip = getattr(state, "fin_tip_chord", 0.0) or 0.0
     span = getattr(state, "fin_span", 0.0) or getattr(state, "fin_height", 0.0) or 0.0
-    thick = getattr(state, "fin_thickness", 0.003) or 0.003
+    thick = getattr(state, "fin_thickness", 0.0) or 0.0
     count = getattr(state, "fin_count", None)
     if (count is not None and count <= 0) or span <= 0 or root <= 0:
         return FinAnalysis.no_fins()
+    if thick <= 0:
+        # No thickness, no section to analyse. It used to be taken as 3 mm.
+        fa = FinAnalysis.no_fins()
+        fa.status = "NO FIN THICKNESS"
+        return fa
     fa = FinAnalysis()
 
     # ── Aerodynamic normal force per fin at max-Q ──
@@ -794,11 +887,12 @@ def buckling_analysis(state, flight: FlightLoads, material_name: str,
     r = d / 2
     area = math.pi * d * t
 
-    # Applied axial compression: max thrust + drag at max-Q
+    # Applied axial compression: the larger of peak thrust and the drag the
+    # flight recorded at max-Q (see physics.structures._compute_max_q). It
+    # was peak thrust plus 0.5 x q x frontal area, two loads from different
+    # instants added together with an assumed drag coefficient.
     thrust = flight.max_thrust or getattr(state, "thrust", 0.0)
-    q = flight.max_dynamic_pressure
-    F_drag = q * 0.5 * math.pi * r ** 2
-    P_applied = max(thrust + F_drag, getattr(state, "weight", 0.0), 1.0)
+    P_applied = max(thrust, flight.maxq_drag, getattr(state, "weight", 0.0), 1.0)
     sigma_applied = P_applied / area
     ba.applied_axial_N = P_applied
 
@@ -811,12 +905,14 @@ def buckling_analysis(state, flight: FlightLoads, material_name: str,
     ba.modes.append(BucklingMode("Shell Buckling", sigma_shell, sigma_applied, "Pa"))
 
     # 3. Panel buckling — skin panel between fins (flat-plate, simply supported)
-    n_fins = getattr(state, "fin_count", 3) or 3
-    b_panel = math.pi * d / max(n_fins, 1)          # arc width between fins
-    k_plate = 4.0                                    # simply-supported uniaxial
-    sigma_panel = (k_plate * math.pi ** 2 * mat.E /
-                   (12 * (1 - mat.nu ** 2))) * (t / b_panel) ** 2 if b_panel > 0 else float("inf")
-    ba.modes.append(BucklingMode("Panel Buckling", sigma_panel, sigma_applied, "Pa"))
+    #    A finless rocket has no such panel; it used to be given three fins.
+    n_fins = getattr(state, "fin_count", 0) or 0
+    if n_fins > 0:
+        b_panel = math.pi * d / n_fins               # arc width between fins
+        k_plate = 4.0                                # simply-supported uniaxial
+        sigma_panel = (k_plate * math.pi ** 2 * mat.E /
+                       (12 * (1 - mat.nu ** 2))) * (t / b_panel) ** 2
+        ba.modes.append(BucklingMode("Panel Buckling", sigma_panel, sigma_applied, "Pa"))
 
     # 4. Shell buckling under pure bending (NASA SP-8007 sec. 4.2.2). The old
     #    "Local Crippling" entry was 0.6·E·t/r — the classical axial shell
@@ -918,9 +1014,9 @@ class SafetyScore:
     color: str = "#8b949e"
     yield_margin: float = 0.0
     buckling_margin: float = 0.0
-    recovery_margin: float = 0.0
+    recovery_margin: Optional[float] = None   # None: not assessed
     fin_margin: float = 0.0
-    thermal_margin: float = 0.0
+    thermal_margin: Optional[float] = None    # None: not assessed
     subscores: dict = field(default_factory=dict)
 
 
@@ -938,9 +1034,12 @@ def _sf_to_subscore(sf: float) -> float:
     return max(0.0, sf * 40.0)
 
 
-def safety_score(yield_sf: float, buckling_sf: float, recovery_sf: float,
-                 fin_sf: float, thermal_sf: float) -> SafetyScore:
-    """Weighted 0-100 structural safety score across the five margins."""
+def safety_score(yield_sf: float, buckling_sf: float, recovery_sf: Optional[float],
+                 fin_sf: float, thermal_sf: Optional[float]) -> SafetyScore:
+    """Weighted 0-100 structural safety score across the margins that were
+    assessed. A margin of None (recovery with no hardware rating, thermal
+    with no flight history) is left out and the other weights are scaled up
+    to sum to 1; it is not scored as a pass."""
     ss = SafetyScore()
     ss.yield_margin = yield_sf
     ss.buckling_margin = buckling_sf
@@ -953,12 +1052,15 @@ def safety_score(yield_sf: float, buckling_sf: float, recovery_sf: float,
     subs = {
         "yield": _sf_to_subscore(yield_sf),
         "buckling": _sf_to_subscore(buckling_sf),
-        "recovery": _sf_to_subscore(recovery_sf),
         "fin": _sf_to_subscore(fin_sf),
-        "thermal": _sf_to_subscore(thermal_sf),
     }
+    if recovery_sf is not None:
+        subs["recovery"] = _sf_to_subscore(recovery_sf)
+    if thermal_sf is not None:
+        subs["thermal"] = _sf_to_subscore(thermal_sf)
     ss.subscores = subs
-    ss.score = int(round(sum(subs[k] * weights[k] for k in weights)))
+    total_weight = sum(weights[k] for k in subs)
+    ss.score = int(round(sum(subs[k] * weights[k] for k in subs) / total_weight))
 
     if ss.score > 85:
         ss.grade, ss.color = "EXCELLENT", "#2ecc71"
@@ -976,89 +1078,145 @@ def safety_score(yield_sf: float, buckling_sf: float, recovery_sf: float,
 # ═════════════════════════════════════════════════════════════════════════════
 @dataclass
 class ThermalProfile:
-    skin_temp_K: float = 293.15
-    internal_temp_K: float = 293.15
-    gradient_K: float = 0.0
-    expansion_mm: float = 0.0
-    thermal_stress_MPa: float = 0.0
+    available: bool = False                # False: no flight history to heat the wall with
+    initial_temp_K: float = 0.0            # wall on the pad = air at the pad
+    skin_temp_K: float = 0.0               # peak outer-face temperature
+    internal_temp_K: float = 0.0           # inner face at that instant
+    gradient_K: float = 0.0                # peak outer - inner difference
+    expansion_mm: float = 0.0              # growth in length at the peak mean wall temperature
+    thermal_stress_MPa: float = 0.0        # peak wall stress
     max_thermal_stress_MPa: float = 0.0
-    max_stress_altitude: float = 0.0
+    max_stress_altitude: float = 0.0       # m above the pad
+    surface_minus_mean_K: float = 0.0      # outer face above the wall mean, at the peak stress
+    stagnation_temp_K: float = 0.0         # air stagnation temperature at peak Mach
     service_limit_K: float = 423.0
     exceeds_limit: bool = False
-    heat_flux_W_m2: float = 0.0                    # convective wall heat flux
+    heat_flux_W_m2: float = 0.0                    # peak convective wall heat flux
     profile: list = field(default_factory=list)    # [(altitude_m, thermal_stress_MPa)]
-    body_station_temps: list = field(default_factory=list)  # [(x_frac, T_K, label)]
+    body_station_temps: list = field(default_factory=list)  # [(x_frac, peak T_K, label)]
+
+
+_WALL_NODES = 12
+_thermal_cache: dict = {}      # the last thermal_profile: {"key": ..., "value": ...}
+
+
+def wall_heating(times, speeds, machs, air_temps, air_densities,
+                 x_station: float, thickness: float, mat) -> dict:
+    """Temperature through the airframe wall over a flight, at one station.
+
+    One-dimensional conduction through the wall thickness (implicit finite
+    differences, ``_WALL_NODES`` nodes): the outer face is heated by the
+    boundary layer (Eckert reference-temperature flat plate at ``x_station``
+    metres from the nose, structures.thermal_analysis.convective_heat_flux),
+    the inner face is insulated, and the wall starts at the air temperature
+    of the first sample. Conductivity, specific heat and density are the
+    material's.
+
+    Returns arrays over the samples: ``outer``, ``inner``, ``mean`` (K) and
+    ``flux`` (W/m^2).
+    """
+    import numpy as np
+    from structures.thermal_analysis import convective_heat_flux
+
+    n = _WALL_NODES
+    dx = thickness / (n - 1)
+    k, rho_c = mat.thermal_conductivity, mat.density * mat.specific_heat
+    T = np.full(n, float(air_temps[0]))
+    outer, inner, mean, flux = [T[0]], [T[-1]], [T[0]], [0.0]
+    for i in range(1, len(times)):
+        dt = times[i] - times[i - 1]
+        if dt <= 0:
+            outer.append(T[0]); inner.append(T[-1]); mean.append(float(T.mean())); flux.append(flux[-1])
+            continue
+        q = convective_heat_flux(air_temps[i], air_densities[i], speeds[i], machs[i],
+                                 x_station, T[0])
+        r = k * dt / (rho_c * dx * dx)
+        A = np.zeros((n, n))
+        b = T.copy()
+        for j in range(1, n - 1):
+            A[j, j - 1], A[j, j], A[j, j + 1] = -r, 1 + 2 * r, -r
+        # Half cells at the faces: flux in at the outer one, none at the inner.
+        A[0, 0], A[0, 1] = 1 + 2 * r, -2 * r
+        b[0] += 2 * q * dt / (rho_c * dx)
+        A[-1, -1], A[-1, -2] = 1 + 2 * r, -2 * r
+        T = np.linalg.solve(A, b)
+        # Trapezoid mean over the wall (half weight on the faces).
+        m = (T[0] / 2 + T[1:-1].sum() + T[-1] / 2) / (n - 1)
+        outer.append(float(T[0])); inner.append(float(T[-1])); mean.append(float(m)); flux.append(q)
+    return {"outer": np.array(outer), "inner": np.array(inner),
+            "mean": np.array(mean), "flux": np.array(flux)}
 
 
 def thermal_profile(state, flight: FlightLoads, history, material_name: str) -> ThermalProfile:
-    """Aerodynamic-heating thermal stress, plus a thermal-stress-vs-altitude
-    sweep over the ascent."""
+    """Aerodynamic heating of the airframe wall over the recorded ascent.
+
+    The wall temperature is integrated through the flight (wall_heating) at
+    five stations along the body; the hottest is the one nearest the nose,
+    where the boundary layer is thinnest. The stress is the one the
+    through-wall temperature difference puts in the outer face,
+    E * alpha * (T_outer - T_mean) / (1 - nu).
+
+    Needs the flight history. Without one the result is ``available=False``
+    and carries no temperatures.
+
+    The skin used to be put at the steady recovery temperature of the peak
+    Mach, as if the rocket held that speed until the wall soaked through,
+    and the stations along the body were fixed fractions of it (92 %, 95 %,
+    85 %). The stress sweep took the air temperature of each instant as the
+    wall temperature, so its maximum was at apogee, in the cold.
+    """
     tp = ThermalProfile()
     mat = get_structural_material(material_name)
     tp.service_limit_K = mat.max_service_temp
+    L, wall = state.length, state.wall_thickness
+    if history is None or len(history) < 3 or L <= 0 or wall <= 0:
+        return tp
 
-    def thermal_at(mach, alt):
-        r = compute_for_condition("Thermal", state.diameter, state.wall_thickness,
-                                  state.length, material_name, mach=mach, altitude_m=alt)
-        return r
+    # The solve takes about 0.2 s and the Structures tab asks on every state
+    # change, so the last answer is kept for the same flight, wall and
+    # material.
+    key = (id(history), len(history), history.get_values("time")[-1],
+           history.find_max("mach")[1], history.find_max("altitude")[1],
+           history.get_values("atm_temperature")[0], material_name, L, wall)
+    if _thermal_cache.get("key") == key:
+        return _thermal_cache["value"]
+    _thermal_cache.update(key=key, value=tp)
 
-    # Peak point: max mach (hottest skin). Use the altitude AT max Mach — not
-    # the max-Q altitude — so the atmospheric state matches the Mach used.
-    mach_pk = flight.max_mach or 1.0
-    alt_pk = flight.maxmach_altitude or flight.maxq_altitude or 10000.0
-    r = thermal_at(mach_pk, alt_pk)
-    T_amb = isa(alt_pk)[1]
-    T_recovery = r.get("T_recovery", T_amb)
-    T_stag = r.get("T_stag", T_recovery)
-    tp.skin_temp_K = T_recovery
-    # Internal wall lags external by conduction through the shell — small for
-    # a short transient; ~25% of the external rise reaches the interior.
-    tp.internal_temp_K = T_amb + 0.25 * (T_recovery - T_amb)
-    tp.gradient_K = T_stag - T_recovery     # nose-to-body gradient
-    tp.expansion_mm = mat.cte * (tp.skin_temp_K - 293.15) * state.length * 1000.0
-    tp.thermal_stress_MPa = r["thermal"] / 1e6
+    _, _, iap = history.find_max("altitude")
+    step = max(1, (iap + 1) // 400)
+    idx = list(range(0, iap + 1, step))
+    if len(idx) < 3:
+        return tp
+    col = lambda name: [history.get_values(name)[i] for i in idx]
+    times, speeds, machs, alts = col("time"), col("velocity"), col("mach"), col("altitude")
+    air_T, air_rho = col("atm_temperature"), col("atm_density")
+    if not air_T[0] or not air_rho[0]:
+        return tp
+
+    stations = [(f, wall_heating(times, [abs(v) for v in speeds], machs, air_T, air_rho,
+                                 f * L, wall, mat))
+                for f in (0.1, 0.25, 0.5, 0.75, 1.0)]
+    tp.body_station_temps = [(f, float(w["outer"].max()), f"{f * L:.2f} m from nose")
+                             for f, w in stations]
+    w = stations[0][1]                      # the hottest station
+    ipk = int(w["outer"].argmax())
+    tp.available = True
+    tp.initial_temp_K = float(air_T[0])
+    tp.skin_temp_K = float(w["outer"][ipk])
+    tp.internal_temp_K = float(w["inner"][ipk])
+    tp.gradient_K = float((w["outer"] - w["inner"]).max())
+    tp.expansion_mm = mat.cte * (float(w["mean"].max()) - tp.initial_temp_K) * L * 1000.0
+    tp.heat_flux_W_m2 = float(w["flux"].max())
     tp.exceeds_limit = tp.skin_temp_K > tp.service_limit_K
+    im = max(range(len(machs)), key=lambda i: machs[i])
+    tp.stagnation_temp_K = air_T[im] * (1 + 0.2 * machs[im] ** 2)
 
-    # ── Along-body wall temperature distribution (nose hottest → fins cooler) ──
-    # Recovery (adiabatic-wall) temperature scales with the local recovery
-    # factor; the stagnation nose tip sees T_stag, the cylindrical body the
-    # turbulent recovery temperature, fins/aft slightly cooler.
-    V_pk = mach_pk * speed_of_sound(T_amb)
-    tp.body_station_temps = [
-        (0.00, T_stag, "Nose tip (stagnation)"),
-        (0.12, T_amb + 0.92 * (T_recovery - T_amb), "Nose shoulder"),
-        (0.40, T_recovery, "Forward body"),
-        (0.70, T_amb + 0.95 * (T_recovery - T_amb), "Aft body"),
-        (0.95, T_amb + 0.85 * (T_recovery - T_amb), "Fins"),
-    ]
-    # Convective wall heat flux (turbulent flat plate, Stanton ≈ 0.0015):
-    #   q" = St · ρ · V · cp · (T_recovery − T_wall)
-    _, T_pk, rho_pk = isa(alt_pk)
-    cp_air = 1005.0
-    St = 0.0015
-    T_wall = 293.15
-    tp.heat_flux_W_m2 = max(0.0, St * rho_pk * V_pk * cp_air * (T_recovery - T_wall))
-
-    # Sweep over ascent
-    pts = []
-    if history is not None and len(history) > 0:
-        machs = history.get_values("mach")
-        alts = history.get_values("altitude")          # above the pad
-        site = _site_altitude(state)
-        step = max(1, len(machs) // 40)
-        for i in range(0, len(machs), step):
-            rr = thermal_at(machs[i], site + alts[i])  # the air is at site + h
-            pts.append((alts[i], rr["thermal"] / 1e6))
-    else:
-        for alt in range(0, 12000, 500):
-            rr = thermal_at(mach_pk, alt)
-            pts.append((float(alt), rr["thermal"] / 1e6))
-    tp.profile = pts
-    if pts:
-        tp.max_thermal_stress_MPa = max(p[1] for p in pts)
-        tp.max_stress_altitude = max(pts, key=lambda p: p[1])[0]
-    else:
-        tp.max_thermal_stress_MPa = tp.thermal_stress_MPa
+    stress = mat.E * mat.cte * (w["outer"] - w["mean"]) / (1 - mat.nu)
+    tp.profile = [(alts[i], abs(float(stress[i])) / 1e6) for i in range(len(idx))]
+    ist = max(range(len(idx)), key=lambda i: abs(stress[i]))
+    tp.max_thermal_stress_MPa = tp.thermal_stress_MPa = abs(float(stress[ist])) / 1e6
+    tp.max_stress_altitude = alts[ist]
+    tp.surface_minus_mean_K = float(w["outer"][ist] - w["mean"][ist])
     return tp
 
 
@@ -1079,25 +1237,27 @@ class ComponentStatus:
 class FailureMap:
     components: list = field(default_factory=list)   # list[ComponentStatus]
     weakest: Optional[ComponentStatus] = None
+    not_modelled: list = field(default_factory=list)  # subsystem names
 
 
-# Subsystem → governing-margin source key
-_SUBSYSTEMS = [
-    "Motor Mount", "Airframe", "Fins", "Couplers", "Bulkheads",
-    "Recovery System", "Nose Cone", "Avionics Bay",
-]
+# Subsystems this module has no model of. They are named on the map so the
+# gap is visible; they carry no safety factor.
+NOT_MODELLED = ["Motor Mount", "Couplers", "Bulkheads", "Recovery Hardware",
+                "Nose Cone", "Avionics Bay"]
 
 
-_T_REF_K = 293.15   # stress-free assembly / service-limit reference temperature
+def thermal_margin(thermal: "ThermalProfile") -> Optional[float]:
+    """Thermal safety factor = allowable temperature RISE / actual rise of
+    the skin above the temperature it left the pad at. None when the heating
+    was not solved (no flight history). No rise → ∞.
 
-
-def thermal_margin(thermal: "ThermalProfile") -> float:
-    """Thermal safety factor = allowable temperature RISE / actual rise above
-    the 20 °C reference. The old form (T_limit / T_skin, an absolute-Kelvin
-    ratio) gave SF ≈ 1.35 for an unheated Mach-0.8 skin at 314 K and knocked
-    the thermal sub-score to ~60 with no aero heating at all. No rise → ∞."""
-    rise = thermal.skin_temp_K - _T_REF_K
-    allow = thermal.service_limit_K - _T_REF_K
+    The rise was measured from a fixed 20 °C, whatever the day. Before that
+    the form was T_limit / T_skin, an absolute-Kelvin ratio, which gave
+    SF ≈ 1.35 for an unheated Mach-0.8 skin at 314 K."""
+    if not thermal.available:
+        return None
+    rise = thermal.skin_temp_K - thermal.initial_temp_K
+    allow = thermal.service_limit_K - thermal.initial_temp_K
     if rise <= 0.0:
         return float("inf")
     if allow <= 0.0:
@@ -1119,30 +1279,24 @@ def _status_from_sf(sf: float) -> tuple[str, str]:
 def failure_map(state, body_sf: float, fin: FinAnalysis,
                 recovery: RecoveryLoads, buckling: BucklingAnalysis,
                 thermal: ThermalProfile) -> FailureMap:
-    """Roll the analysis results up into a per-subsystem dashboard."""
-    fm = FailureMap()
-    thermal_sf = thermal_margin(thermal)
+    """The subsystems that were analysed, each with its governing margin.
 
-    rows = {
-        "Motor Mount": (min(body_sf, buckling.governing.margin if buckling.governing else body_sf),
-                        "Thrust transfer + buckling"),
-        "Airframe": (min(body_sf, *(m.margin for m in buckling.modes) if buckling.modes else (body_sf,)),
-                     "Axial + bending + shell buckling"),
-        "Fins": (fin.governing_sf,
-                 "Root bending + flutter" if fin.safety_factor <= fin.flutter_sf else
-                 f"Flutter governs: margin {(fin.flutter_margin - 1.0) * 100.0:+.0f}% on "
-                 f"max flight speed ({fin.flutter_verdict})"),
-        "Couplers": (body_sf * 0.9, "Joint shear + bending"),
-        "Bulkheads": (recovery.safety_factor, "Recovery shock reaction"),
-        "Recovery System": (recovery.safety_factor, "Deployment shock"),
-        "Nose Cone": (max(body_sf, thermal_sf), "Stagnation heating + separation"),
-        "Avionics Bay": (body_sf * 1.2, "Vibration + acceleration"),
-    }
-    for name in _SUBSYSTEMS:
-        sf, detail = rows[name]
+    Only the airframe and the fins are. The map used to show eight tiles:
+    Couplers at 0.9 x the body safety factor, Avionics Bay at 1.2 x, Nose
+    Cone at the larger of body and thermal, Motor Mount as a copy of the
+    airframe, and Bulkheads and Recovery System judged against an assumed
+    eyebolt. None of those had an analysis behind it."""
+    fm = FailureMap(not_modelled=list(NOT_MODELLED))
+    rows = [("Airframe",
+             min(body_sf, *(m.margin for m in buckling.modes)) if buckling.modes else body_sf,
+             "Axial + bending stress, buckling")]
+    if fin.present:
+        rows.append(("Fins", fin.governing_sf,
+                     "Root bending + flutter" if fin.safety_factor <= fin.flutter_sf else
+                     f"Flutter governs: margin {(fin.flutter_margin - 1.0) * 100.0:+.0f}% on "
+                     f"max flight speed ({fin.flutter_verdict})"))
+    for name, sf, detail in rows:
         st, col = _status_from_sf(sf)
-        if name == "Fins" and not fin.present:
-            st, col, detail = "N/A", "#8b949e", "No fins on this rocket"
         fm.components.append(ComponentStatus(
             name=name, subsystem=name, margin=sf,
             status=st, color=col, detail=detail,
@@ -1167,31 +1321,62 @@ class LoadPath:
     peak_force_N: float = 0.0
 
 
-def load_path(state, flight: FlightLoads) -> LoadPath:
-    """Trace the primary compressive load path from the motor up through the
-    airframe to the nose cone. Force decreases as distributed mass is shed
-    above each station under acceleration."""
-    lp = LoadPath()
-    thrust = flight.max_thrust or getattr(state, "thrust", 0.0)
-    if thrust <= 0:
-        thrust = getattr(state, "motor_avg_thrust", 0.0) or 1.0
-    mass = state.total_mass() if callable(getattr(state, "total_mass", None)) else 5.0
-    accel = thrust / mass if mass > 0 else G
-    L = state.length or 1.0
+def load_path(state, flight: FlightLoads, assembly=None) -> LoadPath:
+    """Axial compression at each airframe joint at peak thrust, nose to tail.
 
-    # Force at each station = thrust minus inertia of structure forward of it.
-    # Model as fractions of vehicle mass carried at each interface.
-    chain = [
-        ("Motor", 1.00, 0.95 * L),
-        ("Motor Mount", 0.95, 0.88 * L),
-        ("Aft Airframe", 0.80, 0.70 * L),
-        ("Coupler", 0.55, 0.55 * L),
-        ("Recovery Bay", 0.40, 0.40 * L),
-        ("Fwd Airframe", 0.25, 0.25 * L),
-        ("Nose Cone", 0.08, 0.08 * L),
-    ]
-    for name, frac, pos in chain:
-        lp.stations.append(LoadStation(name, thrust * frac, pos))
+    The force through a joint is what accelerates everything forward of it:
+    F = thrust x (mass forward of the joint / liftoff mass), drag left out
+    (peak thrust is at low speed). The masses and joints are the design's:
+    each component the Design tab holds, at its own position, and the motor
+    and propellant where the state puts them.
+
+    Without a design there are no joints, and no stations are returned. The
+    chart used to be drawn for seven fixed interfaces (Motor Mount, Coupler,
+    Recovery Bay ...) carrying 95 %, 80 %, 55 %, 40 %, 25 % and 8 % of the
+    thrust at 88 %, 70 % ... of the length, for every rocket."""
+    lp = LoadPath()
+    thrust = flight.max_thrust or getattr(state, "motor_max_thrust", 0.0) or 0.0
+    if thrust <= 0 or assembly is None:
+        return lp
+    from core.components import Stage
+
+    def counted(c):
+        if isinstance(c, Stage):
+            return False
+        p = getattr(c, "parent", None)
+        return not (p is not None and getattr(p, "_override_includes_children", False)
+                    and getattr(p, "override_mass", None) is not None)
+
+    masses = []                                   # (centre from nose, kg)
+    for c in assembly.all_components():
+        if counted(c):
+            try:
+                m = float(c.computed_mass())
+            except Exception:
+                m = 0.0
+            if m > 0:
+                masses.append((float(c.cg_position()), m))
+    motor = (getattr(state, "motor_dry_mass", 0.0) or 0.0) + \
+        (getattr(state, "propellant_mass_initial", 0.0) or 0.0)
+    if motor > 0:
+        aft = getattr(state, "motor_position", 0.0) or getattr(state, "length", 0.0) or 0.0
+        masses.append((aft - (getattr(state, "motor_length", 0.0) or 0.0) / 2.0, motor))
+    total = sum(m for _, m in masses)
+    if total <= 0:
+        return lp
+
+    # Joints: the aft end of every airframe section but the last.
+    sections = sorted((c for stage in assembly.stages for c in stage.children
+                       if c.component_length() > 0 and c.outer_diameter() > 0),
+                      key=lambda c: c.position)
+    for sec in sections[:-1]:
+        x = float(sec.position) + float(sec.component_length())
+        forward = sum(m for cg, m in masses if cg < x)
+        lp.stations.append(LoadStation(f"Aft of {sec.name}", thrust * forward / total, x))
+    if sections:
+        last = sections[-1]
+        lp.stations.append(LoadStation(
+            "Motor thrust", thrust, float(last.position) + float(last.component_length())))
     lp.peak_force_N = thrust
     return lp
 
@@ -1263,20 +1448,32 @@ def full_analysis(state, assembly, history, material_name: str,
     rep.recovery = recovery_loads(state, history)
 
     # Governing body stress for the selected condition
-    mass = state.total_mass() if callable(getattr(state, "total_mass", None)) else 5.0
+    mass = vehicle_mass(state)
     if body_condition:
         rep.body_condition = body_condition
     else:
+        fl = rep.flight
+        extra = {}
         if condition == "Recovery Shock":
             force = rep.recovery.harness_tension_N
+        elif condition == "Max-Q" and fl.source == "simulation":
+            # The thrust, drag and dynamic pressure of the max-Q instant, as
+            # the worst-case table uses. Peak thrust (an earlier instant)
+            # was paired with max-Q here: 7.5 MPa on this panel against
+            # 5.3 MPa in the table for the same event.
+            force = fl.maxq_thrust
+            extra = dict(drag_force_N=fl.maxq_drag, q_dyn=fl.max_dynamic_pressure)
         else:
-            force = max(rep.flight.max_thrust, getattr(state, "thrust", 0.0), mass * G, 1.0)
+            force = max(fl.max_thrust, getattr(state, "thrust", 0.0), mass * G, 1.0)
+        if condition == "Thermal":
+            extra = dict(wall_delta_T=thermal_profile(
+                state, fl, history, material_name).surface_minus_mean_K)
         rep.body_condition = compute_for_condition(
             condition, state.diameter, state.wall_thickness, state.length,
-            material_name, force=force, mach=rep.flight.maxq_mach,
-            altitude_m=rep.flight.maxq_altitude, vehicle_mass_kg=mass,
+            material_name, force=force, mach=fl.maxq_mach,
+            altitude_m=fl.maxq_altitude, vehicle_mass_kg=mass,
             angle_of_attack_deg=3.0 if condition == "Max-Q" else 2.0,
-            moment_arm_m=rep.flight.moment_arm,
+            moment_arm_m=fl.moment_arm, **extra,
         )
     body_sf = rep.body_condition["safety_factor"]
 
@@ -1294,7 +1491,7 @@ def full_analysis(state, assembly, history, material_name: str,
                              rep.fin.governing_sf, thermal_sf)
     rep.failure = failure_map(state, body_sf, rep.fin, rep.recovery,
                               rep.buckling, rep.thermal)
-    rep.loads = load_path(state, rep.flight)
+    rep.loads = load_path(state, rep.flight, assembly)
     rep.deflection = beam_deflection(state, rep.flight, material_name)
     rep.modal = modal_estimate(state, material_name)
 
@@ -1362,7 +1559,7 @@ if __name__ == "__main__":
           f"SF = {rep.body_condition['safety_factor']:.2f}")
     print(f"Recovery: main={rep.recovery.main_shock_N:.0f} N, "
           f"harness={rep.recovery.harness_tension_N:.0f} N, "
-          f"SF={rep.recovery.safety_factor:.2f} ({rep.recovery.status})")
+          f"{rep.recovery.status}")
     print(f"Fin: root bend={rep.fin.root_bending_MPa:.1f} MPa, "
           f"tip defl={rep.fin.tip_deflection_mm:.2f} mm, "
           f"f1={rep.fin.natural_frequency_Hz:.0f} Hz, "

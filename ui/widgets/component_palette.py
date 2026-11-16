@@ -80,7 +80,7 @@ class ComponentPalette(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        header = QLabel("ADD COMPONENT")
+        header = QLabel("Add Component")
         header.setProperty("panelTitle", True)
         layout.addWidget(header)
 
@@ -121,8 +121,13 @@ class ComponentPalette(QWidget):
         layout.addWidget(scroll)
 
         # Add stage button
-        stage_btn = QPushButton("  Add Stage (Booster)")
-        stage_btn.setIcon(icon("comp_stage", color=theme.ACCENT))
-        stage_btn.setProperty("primary", True)
+        # A normal-width button on the left. It was an accent-outlined button
+        # stretched across the whole palette, the loudest thing on the tab.
+        stage_btn = QPushButton(" Add Booster Stage")
+        stage_btn.setIcon(icon("comp_stage"))
         stage_btn.clicked.connect(lambda: self.add_component.emit(Stage))
-        layout.addWidget(stage_btn)
+        stage_row = QHBoxLayout()
+        stage_row.setContentsMargins(10, 4, 10, 4)
+        stage_row.addWidget(stage_btn)
+        stage_row.addStretch()
+        layout.addLayout(stage_row)

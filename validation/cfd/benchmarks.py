@@ -384,8 +384,12 @@ def bench_barrowman_vs_su2_supersonic(machs=(1.5, 2.5, 3.5),
             k2_cn[M] = k2["cn"]
             k2_cp[M] = k2["cp"]
             # Same body-axis reconciliation as the subsonic case: SU2 reports
-            # wind-axis CL/CD, K2's `cn` is body-axis.
-            su2_cn[M] = res.cl * cos_a + res.cd * sin_a
+            # wind-axis CL/CD, K2's `cn` is body-axis. The CD rotated in is
+            # the solve's own: the flat-plate friction this mode adds to
+            # res.cd is an axial force and was inflating the reference CN by
+            # Cd_f·sin(α) (about 1.5 %).
+            su2_cn[M] = (res.cl * cos_a
+                         + (res.cd - (getattr(res, "cd_friction", 0.0) or 0.0)) * sin_a)
             su2_cp[M] = res.cp_from_nose_m
 
             bm.add(Comparison.make(

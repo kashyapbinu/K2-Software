@@ -186,7 +186,11 @@ class ToolBridge(QObject):
         ws = getattr(self.mw, "design_ws", None)
         if ws is not None and hasattr(ws, "get_assembly"):
             asm = ws.get_assembly()
-        return summarize_state(self.mw.engine.state, asm)
+        return summarize_state(self.mw.engine.state, asm, self._flight())
+
+    def _flight(self):
+        """The last flight's FlightSummary, or None."""
+        return getattr(getattr(self.mw, "sim_engine", None), "summary", None)
 
     def _assembly(self):
         ws = getattr(self.mw, "design_ws", None)
@@ -199,9 +203,12 @@ class ToolBridge(QObject):
         return asm, ws
 
     def _stability(self) -> dict:
+        # The design's balance: the rocket on the pad (see RocketState), so a
+        # change made after a flight is reported against the loaded rocket.
         s = self.mw.engine.state
-        return {"cg_m": round(s.cg, 4), "cp_m": round(s.cp, 4),
-                "stability_margin_cal": round(s.stability_margin, 3)}
+        margin = s.pad_stability_margin()
+        return {"cg_m": round(s.liftoff_cg(), 4), "cp_m": round(s.cp, 4),
+                "stability_margin_cal": round(margin, 3) if margin is not None else None}
 
     def tool_set_parameter(self, name, value):
         if name not in _SETTABLE:
@@ -324,7 +331,7 @@ class ToolBridge(QObject):
             prop, dry = ws._sanitized_masses(m)
             ws._apply_motor(dict(
                 motor_designation=m["designation"], motor_avg_thrust=m["avg_thrust"],
-                motor_max_thrust=m.get("max_thrust", m["avg_thrust"] * 1.4),
+                motor_max_thrust=m.get("max_thrust", 0.0),   # 0 = not given
                 motor_total_impulse=m["total_impulse"], motor_burn_time=m["burn_time"],
                 propellant_mass=prop, propellant_mass_initial=prop, motor_dry_mass=dry,
                 motor_length=m.get("length", 0.0), custom_thrust_curve=[]))
@@ -335,15 +342,14 @@ class ToolBridge(QObject):
         return {"installed": m["designation"], "manufacturer": m.get("manufacturer"),
                 "total_impulse_Ns": m["total_impulse"], "avg_thrust_N": m["avg_thrust"],
                 "thrust_to_weight": round(s.motor_avg_thrust / (liftoff * 9.80665), 2) if liftoff else None,
-                "cg_m": round(s.cg, 4), "cp_m": round(s.cp, 4),
-                "stability_margin_cal": round(s.stability_margin, 3),
+                **self._stability(),
                 "note": "motor not in the current filter view" if idx is None else ""}
 
     def tool_get_flight_result(self):
         s = self.mw.engine.state
         if not s.max_altitude:
             return {"error": "no flight has been simulated yet"}
-        res = last_flight_summary(s)
+        res = last_flight_summary(s, self._flight())
         if self._sim_failure:
             res["abort"] = self._sim_failure
         return res

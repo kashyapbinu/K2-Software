@@ -691,7 +691,7 @@ class CFDWorkspace(QWidget):
 
         # Title
         title = QLabel("CFD Analysis")
-        title.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
+        title.setStyleSheet(theme.panel_title_qss())
         lay.addWidget(title)
 
         # ── Geometry source ──
@@ -862,7 +862,7 @@ class CFDWorkspace(QWidget):
         lay.addWidget(flow_grp)
 
         # ── Atmosphere & flow readout ──
-        atm_grp = QGroupBox("Atmosphere & Flow")
+        atm_grp = QGroupBox("Atmosphere && Flow")
         al = QFormLayout(atm_grp)
         al.setSpacing(6)
         al.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -1063,7 +1063,7 @@ class CFDWorkspace(QWidget):
         self._sl_iso.setRange(1, 100); self._sl_iso.setValue(85)
         self._sl_iso.setStyleSheet(
             f"QSlider::groove:horizontal{{background:{theme.RAISED};height:6px;border-radius:3px;}}"
-            "QSlider::handle:horizontal{background:#d2a8ff;width:14px;margin:-4px 0;border-radius:7px;}"
+            f"QSlider::handle:horizontal{{background:{theme.ACCENT};width:14px;margin:-4px 0;border-radius:7px;}}"
         )
         self._lbl_iso = QLabel("85%")
         self._lbl_iso.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:11px;min-width:30px;")
@@ -1255,17 +1255,6 @@ class CFDWorkspace(QWidget):
     # ── CENTER: tabbed viewer (3D field + polar curves) ───────────────────────
     def _build_center(self):
         self._center_tabs = QTabWidget()
-        self._center_tabs.setStyleSheet(
-            f"QTabWidget::pane{{border:none;background:{theme.BG};}}"
-            f"QTabBar::tab{{background:{theme.PANEL};color:{theme.TEXT_DIM};padding:6px 16px;"
-            f"font-size:12px;font-weight:600;border:1px solid {theme.RAISED};border-bottom:none;}}"
-            f"QTabBar::tab:selected{{background:{theme.BG};color:{theme.ACCENT};}}"
-            "QTabBar::scroller{width:30px;}"
-            f"QTabBar QToolButton{{background:{theme.RAISED};border:1px solid {theme.LINE};"
-            f"border-radius:4px;margin:2px 1px;width:22px;color:{theme.TEXT};}}"
-            f"QTabBar QToolButton:hover{{background:{theme.ACCENT_DEEP};border-color:{theme.ACCENT_DEEP};}}"
-            f"QTabBar QToolButton:disabled{{background:{theme.PANEL};border-color:{theme.RAISED};}}"
-        )
         self._center_tabs.addTab(self._build_field_view(), "3D Field")
         self._center_tabs.addTab(self._build_polar_view(), "Polars")
         # Matplotlib canvases drawn while their tab is hidden cache a blank
@@ -1301,7 +1290,7 @@ class CFDWorkspace(QWidget):
         bl.setContentsMargins(12, 0, 8, 0)
 
         lbl = QLabel("CFD Visualization")
-        lbl.setStyleSheet(f"color:{theme.ACCENT}; font-weight:700; font-size:13px;")
+        lbl.setStyleSheet(theme.panel_title_qss())
         bl.addWidget(lbl)
         bl.addStretch()
 
@@ -1423,7 +1412,7 @@ class CFDWorkspace(QWidget):
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(12, 0, 8, 0)
         lbl = QLabel("Aerodynamic Polars")
-        lbl.setStyleSheet(f"color:{theme.ACCENT}; font-weight:700; font-size:13px;")
+        lbl.setStyleSheet(theme.panel_title_qss())
         bl.addWidget(lbl)
         bl.addStretch()
         bl.addWidget(QLabel("Curve:"))
@@ -1472,7 +1461,7 @@ class CFDWorkspace(QWidget):
         lay.setSpacing(10)
 
         title = QLabel("Results")
-        title.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
+        title.setStyleSheet(theme.panel_title_qss())
         lay.addWidget(title)
 
         # ── Aerodynamic Coefficients ──
@@ -1522,7 +1511,7 @@ class CFDWorkspace(QWidget):
         lay.addWidget(coef_grp)
 
         # ── Forces & CP ──
-        force_grp = QGroupBox("Forces & Center of Pressure")
+        force_grp = QGroupBox("Forces && Center of Pressure")
         ff = QFormLayout(force_grp)
         ff.setSpacing(6)
         ff.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -1532,7 +1521,7 @@ class CFDWorkspace(QWidget):
         lay.addWidget(force_grp)
 
         # ── Solver & Flow Info ──
-        solver_grp = QGroupBox("Solver & Flow")
+        solver_grp = QGroupBox("Solver && Flow")
         sf = QFormLayout(solver_grp)
         sf.setSpacing(6)
         sf.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -2230,6 +2219,7 @@ class CFDWorkspace(QWidget):
         self._solver_thread.finished.connect(self._on_finished)
         self._solver_thread.errored.connect(self._on_error)
         self._solver_thread.log_msg.connect(self._log)
+        self.engine.analysis_started("cfd")
         self._solver_thread.start()
         self._log("Background solver thread started — UI remains responsive.")
 
@@ -2328,6 +2318,7 @@ class CFDWorkspace(QWidget):
         self._sweep_thread.finished.connect(self._on_sweep_finished)
         self._sweep_thread.errored.connect(self._on_sweep_error)
         self._sweep_thread.log_msg.connect(self._log)
+        self.engine.analysis_started("cfd")
         self._sweep_thread.start()
 
     def _on_sweep_progress(self, pt_idx, n_pts, it, rms):
@@ -2382,7 +2373,7 @@ class CFDWorkspace(QWidget):
             series = {
                 "Cl vs AoA":   (x, d.cl(), "Cl",  theme.ACCENT),
                 "Cd vs AoA":   (x, d.cd(), "Cd",  theme.ACCENT),
-                "Cm vs AoA":   (x, cm_y, cm_label,  "#a371f7"),
+                "Cm vs AoA":   (x, cm_y, cm_label,  theme.SERIES_VIOLET),
                 "CP vs AoA":   (x, d.cp_smooth(), "CP from nozzle (m)", theme.OK),
             }
             if choice == "Drag polar (Cd vs Cl)":
@@ -2394,7 +2385,7 @@ class CFDWorkspace(QWidget):
             series = {
                 "Cd vs Mach (drag rise)": (x, d.cd(), "Cd",  theme.ACCENT),
                 "Cl vs Mach":   (x, d.cl(), "Cl",  theme.ACCENT),
-                "Cm vs Mach":   (x, d.cm(), "Cm",  "#a371f7"),
+                "Cm vs Mach":   (x, d.cm(), "Cm",  theme.SERIES_VIOLET),
                 "CP vs Mach":   (x, d.cp(), "CP from nozzle (m)", theme.OK),
                 "Wave drag vs Mach": (x, d.cd_wave(), "Cd_wave", theme.ERR),
             }
@@ -2474,12 +2465,19 @@ class CFDWorkspace(QWidget):
         self._progress.setVisible(False)
         self._progress.setFormat(" %p% (%v / %m iterations)")
         n_ok = sum(1 for p in data.points if p.result.converged)
+        if data.points:
+            self.engine.analysis_done(
+                "cfd", f"Sweep, {n_ok} of {len(data.points)} points converged",
+                verdict=None if n_ok == len(data.points) else False)
+        else:
+            self.engine.analysis_abandoned("cfd")
         self._log(f"Sweep complete — {len(data.points)} points ({n_ok} converged).")
         if data.points:
             self._btn_polar_export.setEnabled(True)
             self._refresh_polar()
 
     def _on_sweep_error(self, msg):
+        self.engine.analysis_abandoned("cfd")
         for line in msg.splitlines():
             if line.strip():
                 self._log(f"ERROR: {line}")
@@ -2521,6 +2519,7 @@ class CFDWorkspace(QWidget):
             self._log(f"CSV export failed: {e}")
 
     def _stop_cfd(self):
+        self.engine.analysis_abandoned("cfd")
         # Sweep thread takes priority if it's the one running.
         if self._sweep_thread and self._sweep_thread.isRunning():
             self._sweep_thread.stop()
@@ -2582,6 +2581,9 @@ class CFDWorkspace(QWidget):
 
     def _on_finished(self, result):
         self._result = result
+        self.engine.analysis_done(
+            "cfd", f"Cd {result.cd:.3f} at Mach {result.mach:g}",
+            verdict=None if result.converged else False, result=result)
         # Core coefficients
         self._lbl_cd.setText(f"{result.cd:.5f}")
         self._lbl_cl.setText(f"{result.cl:.5f}")
@@ -2882,6 +2884,7 @@ class CFDWorkspace(QWidget):
             self._log(reason)
 
     def _on_error(self, msg: str):
+        self.engine.analysis_abandoned("cfd")
         # Show each line of the error separately so long messages are readable
         for line in msg.splitlines():
             if line.strip():
@@ -4028,7 +4031,7 @@ class CFDWorkspace(QWidget):
                                     )
                                 else:
                                     self._plotter.add_mesh(
-                                        iso, color="#d2a8ff",
+                                        iso, color=theme.SERIES_VIOLET,
                                         opacity=user_opacity * 0.8,
                                         smooth_shading=True,
                                         specular=0.4, specular_power=30,

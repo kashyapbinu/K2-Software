@@ -58,6 +58,7 @@ class SimulationEngine(QObject):
     sim_resumed = pyqtSignal()
     sim_finished = pyqtSignal()
     sim_failed = pyqtSignal(str, str)   # (title, detail) — flight diverged/unstable or bad config
+    flight_cleared = pyqtSignal()       # the last flight's record is gone (clear_flight)
     sim_tick = pyqtSignal(float)  # current sim time
 
     def __init__(self, state_engine):
@@ -110,6 +111,37 @@ class SimulationEngine(QObject):
         # ── Flight summary (core.flight_summary) ──
         self.summary = None              # FlightSummary of the last flight
         self._reset_summary_trackers()
+        if hasattr(state_engine, "flight_discarded"):
+            state_engine.flight_discarded.connect(self.clear_flight)
+
+    def clear_flight(self):
+        """Drop the last flight: the recorder, the summary, the spent stages
+        and its place on the Readiness board. A flight still running is
+        halted without a summary.
+
+        Called when the rocket it flew is gone or back on the pad
+        (RocketStateEngine.flight_discarded) and at the top of start().
+
+        Only start() used to clear these, and only after its checks had
+        passed. Opening a project or pressing Reset left the old rocket's
+        28,642 recorded points, its summary and its replay behind: Results
+        offered them, the Mission Visualizer replayed them, and the
+        technical report printed the new rocket with the old apogee while
+        the Readiness board said the flight was not run.
+        """
+        self._timer.stop()
+        self._running = False
+        self._paused = False
+        self.history.clear()
+        self.summary = None
+        self._state_vec = None
+        self.spent_stages = []
+        self.spent_stage_results = []
+        # The rules check judged this flight, so it goes with it.
+        self.engine.readiness.forget("flight")
+        self.engine.readiness.forget("rules")
+        self.engine.readiness_changed.emit()
+        self.flight_cleared.emit()
 
     def _reset_summary_trackers(self):
         self._sum_apogee = 0.0
@@ -147,6 +179,13 @@ class SimulationEngine(QObject):
         # Select integrator
         self.integrator = get_integrator(s.integrator_name)
         logger.info(f"Using {self.integrator.name} integrator")
+
+        # From here on the last flight is overwritten, so it stops being a
+        # result now, whether or not this one gets off the pad. The Readiness
+        # stamp used to be dropped only once every check below had passed: a
+        # refused start wiped the recorder and left the board showing the
+        # old apogee as current.
+        self.clear_flight()
 
         # Reset flight state
         self.engine.update(
@@ -301,6 +340,8 @@ class SimulationEngine(QObject):
         self._paused = False
         self._timer.start()
 
+        # This flight is stamped with the rocket as it stands on the pad now.
+        self.engine.analysis_started("flight")
         self.sim_started.emit()
         logger.info(f"Simulation started (dt={s.sim_dt}s, speed={s.sim_speed}x, integrator={self.integrator.name})")
         self.engine.log_message.emit(f"Simulation started — Motor: {s.motor_designation} | Integrator: {self.integrator.name}")
@@ -322,6 +363,15 @@ class SimulationEngine(QObject):
             logger.info("Simulation resumed")
 
     def stop(self):
+        """Halt the flight in progress. Nothing happens when none is running.
+
+        Called after a landing, it used to mark the finished flight
+        Terminated and rebuild its summary as a stopped one (no landing
+        velocity, drift or descent time) while the Readiness board went on
+        calling it current.
+        """
+        if not self._running:
+            return
         self._timer.stop()
         self._running = False
         self._paused = False
@@ -330,6 +380,10 @@ class SimulationEngine(QObject):
                           sim_phase=FlightPhase.TERMINATED.value)
         if self._state_vec is not None:
             self._build_summary(self.engine.state.sim_time)
+        else:
+            # Stopped before the first step: there is no flight to summarise.
+            # The Flight stage was left "running" for the rest of the session.
+            self.engine.analysis_abandoned("flight")
         self.event_mgr.fire(SimEvent.SIM_END, {
             "time": self.engine.state.sim_time,
             "reason": "user_stop",
@@ -772,6 +826,9 @@ class SimulationEngine(QObject):
             "cd": cd, "cp": cp, "alpha": alpha, "mach": mach,
             "q_dyn": q_dyn, "F_drag": F_drag, "stab_margin": stab_margin,
             "wind_vx": wind_vx, "thrust": thrust, "F_normal": F_normal,
+            # For the flight recorder (replay force vectors).
+            "wind_vy": wind_vy, "alpha_total": alpha_total,
+            "normal": (normal_x, normal_y, normal_z),
         }
 
         # Attitude kinematics. `yaw_rate` is the BODY rate about the yaw axis
@@ -862,6 +919,14 @@ class SimulationEngine(QObject):
                 landing_velocity=landing_v),
             **rec,
         )
+        # Only a flight that reached the ground is a result (core.readiness);
+        # a stopped or aborted one leaves the Flight stage "not run".
+        if landed:
+            self.engine.analysis_done(
+                "flight", f"Apogee {self._sum_apogee:,.0f} m",
+                verdict=not self.summary.warnings)
+        else:
+            self.engine.analysis_abandoned("flight")
 
     def _estimate_inertia(self, mass: float, s) -> float:
         """Fallback pitch inertia estimate: thin rod Iyy = m*L^2/12."""
@@ -1270,7 +1335,11 @@ class SimulationEngine(QObject):
             sim_phase=self._phase.value,
             flight_computer_state=self._phase.fc_state,
             parachute_deployed=self._canopy_open,
-            cd=cd,
+            # (The instant's drag coefficient goes to the recorder below, not
+            # to state.cd. That field is the rocket's own, saved with the
+            # project and read by Monte Carlo as the centre of its drag
+            # perturbation; a flight used to leave it at its last instant's
+            # value: 1.57 under the canopy for the canonical rocket's 0.45.)
             axial_stress=struct_res['axial'],
             hoop_stress=struct_res['hoop'],
             von_mises_stress=struct_res['von_mises'],
@@ -1346,6 +1415,12 @@ class SimulationEngine(QObject):
             wall_temperature=wall_temp,
             flutter_margin=flutter_margin,
             propellant_mass=new_prop_mass,
+            aoa=aero.get("alpha_total", 0.0),
+            lift_x=aero.get("normal", (0.0, 0.0, 0.0))[0],
+            lift_y=aero.get("normal", (0.0, 0.0, 0.0))[1],
+            lift_z=aero.get("normal", (0.0, 0.0, 0.0))[2],
+            wind_x=aero.get("wind_vx", 0.0),
+            wind_y=aero.get("wind_vy", 0.0),
         )
 
         self.sim_tick.emit(t + adaptive_dt)

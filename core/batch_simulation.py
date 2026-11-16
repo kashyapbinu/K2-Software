@@ -49,6 +49,10 @@ _GUST_W = (0.7, 1.7, 3.1)
 _GUST_AMP_COEFF = 0.0006
 
 
+class StagedRocketNotSupported(ValueError):
+    """The rocket has more than one stage, which this engine does not fly."""
+
+
 # Substrings that mark a run as a numerical artifact rather than a real flight.
 # Anything else run_batch_simulation reports (no thrust, timeout, recovery
 # failure) is a genuine outcome: the trajectory it produced is real, even if
@@ -109,6 +113,11 @@ class BatchSimConfig:
 
     # Airbrake drag area (Cd × A, m²), out from burnout to apogee. 0 = none.
     airbrake_cd_area: float = 0.0
+
+    # Airframe wall (m) and its material. No flight reads them; the
+    # optimiser's structural check does. 0 / "" = not known.
+    wall_thickness: float = 0.0
+    material_name: str = ""
 
     # ── Mass ──────────────────────────────────────────────────────
     dry_mass: float = 0.0
@@ -172,7 +181,21 @@ class BatchSimConfig:
         """
         Build a BatchSimConfig from a RocketState (or any object exposing
         the same attribute names).
+
+        Raises StagedRocketNotSupported for a rocket with two or more stages.
+        This engine flies one stage, from the flat state fields, and those
+        hold one motor (whichever stage the Propulsion tab last showed). It
+        used to take a staged rocket anyway: Monte Carlo, the optimiser and
+        the apogee tools flew a two-stage stack on that one motor and
+        reported 1,256 m for a rocket the Simulation tab takes to 2,536 m.
+        Every caller reports the refusal through its own failure path.
         """
+        stages = getattr(state, "stages_config", None) or []
+        if len(stages) >= 2:
+            raise StagedRocketNotSupported(
+                f"This rocket has {len(stages)} stages. Monte Carlo, the optimiser "
+                "and the apogee tools fly a single stage only, so they cannot "
+                "fly it yet. Fly a staged rocket in the Simulation tab.")
         return cls(
             # Geometry
             length=state.length,
@@ -194,6 +217,8 @@ class BatchSimConfig:
             extra_fin_sets=[dict(f) for f in getattr(state, "extra_fin_sets", None) or []],
             transitions=[dict(t) for t in getattr(state, "transitions", None) or []],
             airbrake_cd_area=getattr(state, "airbrake_cd_area", 0.0) or 0.0,
+            wall_thickness=getattr(state, "wall_thickness", 0.0) or 0.0,
+            material_name=getattr(state, "material_name", "") or "",
             # Mass
             dry_mass=state.dry_mass,
             propellant_mass=getattr(state, "propellant_mass_initial",

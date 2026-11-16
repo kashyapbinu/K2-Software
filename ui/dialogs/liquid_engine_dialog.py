@@ -345,7 +345,8 @@ class LiquidEngineDialog(QDialog):
     def _rocket_mass(self):
         """Full-vehicle wet mass from the parent workspace, if reachable."""
         try:
-            return float(self.parent().engine.state.total_mass())
+            # Liftoff mass; total_mass() is the burnt-out mass after a flight.
+            return float(self.parent().engine.state.liftoff_mass())
         except Exception:
             return 0.0
 
@@ -581,7 +582,7 @@ class LiquidEngineDialog(QDialog):
         ax.set_xlim(0, 10)
         ax.set_ylim(0, 6)
         ax.axis("off")
-        ax.set_title("Engine Flow Schematic", color=theme.ACCENT, fontsize=12, fontweight="bold")
+        ax.set_title("Engine Flow Schematic", color=theme.TEXT, fontsize=11, loc="left")
 
         def box(x, y, w, h, text, color):
             ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.05",
@@ -602,11 +603,11 @@ class LiquidEngineDialog(QDialog):
             arrow(4.0, 4.5, 4.8, 3.7)
         # Fuel row
         box(0.2, 1.0, 1.6, 1.0, f"Fuel tank\n{d.fuel_mass:.1f} kg", theme.ACCENT)
-        box(2.4, 1.0, 1.6, 1.0, f"Feed\n{d.mdot_fuel:.2f} kg/s", "#ffa657")
+        box(2.4, 1.0, 1.6, 1.0, f"Feed\n{d.mdot_fuel:.2f} kg/s", theme.ACCENT_HOVER)
         arrow(1.8, 1.5, 2.4, 1.5)
         arrow(4.0, 1.5, 4.8, 2.3)
         # injector / chamber / nozzle
-        box(4.8, 2.3, 1.6, 1.4, f"Injector\n{d.inj_n_holes} holes\nΔP {d.inj_dp/1e5:.1f} bar", "#d2a8ff")
+        box(4.8, 2.3, 1.6, 1.4, f"Injector\n{d.inj_n_holes} holes\nΔP {d.inj_dp/1e5:.1f} bar", theme.SERIES_VIOLET)
         box(6.8, 2.3, 1.4, 1.4, f"Chamber\nPc {d.chamber_pressure/1e5:.0f} bar\nØ{d.chamber_diameter*1000:.0f}mm", theme.ERR)
         box(8.4, 2.5, 1.4, 1.0, f"Nozzle\nε {d.expansion_ratio:.0f}\nIsp {d.isp:.0f}s", theme.OK)
         arrow(6.4, 3.0, 6.8, 3.0)
@@ -622,14 +623,14 @@ class LiquidEngineDialog(QDialog):
         c.clear()
         ax = c.ax
         ax.set_facecolor(theme.BG)
-        ax.set_title("Mass Breakdown", color=theme.ACCENT, fontsize=12, fontweight="bold")
+        ax.set_title("Mass Breakdown", color=theme.TEXT, fontsize=11, loc="left")
         dry = max(d.dry_mass, 1e-6)
         eng = 0.30 * dry
         tank = 0.50 * dry
         struct = 0.20 * dry
         vals = [d.ox_mass, d.fuel_mass, eng, tank, struct]
         labels = ["Oxidizer", "Fuel", "Engine dry", "Tank", "Structural"]
-        colors = [theme.ACCENT, theme.ACCENT, "#d2a8ff", theme.ERR, theme.TEXT_DIM]
+        colors = [theme.ACCENT, theme.ACCENT, theme.SERIES_VIOLET, theme.ERR, theme.TEXT_DIM]
         vals, labels, colors = zip(*[(v, l, col) for v, l, col in
                                      zip(vals, labels, colors) if v > 1e-6])
         ax.pie(vals, labels=labels, colors=colors, autopct="%1.1f%%",

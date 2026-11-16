@@ -244,3 +244,53 @@ def test_simulation_tab_imports_a_sounding():
                           env=env, capture_output=True, text=True, timeout=180)
     assert proc.returncode == 0 and "OK" in proc.stdout, \
         (proc.stdout + proc.stderr)[-3000:]
+
+
+_UI_AIR = textwrap.dedent("""
+    import sys, os, tempfile
+    sys.path.insert(0, {root!r})
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication([])
+    from core.rocket_state import RocketStateEngine
+    from core.simulation_engine import SimulationEngine
+    from environment.atmosphere_model import launch_site_atmosphere
+    from ui.workspaces.simulation_workspace import SimulationWorkspace
+    from validation.cases.rocket_canonical import canonical_state
+
+    path = os.path.join(tempfile.mkdtemp(), "epz.txt")
+    with open(path, "w") as f:
+        f.write({uwyo!r})
+
+    for ground_t in (0.0, 300.0):            # standard day, then a measured pad
+        s = canonical_state(); s.launch_altitude = 1401.0
+        s.ground_temperature = ground_t
+        engine = RocketStateEngine(s)
+        ws = SimulationWorkspace(engine, SimulationEngine(engine))
+        ws._on_import_sounding(path)
+        st = engine.state
+        pad_t = launch_site_atmosphere(1401.0, 0.0, st.atmosphere_profile).temperature(0.0)
+        # The sounding is the air: the box must not claim a standard day,
+        # and the pad temperature shown is the sounding's.
+        assert not ws.isa_check.isChecked(), "ISA still ticked under a sounding"
+        assert abs(ws.temp_spin.value() - pad_t) < 0.06, (ws.temp_spin.value(), pad_t)
+        assert not ws.temp_spin.isEnabled() and not ws.isa_check.isEnabled()
+        # Showing it wrote nothing back.
+        assert st.ground_temperature == ground_t, st.ground_temperature
+        ws._on_clear_sounding()
+        assert ws.isa_check.isChecked() == (ground_t == 0.0)
+        assert ws.temp_spin.isEnabled() == (ground_t > 0.0)
+        from environment.atmosphere_model import isa_temperature
+        shown = ground_t or isa_temperature(1401.0)
+        assert abs(ws.temp_spin.value() - shown) < 0.06, (ws.temp_spin.value(), shown)
+        assert st.ground_temperature == ground_t
+    print("OK")
+""")
+
+
+def test_isa_box_is_not_ticked_while_a_sounding_sets_the_air():
+    root = Path(__file__).resolve().parents[2]
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    proc = subprocess.run([sys.executable, "-c", _UI_AIR.format(root=str(root), uwyo=UWYO)],
+                          env=env, capture_output=True, text=True, timeout=180)
+    assert proc.returncode == 0 and "OK" in proc.stdout, \
+        (proc.stdout + proc.stderr)[-3000:]

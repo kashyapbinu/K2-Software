@@ -25,15 +25,11 @@ DEFAULTS = {
     "sim/launch_sites": "",           # user launch sites, JSON (core.launch_sites)
     "rules/user_sets": "",            # user rule sets, JSON (core.rules)
     "display/units": "SI",            # SI | imperial (ui.units)
-    # AI assistant (ai/providers.py). Keys live in QSettings — plaintext on disk.
-    "ai/provider": "auto",            # auto | gemini | ollama | custom
+    # AI assistant (ai/providers.py): Gemini only. The key lives in QSettings,
+    # plaintext on disk. Older installs may still hold ai/provider,
+    # ai/ollama_* and ai/custom_*; nothing reads them.
     "ai/gemini_key": "",
     "ai/gemini_model": "gemini-3.6-flash",
-    "ai/ollama_url": "http://localhost:11434",
-    "ai/ollama_model": "qwen3:1.7b",
-    "ai/custom_url": "",
-    "ai/custom_key": "",
-    "ai/custom_model": "",
     "ai/panel_visible": True,
 }
 

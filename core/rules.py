@@ -33,6 +33,7 @@ logger = logging.getLogger("K2.Rules")
 BUILTIN_DIR = Path(__file__).resolve().parents[1] / "data" / "rules"
 
 PASS, FAIL, NOT_EVALUATED, UNKNOWN = "pass", "fail", "not evaluated", "unknown quantity"
+NO_LIMIT = "no limit entered"         # RuleResult.note of a rule waiting for its number
 COMPARISONS = (">=", "<=", "between")
 
 
@@ -193,10 +194,16 @@ def evaluate(rule: Rule, summaries, context: Context = None) -> RuleResult:
     if problems:
         status = UNKNOWN if rule.quantity not in QUANTITIES else NOT_EVALUATED
         return RuleResult(rule, status, note="; ".join(problems))
-    if rule.limit is None or (rule.comparison == "between" and rule.limit_high is None):
-        return RuleResult(rule, NOT_EVALUATED, note="no limit entered")
     q = QUANTITIES[rule.quantity]
     values = [q.get(s, context) for s in flights]
+    if rule.limit is None or (rule.comparison == "between" and rule.limit_high is None):
+        # Still not judged, but a single flight's value is reported. It used
+        # to come back empty, so the built-in template (no limits) showed a
+        # table of dashes and looked as if the check did nothing.
+        v = None if many else values[0]
+        if v is not None and not math.isfinite(v):
+            v = None
+        return RuleResult(rule, NOT_EVALUATED, value=v, note=NO_LIMIT)
     checked = [(v, _check(rule, v)) for v in values if v is not None and math.isfinite(v)]
     if not checked:
         why = q.help or "the flight did not produce this quantity"
@@ -243,8 +250,15 @@ def dump_user_rule_sets(sets) -> str:
 
 def context_from_state(state, target_apogee: float = 0.0) -> Context:
     from core.constants import G_EARTH
-    mass = state.total_mass() if callable(getattr(state, "total_mass", None)) else 0.0
+    # Liftoff mass, not total_mass(): the rules are checked after the flight,
+    # when total_mass() is the burnt-out rocket. Liftoff thrust-to-weight was
+    # judged with that (18.52 for the canonical rocket, which lifts off at
+    # 15.02), so a minimum thrust-to-weight rule passed rockets it should fail.
+    mass = state.liftoff_mass() if callable(getattr(state, "liftoff_mass", None)) else 0.0
     twr = None
-    if mass > 0 and getattr(state, "motor_avg_thrust", 0.0) > 0:
-        twr = state.motor_avg_thrust / (mass * G_EARTH)
+    # The motor that lifts it off: the first stage to light on a staged rocket.
+    thrust = (state.liftoff_avg_thrust() if callable(getattr(state, "liftoff_avg_thrust", None))
+              else getattr(state, "motor_avg_thrust", 0.0))
+    if mass > 0 and thrust > 0:
+        twr = thrust / (mass * G_EARTH)
     return Context(target_apogee=target_apogee, liftoff_thrust_to_weight=twr)

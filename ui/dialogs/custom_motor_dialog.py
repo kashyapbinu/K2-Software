@@ -187,7 +187,7 @@ class CustomMotorDialog(QDialog):
             s.valueChanged.connect(self._update_visual)
 
         # Nozzle + ambient
-        nozzle_group = QGroupBox("Nozzle & Ambient")
+        nozzle_group = QGroupBox("Nozzle && Ambient")
         nf = QFormLayout(nozzle_group)
         self.spin_nthroat = QDoubleSpinBox(); self.spin_nthroat.setRange(1, 100); self.spin_nthroat.setValue(9.0)
         self.spin_nexit = QDoubleSpinBox(); self.spin_nexit.setRange(1, 200); self.spin_nexit.setValue(20.0)
@@ -308,7 +308,8 @@ class CustomMotorDialog(QDialog):
 
     def _rocket_mass(self):
         try:
-            return float(self.parent().engine.state.total_mass())
+            # Liftoff mass; total_mass() is the burnt-out mass after a flight.
+            return float(self.parent().engine.state.liftoff_mass())
         except Exception:
             return 0.0
 
@@ -557,12 +558,12 @@ class CustomMotorDialog(QDialog):
             return
         c = self.canvas_pie; c.clear(); ax = c.ax
         ax.set_facecolor(theme.BG)
-        ax.set_title("Mass Breakdown", color=theme.ACCENT, fontsize=12, fontweight="bold")
+        ax.set_title("Mass Breakdown", color=theme.TEXT, fontsize=11, loc="left")
         inert = max(s["dry_mass"], 1e-6)
         case = 0.55 * inert; nozzle = 0.25 * inert; struct = 0.20 * inert
         vals = [s["prop_mass"], case, nozzle, struct]
         labels = ["Propellant", "Casing", "Nozzle", "Structural"]
-        colors = [theme.ACCENT, theme.ERR, "#d2a8ff", theme.TEXT_DIM]
+        colors = [theme.ACCENT, theme.ERR, theme.SERIES_VIOLET, theme.TEXT_DIM]
         vals, labels, colors = zip(*[(v, l, col) for v, l, col in
                                      zip(vals, labels, colors) if v > 1e-6])
         ax.pie(vals, labels=labels, colors=colors, autopct="%1.1f%%",

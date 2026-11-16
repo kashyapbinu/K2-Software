@@ -118,7 +118,7 @@ class DynamicsWorkspace(QWidget):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(12,14,12,14); lay.setSpacing(12)
 
         t = QLabel("Dynamic Analysis")
-        t.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
+        t.setStyleSheet(theme.panel_title_qss())
         lay.addWidget(t)
 
         g1 = QGroupBox("Flight Envelope");        f1 = QFormLayout(); f1.setSpacing(8)
@@ -168,7 +168,7 @@ class DynamicsWorkspace(QWidget):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
         bar = QWidget(); bar.setStyleSheet(f"background:{theme.PANEL}; border-bottom:1px solid {theme.RAISED};")
         bar.setFixedHeight(44); bl = QHBoxLayout(bar); bl.setContentsMargins(12,0,8,0)
-        lbl = QLabel("Dynamic Analysis Plots"); lbl.setStyleSheet(f"color:{theme.ACCENT};font-weight:700;font-size:13px;")
+        lbl = QLabel("Dynamic Analysis Plots"); lbl.setStyleSheet(theme.panel_title_qss())
         bl.addWidget(lbl); bl.addStretch(); lay.addWidget(bar)
 
         self._tabs = QTabWidget(); self._tabs.setDocumentMode(True)
@@ -229,7 +229,7 @@ class DynamicsWorkspace(QWidget):
             f"color:{theme.TEXT};font-family:'Cascadia Code',monospace;font-size:11px;"
             f"background:{theme.PANEL};border:1px solid {theme.RAISED};border-radius:4px;padding:6px;")
         ml.addWidget(self._mode_info)
-        self._tabs.addTab(mw, "〰 Mode Shapes")
+        self._tabs.addTab(mw, "Mode Shapes")
 
         # Flight Envelope
         ew = QWidget(); el = QVBoxLayout(ew); el.setContentsMargins(8,8,8,8)
@@ -251,25 +251,22 @@ class DynamicsWorkspace(QWidget):
         sc.setFrameShape(QFrame.Shape.NoFrame)
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(12,14,12,14); lay.setSpacing(10)
         t = QLabel("Flight Safety Assessment")
-        t.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
+        t.setStyleSheet(theme.panel_title_qss())
         lay.addWidget(t)
 
         # Overall verdict banner
-        self.lbl_overall = QLabel("RUN ASSESSMENT")
-        self.lbl_overall.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_overall.setStyleSheet("font-weight:800;font-size:16px;padding:10px;"
-                                       f"border-radius:6px;background:{theme.PANEL};color:{theme.LINE_STRONG};")
-        lay.addWidget(self.lbl_overall)
-
-        _note = QLabel(
-            "Note: This assessment is an estimated qualitative evaluation based on "
-            "simulation outputs and predefined heuristics. It is intended for "
-            "informational and comparative purposes only and should not be used for "
-            "engineering certification, safety-critical decisions, or as a substitute "
-            "for professional structural analysis and validation.")
-        _note.setWordWrap(True)
-        _note.setStyleSheet(f"color:{theme.TEXT_FAINT};font-size:9px;padding:2px 2px 4px 2px;")
-        lay.addWidget(_note)
+        # One-word verdict as a plain row (was a centred 800-weight badge with
+        # an emoji, over a five-line disclaimer in 9 px type - now the tooltip).
+        self.lbl_overall = QLabel("Not run")
+        self.lbl_overall.setStyleSheet(theme.status_qss())
+        self.lbl_overall.setToolTip(
+            "A qualitative estimate from simulation outputs and fixed "
+            "heuristics, for comparing designs. It is not a certification and "
+            "does not replace a structural analysis and its validation.")
+        fo = QFormLayout(); fo.setSpacing(6)
+        fo.setContentsMargins(8, 0, 0, 0)
+        fo.addRow("Overall:", self.lbl_overall)
+        lay.addLayout(fo)
 
         # Flutter
         gf = QGroupBox("Flutter");        ff = QFormLayout(); ff.setSpacing(6)
@@ -376,9 +373,9 @@ class DynamicsWorkspace(QWidget):
         self.sp_vmax.setValue(tr["vmax"])
         self.sp_mmax.setValue(max(0.1, tr["mmax"]))
         self.lbl_simsrc.setText(
-            f"✓ Using Last Simulation\nV={tr['vmax']:.0f} m/s  M={tr['mmax']:.2f}  "
+            f"Using last simulation\nV={tr['vmax']:.0f} m/s  M={tr['mmax']:.2f}  "
             f"Q={tr['qmax']/1000:.1f} kPa  apogee={tr['apogee']:.0f} m")
-        self.lbl_simsrc.setStyleSheet(f"color:{theme.OK};font-size:10px;font-weight:600;")
+        self.lbl_simsrc.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:11px;")
         if not silent:
             self._status.setText(f"Loaded from sim: V_max={tr['vmax']:.0f} m/s, "
                                  f"M_max={tr['mmax']:.2f}, apogee={tr['apogee']:.0f} m")
@@ -408,6 +405,7 @@ class DynamicsWorkspace(QWidget):
             (assembly, self.sp_vmax.value(), self.sp_mmax.value()), "flutter")
         self._thread.finished.connect(self._on_result)
         self._thread.errored.connect(self._on_error)
+        self.engine.analysis_started("flutter")
         self._thread.start()
 
     def _run_vibration(self):
@@ -534,6 +532,11 @@ class DynamicsWorkspace(QWidget):
         if rtype == "flutter":
             self._flutter_result = result
             self._render_flutter(result)
+            vf, vmax = result.flutter_speed_mps, self.sp_vmax.value()
+            self.engine.analysis_done(
+                "flutter",
+                f"Flutter at {vf:,.0f} m/s" if vf < 1e6 else "No flutter found",
+                verdict=(vf >= 1e6 or vmax <= 0 or vf > vmax))
             self._tabs.setCurrentIndex(0)
         elif rtype == "vibration":
             self._vib_result = result
@@ -556,6 +559,7 @@ class DynamicsWorkspace(QWidget):
             self._run_next_in_chain()
 
     def _on_error(self, msg):
+        self.engine.analysis_abandoned("flutter")
         self._busy(False)
         self._pending = []
         self._status.setText(f"Error: {msg}")
@@ -933,7 +937,7 @@ class DynamicsWorkspace(QWidget):
             ax.fill_betweenx(alts, 0, vf, color=theme.OK, alpha=0.06)          # safe
             ax.plot(vf, alts, color=theme.ACCENT, linewidth=2.0, label="Flutter boundary")
         if vdiv is not None:
-            ax.axvline(vdiv, color="#bc8cff", linestyle="--", linewidth=1.4,
+            ax.axvline(vdiv, color=theme.SERIES_VIOLET, linestyle="--", linewidth=1.4,
                        label=f"Divergence {vdiv:.0f} m/s")
 
         # Actual trajectory + crossing checks
@@ -957,7 +961,7 @@ class DynamicsWorkspace(QWidget):
             else:
                 vcol = {"SAFE": theme.OK, "CAUTION": theme.WARN, "UNSAFE": theme.ERR}[verdict]
                 title = f"Flight Envelope — {verdict}" + (f" ({reason})" if reason else "")
-            ax.set_title(title, color=vcol, fontsize=12, fontweight="bold", pad=10)
+            ax.set_title(title, color=vcol, fontsize=11, pad=8, loc="left")
             ax.legend(facecolor=theme.PANEL, edgecolor=theme.LINE, labelcolor=theme.TEXT, fontsize=8, loc="best")
             self._env_plot.figure.tight_layout(); self._env_plot.canvas.draw()
         self._envelope_verdict = verdict
@@ -1032,16 +1036,14 @@ class DynamicsWorkspace(QWidget):
                  + 0.15 * res_score + 0.10 * rev_score)
         # Qualitative 3-level verdict (no numeric score shown to the user).
         if score >= 75:
-            rating, col = "✅ Good", theme.OK
+            rating, col = "Good", theme.OK
         elif score >= 50:
-            rating, col = "⚠️ Marginal", theme.WARN
+            rating, col = "Marginal", theme.WARN
         else:
-            rating, col = "❌ Poor", theme.ERR
+            rating, col = "Poor", theme.ERR
         self._safety_score = score; self._safety_rating = rating
         self.lbl_overall.setText(rating)
-        self.lbl_overall.setStyleSheet(
-            f"font-weight:800;font-size:16px;padding:10px;border-radius:6px;"
-            f"background:#16161a;color:{col};border:1px solid {col}66;")
+        self.lbl_overall.setStyleSheet(theme.status_qss(col))
 
         self._update_warnings(vmax, mmax)
 
@@ -1071,9 +1073,8 @@ class DynamicsWorkspace(QWidget):
         except Exception:
             pass
         try:
-            self.lbl_overall.setText("RUN ASSESSMENT")
-            self.lbl_overall.setStyleSheet("font-weight:800;font-size:16px;padding:10px;"
-                                           f"border-radius:6px;background:{theme.PANEL};color:{theme.LINE_STRONG};")
+            self.lbl_overall.setText("Not run")
+            self.lbl_overall.setStyleSheet(theme.status_qss())
         except Exception:
             pass
 
@@ -1100,7 +1101,7 @@ class DynamicsWorkspace(QWidget):
                                      "run a modal analysis for real modes"))
 
         if not warns:
-            self.lbl_warnings.setText("✓ All consistency checks passed.")
+            self.lbl_warnings.setText("All consistency checks passed.")
             self.lbl_warnings.setStyleSheet(f"color:{theme.OK};font-size:11px;font-weight:600;")
             return
         has_bad = any(s == "UNSAFE" for s, _ in warns)

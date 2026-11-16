@@ -24,8 +24,7 @@ QToolButton {{
     color: {theme.TEXT_DIM};
     font-size: 11px;
     font-weight: 600;
-    letter-spacing: 1px;
-    padding: 8px 10px;
+    padding: 7px 10px;
     text-align: left;
 }}
 QToolButton:hover {{ color: {theme.TEXT_BRIGHT}; }}
@@ -43,11 +42,11 @@ class CollapsibleSection(QWidget):
         self.setObjectName("CollapsibleSection")
         self.setStyleSheet(
             f"#CollapsibleSection {{ background-color: {theme.PANEL};"
-            f" border: 1px solid {theme.LINE}; border-radius: 6px; }}"
+            f" border: 1px solid {theme.LINE}; border-radius: 3px; }}"
         )
 
         self._header = QToolButton()
-        self._header.setText(title.upper())
+        self._header.setText(title)
         self._header.setCheckable(True)
         self._header.setChecked(expanded)
         self._header.setStyleSheet(_header_qss())
@@ -69,7 +68,7 @@ class CollapsibleSection(QWidget):
     def retheme(self):
         self.setStyleSheet(
             f"#CollapsibleSection {{ background-color: {theme.PANEL};"
-            f" border: 1px solid {theme.LINE}; border-radius: 6px; }}"
+            f" border: 1px solid {theme.LINE}; border-radius: 3px; }}"
         )
         self._header.setStyleSheet(_header_qss())
 

@@ -147,6 +147,35 @@ def test_dual_deploy_summary_reports_each_canopy():
     assert s.recovery_shock_force >= max(drogue["peak_force"], main["peak_force"])
 
 
+def test_canopies_that_open_together_measure_no_descent_rate_at_apogee():
+    """Two canopies opening in one step: neither came down alone, so neither
+    has a descent rate until touchdown. The first used to be stamped with
+    |vz| at the instant the second opened, which at apogee is about zero."""
+    sys_ = RecoverySystem.from_canopies([{**DROGUE, "delay": 0.0},
+                                         {**MAIN, "event": "apogee"}])
+    sys_.step(1.0, 1000.0, 1.0, 1.0, 1.0)
+    assert len(sys_.step(1.1, 1000.0, -0.3, 1.0, 0.3)) == 2     # both open at apogee
+    assert [c.descent_rate for c in sys_.canopies] == [None, None]
+    sys_.touchdown(5.0)
+    assert [c.descent_rate for c in sys_.canopies] == [5.0, 5.0]
+
+
+@pytest.mark.sim
+@pytest.mark.parametrize("canopies", [
+    [{**DROGUE, "delay": 0.0}, {**MAIN, "event": "apogee"}],
+    [{**DROGUE, "delay": 0.0}, {**MAIN, "altitude": 99999.0}],
+], ids=["both-at-apogee", "main-trigger-above-apogee"])
+def test_a_flight_with_no_drogue_only_descent_reports_no_drogue_rate(canopies):
+    """The summary's drogue descent rate was 0.3 m/s here (the vertical speed
+    at apogee), which a rules check then judged as the drogue's descent."""
+    s = FlightSummary.from_batch(_batch(canopies))
+    first, second = s.canopies
+    assert first["deploy_time"] == second["deploy_time"]
+    assert s.drogue_descent_rate is None
+    assert first["descent_rate"] == pytest.approx(s.landing_velocity)
+    assert second["descent_rate"] == pytest.approx(s.landing_velocity)
+
+
 # ── Design, save/load, import ───────────────────────────────────────────────
 
 def test_parachute_deploy_settings_save_and_reload():

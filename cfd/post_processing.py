@@ -15,12 +15,18 @@ from typing import Optional, Dict, List, Tuple, TYPE_CHECKING
 import numpy as np
 import pyvista as pv
 
-# ── Optional scipy imports with graceful fallback ────────────────────────────
-try:
-    from scipy.spatial import cKDTree
-    _HAS_SCIPY = True
-except ImportError:
-    _HAS_SCIPY = False
+def _ckdtree():
+    """scipy.spatial.cKDTree, or None when scipy is not installed.
+
+    Imported on first use. This module loads with the CFD tab at startup, and
+    the import at module level made every launch pay for scipy.spatial
+    whether or not a CFD result was ever smoothed.
+    """
+    try:
+        from scipy.spatial import cKDTree
+    except ImportError:
+        return None
+    return cKDTree
 
 if TYPE_CHECKING:
     from cfd.solvers.base import CFDResult
@@ -332,7 +338,8 @@ def gaussian_smooth_surface(
         logger.warning(f"gaussian_smooth_surface: '{name}' not found in mesh.")
         return mesh
 
-    if not _HAS_SCIPY:
+    cKDTree = _ckdtree()
+    if cKDTree is None:
         logger.warning("scipy not available — skipping Gaussian smoothing.")
         return mesh
 
@@ -422,7 +429,8 @@ def smooth_volume_field(
         )
         return mesh
 
-    if not _HAS_SCIPY:
+    cKDTree = _ckdtree()
+    if cKDTree is None:
         logger.warning("scipy not available — skipping volume smoothing.")
         return mesh
 
@@ -998,7 +1006,8 @@ def compute_force_vectors(
         # Reduces noisy spikes from solver discretization while
         # preserving the large-scale physical pressure distribution.
         if smoothing_iterations > 0 and n_pts > 20:
-            if _HAS_SCIPY:
+            cKDTree = _ckdtree()
+            if cKDTree is not None:
                 try:
                     tree = cKDTree(pts)
                     k = min(12, n_pts - 1)

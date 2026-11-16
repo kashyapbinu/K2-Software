@@ -210,9 +210,14 @@ class RecoverySystem:
                     if c.event == APOGEE or altitude <= c.altitude:
                         c.triggered_at = t
                 if c.triggered_at is not None and t - c.triggered_at >= c.delay:
-                    # The canopy already open measures its descent rate here.
+                    # A canopy that opened on an earlier step measures its
+                    # descent rate here. One opening in this same step has
+                    # not come down under itself alone, so it has none yet
+                    # (touchdown() gives it the landing rate). It used to be
+                    # stamped too: two canopies at apogee gave the first a
+                    # "descent rate" of the 0.3 m/s the vehicle had there.
                     for prev in self._open:
-                        if prev.descent_rate is None:
+                        if prev.descent_rate is None and prev.deploy_time < t:
                             prev.descent_rate = abs(vz)
                     c.dynamics.deploy(t)
                     c.deploy_time, c.deploy_altitude = t, altitude
@@ -244,6 +249,28 @@ class RecoverySystem:
 
     def reports(self) -> list:
         return [c.report() for c in self.canopies]
+
+
+def final_descent_rate(state, rho: float = 1.225):
+    """Steady descent rate (m/s) of the burnt-out vehicle under every canopy
+    it carries (RecoverySystem.for_state: the Design tab's parachutes, else
+    the two Simulation-tab slots), in air of density *rho*. None when it has
+    no canopy. The airframe's own drag is left out, so this is a little
+    faster than the touchdown the flight reports.
+
+    For the landing envelope the 3D views draw before and during a flight.
+    Each worked its own figure out as sqrt(2 m g / (rho x main_cd_area)) with
+    m = dry mass + propellant (no motor case, and propellant that has burnt
+    by then) and the area floored at 0.1 m². A design with one parachute has
+    no main slot, so its envelope was drawn for a fall under an invented
+    0.1 m² canopy: 34 m/s for the canonical rocket on one 2.5 m² parachute,
+    which comes down at 6.2 m/s.
+    """
+    area = sum(c.cd_area for c in RecoverySystem.for_state(state).canopies)
+    mass = (getattr(state, "dry_mass", 0.0) or 0.0) + (getattr(state, "motor_dry_mass", 0.0) or 0.0)
+    if area <= 0.0 or mass <= 0.0 or rho <= 0.0:
+        return None
+    return math.sqrt(2.0 * mass * G0 / (rho * area))
 
 
 def recovery_phase_parameters(system: RecoverySystem) -> tuple:

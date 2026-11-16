@@ -60,6 +60,12 @@ class StageConfig:
     dry_mass: float = 0.0              # airframe dry mass (excl. motor casing)
     length: float = 0.0
     diameter: float = 0.0
+    # Where this stage balances, in metres from its own top, as the design
+    # has it (_extract_stage_geometry). 0 = not known (a stage list saved
+    # before these fields existed): the airframe is then taken at mid-length
+    # and the motor centred at 85 % of the length (StageManager.active_cg).
+    dry_cg: float = 0.0                # mass centre of the airframe
+    motor_position: float = 0.0        # aft end of the motor
 
     # ── Fins on this stage ──
     fin_count: int = 0
@@ -251,6 +257,32 @@ def _extract_stage_geometry(stage) -> dict:
     dry_mass = stage.total_mass()          # airframe only — motors live separately
 
     geom = dict(length=length, diameter=diameter, dry_mass=dry_mass)
+
+    # Where the stage balances, from its own top: every component at its own
+    # place (the rule RocketAssembly.compute_cg applies), and the motor's aft
+    # end at the aft end of its mount, or of the stage when it has none (as
+    # DesignWorkspace._sync_to_engine places a single-stage motor).
+    #
+    # The staged flight had no such numbers and took the airframe at
+    # mid-length and the motor at 85 % of the length, whatever was drawn. A
+    # two-stage rocket with its payload behind the nose flew with its CG
+    # 85 mm aft of the design's, 0.85 cal less stable than it is.
+    moment = mass = 0.0
+    motor_aft = stage.position + length
+    for c in _descendants(stage):
+        parent = getattr(c, "parent", None)
+        if (parent is not None and getattr(parent, "_override_includes_children", False)
+                and getattr(parent, "override_mass", None) is not None):
+            continue
+        m = c.computed_mass()
+        if m > 0:
+            mass += m
+            moment += m * (c.cg_position() - stage.position)
+        if getattr(c, "is_motor_mount", False):
+            motor_aft = c.position + c.component_length()
+    if mass > 0:
+        geom["dry_cg"] = moment / mass
+    geom["motor_position"] = max(0.0, motor_aft - stage.position)
 
     nose = _find_child(stage, NoseCone)
     if nose is not None:
@@ -670,8 +702,13 @@ class StageManager:
     def active_cg(self) -> float:
         """Mass-weighted CG of the active stack, measured from the nose (x=0).
 
-        Physical order is top→bottom = reversed ignition order. Each stage's
-        local CG: airframe at mid-length, motor (casing+prop) biased aft.
+        Physical order is top→bottom = reversed ignition order. Each stage
+        balances where the design has it: the airframe at ``dry_cg`` and the
+        motor (case and propellant) half a motor length ahead of
+        ``motor_position``, both from the stage's own top. A stage that does
+        not say (0: a stage list saved before those fields) is taken with its
+        airframe at mid-length and its motor centred at 85 % of the length,
+        which is what every staged flight used to assume.
         """
         active = self.active_stages()
         phys = list(reversed(active))   # top → bottom
@@ -682,8 +719,11 @@ class StageManager:
             L = st.length or 0.0
             m_dry = st.dry_mass
             m_motor = st.motor_dry_mass + st.current_propellant_mass
-            cg_dry = x_top + L * 0.5
-            cg_motor = x_top + L * 0.85          # motor sits aft
+            cg_dry = x_top + (st.dry_cg if st.dry_cg > 0 else L * 0.5)
+            if st.motor_position > 0:
+                cg_motor = x_top + max(0.0, st.motor_position - 0.5 * st.motor_length)
+            else:
+                cg_motor = x_top + L * 0.85      # not known: motor sits aft
             moment += m_dry * cg_dry + m_motor * cg_motor
             mass += m_dry + m_motor
             x_top += L

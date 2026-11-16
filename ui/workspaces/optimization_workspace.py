@@ -71,7 +71,7 @@ def _vl(text: str = "—") -> QLabel:
 
 def _style_ax(ax, title="", xlabel="", ylabel=""):
     ax.set_facecolor(theme.PANEL)
-    ax.set_title(title, color=theme.TEXT, fontsize=12, fontweight="bold", pad=10)
+    ax.set_title(title, color=theme.TEXT, fontsize=11, fontweight="normal", pad=8, loc="left")
     ax.set_xlabel(xlabel, color=theme.TEXT_DIM, fontsize=10)
     ax.set_ylabel(ylabel, color=theme.TEXT_DIM, fontsize=10)
     ax.tick_params(colors=theme.LINE_STRONG, labelsize=9)
@@ -335,9 +335,8 @@ class OptimizationWorkspace(QWidget):
         lay.setSpacing(10)
 
         # Title
-        title = QLabel("DESIGN OPTIMIZATION")
-        title.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title = QLabel("Design Optimization")
+        title.setStyleSheet(theme.panel_title_qss())
         lay.addWidget(title)
 
         lay.addWidget(self._build_algorithm_group())
@@ -843,19 +842,6 @@ class OptimizationWorkspace(QWidget):
         vl.setSpacing(0)
 
         self.tabs = QTabWidget()
-        self.tabs.setStyleSheet(
-            f"QTabWidget::pane {{ border:1px solid {theme.RAISED}; }}"
-            f"QTabBar::tab {{ background:{theme.PANEL}; color:{theme.TEXT_DIM}; padding:6px 12px; "
-            f"  border:1px solid {theme.RAISED}; border-bottom:none; border-radius:4px 4px 0 0; "
-            "  font-size:11px; }"
-            f"QTabBar::tab:selected {{ background:{theme.BG}; color:{theme.ACCENT}; font-weight:700; }}"
-            # Visible scroll buttons when the tabs overflow.
-            "QTabBar::scroller { width:30px; }"
-            f"QTabBar QToolButton {{ background:{theme.RAISED}; border:1px solid {theme.LINE}; "
-            f"  border-radius:4px; margin:2px 1px; width:22px; color:{theme.TEXT}; }}"
-            f"QTabBar QToolButton:hover {{ background:{theme.ACCENT_DEEP}; border-color:{theme.ACCENT_DEEP}; }}"
-            f"QTabBar QToolButton:disabled {{ background:{theme.PANEL}; border-color:{theme.RAISED}; }}"
-        )
 
         # Tab 1: Single Objective
         fig1, self._ax_conv = _dark_figure(figsize=(8, 5))
@@ -953,7 +939,7 @@ class OptimizationWorkspace(QWidget):
         self._canvas_doe = FigureCanvas(fig5)
         v5.addWidget(self._canvas_doe, 1)
 
-        self.tabs.addTab(w5, "DOE & Surfaces")
+        self.tabs.addTab(w5, "DOE && Surfaces")
 
         # Tab 6: Sensitivity Analysis
         w6 = QWidget()
@@ -1071,7 +1057,7 @@ class OptimizationWorkspace(QWidget):
         lay.setSpacing(10)
 
         t = QLabel("Optimization Results")
-        t.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
+        t.setStyleSheet(theme.panel_title_qss())
         lay.addWidget(t)
 
         # ── Best Design ──
@@ -1116,7 +1102,7 @@ class OptimizationWorkspace(QWidget):
         lay.addWidget(gp)
 
         # ── Reliability ──
-        gr = QGroupBox("Reliability & Uncertainty")
+        gr = QGroupBox("Reliability && Uncertainty")
         fr = QFormLayout()
         fr.setSpacing(5)
         self.lbl_rel_success = _vl(); fr.addRow("Success Rate:", self.lbl_rel_success)
@@ -1148,8 +1134,8 @@ class OptimizationWorkspace(QWidget):
         self.btn_sol_reliability.clicked.connect(lambda: self._load_pareto_solution("reliability"))
         fps.addWidget(self.btn_sol_reliability)
 
-        self.btn_sol_mass = QPushButton(app_icon("mass", color="#bc8cff"), "Best Mass Efficiency: —")
-        self.btn_sol_mass.setStyleSheet(sol_style.format(c="#bc8cff"))
+        self.btn_sol_mass = QPushButton(app_icon("mass", color=theme.INFO), "Best Mass Efficiency: —")
+        self.btn_sol_mass.setStyleSheet(sol_style.format(c=theme.INFO))
         self.btn_sol_mass.clicked.connect(lambda: self._load_pareto_solution("mass"))
         fps.addWidget(self.btn_sol_mass)
 
@@ -1817,8 +1803,8 @@ class OptimizationWorkspace(QWidget):
                 ax.annotate("Best " + k2.replace("_", " "),
                             (x_vals[idx_best_y], y_vals[idx_best_y]),
                             textcoords="offset points", xytext=(10, -15),
-                            fontsize=8, color="#bc8cff",
-                            arrowprops=dict(arrowstyle="->", color="#bc8cff", lw=0.8))
+                            fontsize=8, color=theme.SERIES_VIOLET,
+                            arrowprops=dict(arrowstyle="->", color=theme.SERIES_VIOLET, lw=0.8))
 
         # Utopia point (per-axis ideal, respecting objective direction)
         ux = (max(x_vals) if dir1 == "maximize" else min(x_vals)) if x_vals else 0
@@ -2247,7 +2233,7 @@ class OptimizationWorkspace(QWidget):
                 names_o = [var_names[i] for i in order]
                 ax_left.barh(names_o, s1[order], color=theme.ACCENT,
                              alpha=0.8, edgecolor=theme.LINE)
-                ax_right.barh(names_o, st[order], color="#bc8cff",
+                ax_right.barh(names_o, st[order], color=theme.SERIES_VIOLET,
                               alpha=0.8, edgecolor=theme.LINE)
                 ax_left.set_xlim(0, 1)
                 ax_right.set_xlim(0, 1)
@@ -2394,7 +2380,7 @@ class OptimizationWorkspace(QWidget):
         ax_r.set_facecolor(theme.PANEL)
         ax.figure.patch.set_facecolor(theme.BG)
 
-        colors = [theme.ACCENT, theme.OK, theme.ACCENT, "#bc8cff", theme.ERR, theme.WARN]
+        colors = [theme.ACCENT, theme.OK, theme.ACCENT, theme.SERIES_VIOLET, theme.ERR, theme.WARN]
 
         for i, cfg in enumerate(self.trade_configs):
             values_n = []

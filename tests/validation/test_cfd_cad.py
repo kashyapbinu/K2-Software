@@ -368,6 +368,36 @@ def test_residual_floor_still_counts_as_converged(tmp_path):
     assert result.converged is True
 
 
+@pytest.mark.cfd
+def test_friction_added_to_an_inviscid_drag_does_not_move_the_centre_of_pressure(
+        tmp_path, monkeypatch):
+    """Euler + flat-plate friction adds the friction to Cd only. The CP was
+    then worked from CN = CL cos(a) + CD sin(a) with that Cd, so the friction
+    (an axial force) leaked into the normal force and pulled the reported CP
+    forward: 1.535 m for the canonical rocket at Mach 0.5 and 4 deg, where
+    the solve's own forces put it at 1.558 m (0.23 cal)."""
+    import math
+    import cfd.sweep as sweep
+    from cfd.solvers.base import CFDConfig
+    from cfd.solvers.su2_solver import SU2Solver
+
+    monkeypatch.setattr(sweep, "analytic_friction_cd", lambda *a, **k: 0.28)
+    cl, cd, cm = 1.2742, 0.32, -1.00745
+    cfg = CFDConfig(work_dir=tmp_path, max_iterations=100, mach=0.5,
+                    angle_of_attack_deg=4.0, turbulence_model="Euler",
+                    euler_analytic_friction=True,
+                    geometry_dict={"length": 2.0, "diameter": 0.102})
+    lines = ["\"Inner_Iter\",\"rms[Rho]\",\"CD\",\"CL\",\"CMy\""]
+    lines += [f"{i},{-1.0 - 0.6 * i},{cd},{cl},{cm}" for i in range(20)]
+    (tmp_path / "history.csv").write_text("\n".join(lines), encoding="utf-8")
+    result = SU2Solver(cfg).parse_results()
+
+    assert result.cd == pytest.approx(cd + 0.28)        # the drag has its friction
+    a = math.radians(4.0)
+    cn = cl * math.cos(a) + cd * math.sin(a)            # the normal force does not
+    assert result.cp_from_nose_m == pytest.approx(-(cm / cn) * result.ref_length, rel=1e-6)
+
+
 # ── geometry repair (wrap) ───────────────────────────────────────────────────
 
 @pytest.mark.cfd

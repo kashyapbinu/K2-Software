@@ -40,7 +40,7 @@ class ComponentEditor(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self.header = QLabel("COMPONENT PROPERTIES")
+        self.header = QLabel("Component Properties")
         self.header.setProperty("panelTitle", True)
         layout.addWidget(self.header)
 

@@ -63,6 +63,7 @@ def test_missing_limits_and_values_are_never_a_pass():
     f = _flight(drogue_descent_rate=None)
     no_limit = R.evaluate(R.Rule("rail", "rail_exit_velocity", ">=", None), f)
     assert no_limit.status == R.NOT_EVALUATED and "no limit" in no_limit.note
+    assert no_limit.value == 25.0 and no_limit.margin is None   # shown, not judged
     no_value = R.evaluate(R.Rule("drogue", "drogue_descent_rate", "<=", 40.0), f)
     assert no_value.status == R.NOT_EVALUATED
     half = R.evaluate(R.Rule("x", "drogue_descent_rate", "between", 20.0, None), _flight())
@@ -122,7 +123,7 @@ _UI = textwrap.dedent("""
     ini = os.path.join(tempfile.mkdtemp(), "k2.ini")
     st._store = lambda: QSettings(ini, QSettings.Format.IniFormat)
     from core.flight_summary import FlightSummary
-    from ui.widgets.rules_panel import RulesPanel, C_LIMIT, C_RESULT, C_RATE
+    from ui.widgets.rules_panel import RulesPanel, C_LIMIT, C_VALUE, C_RESULT, C_RATE
     p = RulesPanel()
     assert p.set_combo.currentText().startswith("Template")
     assert "not confirmed" in p.source_label.text()
@@ -130,7 +131,10 @@ _UI = textwrap.dedent("""
                       max_mach=0.9, max_acceleration=150, max_q=6e4, flight_time=200,
                       rail_exit_velocity=25.0, stability_at_rail_exit=1.8, min_stability=1.6)
     p.set_flights(f)
-    assert p.table.item(0, C_RESULT).text() == "not evaluated"
+    # A rule waiting for its limit says so and still shows the flight's value.
+    assert p.table.item(0, C_RESULT).text() == "enter a limit"
+    assert p.table.item(0, C_VALUE).text().startswith("25")
+    assert "Limit cell" in p.summary_label.text()
     p.table.item(0, C_LIMIT).setText("30")              # rail exit >= 30
     assert p.table.item(0, C_RESULT).text() == "fail"
     p.table.item(0, C_LIMIT).setText("20")
@@ -140,6 +144,11 @@ _UI = textwrap.dedent("""
     p._save_as()
     assert p.set_combo.currentText() == "Our comp 2027"
     assert "Rulebook 2027" in p.source_label.text()
+    # A limit typed into a saved set is still there after a restart.
+    p.table.item(1, C_LIMIT).setText("1.5")
+    again = RulesPanel()
+    again.set_combo.setCurrentIndex(again.set_combo.findText("Our comp 2027"))
+    assert again.current_set().rules[1].limit == 1.5
     p.set_flights([f, FlightSummary(**{{**f.__dict__, "rail_exit_velocity": 15.0}})])
     assert "50.0 %" in p.table.item(0, C_RATE).text()
     p._delete()

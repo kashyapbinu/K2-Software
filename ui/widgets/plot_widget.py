@@ -31,15 +31,15 @@ class PlotWidget(QWidget):
     def _style_axis(self, title, xlabel, ylabel):
         ax = self.ax
         ax.set_facecolor(theme.PANEL)
-        ax.set_title(title, color=theme.TEXT, fontsize=12, fontweight="bold", pad=10)
+        ax.set_title(title, color=theme.TEXT, fontsize=11, fontweight="normal", pad=8, loc="left")
         ax.set_xlabel(xlabel, color=theme.TEXT_DIM, fontsize=10)
         ax.set_ylabel(ylabel, color=theme.TEXT_DIM, fontsize=10)
-        ax.tick_params(colors=theme.LINE_STRONG, labelsize=9)
+        ax.tick_params(colors=theme.TEXT_DIM, labelsize=9)
         ax.spines["bottom"].set_color(theme.LINE)
         ax.spines["left"].set_color(theme.LINE)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        ax.grid(True, alpha=0.15, color=theme.LINE)
+        ax.grid(True, alpha=0.7, linewidth=0.6, color=theme.LINE)
 
     def retheme(self):
         """Re-apply palette colours after a theme switch."""

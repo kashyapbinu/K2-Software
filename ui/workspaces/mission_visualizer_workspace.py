@@ -59,13 +59,15 @@ except Exception:
     _ROCKET_MESH_OK = False
 
 from ui import theme
+from ui.replay_clock import clock_for
+from ui.widgets.replay_bar import ReplayBar
 from ui.widgets.viewport_gate import gate_hidden_rendering
 
 logger = logging.getLogger("K2.MissionViz")
 
 _PHASE_COLORS = {
     "Pre-Launch":     theme.ACCENT,
-    "Boost":          "#ffa657",
+    "Boost":          theme.ACCENT_HOVER,
     "Coast":          theme.OK,
     "Apogee":         theme.ACCENT,
     "Drogue Descent": theme.ACCENT_HOVER,
@@ -80,12 +82,12 @@ _PHASE_INDEX = {
     "Pre-Launch": 0, "Ignition": 1, "Boost": 1, "Coast": 2, "Apogee": 3,
     "Drogue Descent": 4, "Main Descent": 5, "Landed": 6,
 }
-_PHASE_CMAP = [theme.ACCENT, "#ffa657", theme.OK, theme.ACCENT,
+_PHASE_CMAP = [theme.ACCENT, theme.ACCENT_HOVER, theme.OK, theme.ACCENT,
                theme.ACCENT_HOVER, theme.OK, theme.OK]
 
 # Events that get a 3D flag marker on the trajectory
 _FLAG_EVENTS = {
-    "motor_burnout": ("Burnout",  "#ffa657"),
+    "motor_burnout": ("Burnout",  theme.ACCENT_HOVER),
     "max_q":         ("Max-Q",    theme.WARN),
     "apogee":        ("Apogee",   theme.ACCENT),
     "drogue_deploy": ("Drogue",   theme.ACCENT_HOVER),
@@ -95,8 +97,8 @@ _FLAG_EVENTS = {
 
 _EVENT_LABELS = {
     "sim_start":      ("Ignition",            theme.ACCENT),
-    "motor_ignition": ("Motor Ignition",      "#ffa657"),
-    "motor_burnout":  ("Burnout",             "#ffa657"),
+    "motor_ignition": ("Motor Ignition",      theme.ACCENT_HOVER),
+    "motor_burnout":  ("Burnout",             theme.ACCENT_HOVER),
     "apogee":         ("Apogee",              theme.ACCENT),
     "drogue_deploy":  ("Drogue Deploy",       theme.ACCENT_HOVER),
     "main_deploy":    ("Main Chute Deploy",   theme.OK),
@@ -112,29 +114,27 @@ class _Readout(QWidget):
     def __init__(self, label, unit="", parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(6, 5, 6, 4)
+        lay.setContentsMargins(9, 5, 9, 5)
         lay.setSpacing(1)
 
-        lbl = QLabel(label.upper())
-        lbl.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:9px;font-weight:600;letter-spacing:1px;")
-        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Caption, value and unit left-aligned in one bordered tile. The frame
+        # style had no selector, so the border was drawn round the caption,
+        # the value and the unit as three separate boxes.
+        self.setObjectName("mvReadout")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        cap = label if not unit else f"{label} ({unit})"
+        lbl = QLabel(cap)
+        lbl.setStyleSheet(f"color:{theme.TEXT_DIM};font-size:11px;background:transparent;border:none;")
 
         self._val = QLabel("--")
-        self._val.setStyleSheet(
-            f"color:{theme.TEXT_BRIGHT};font-family:'Cascadia Code',monospace;"
-            "font-size:14px;font-weight:700;"
-        )
-        self._val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._val.setStyleSheet(self._value_qss(theme.TEXT_BRIGHT))
 
         lay.addWidget(lbl)
         lay.addWidget(self._val)
-        if unit:
-            u = QLabel(unit)
-            u.setStyleSheet(f"color:{theme.LINE_STRONG};font-size:8px;")
-            u.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lay.addWidget(u)
 
-        self.setStyleSheet(f"background:{theme.PANEL};border:1px solid {theme.RAISED};border-radius:6px;")
+        self.setStyleSheet(
+            f"QWidget#mvReadout {{ background:{theme.PANEL}; border:1px solid {theme.LINE}; "
+            "border-radius:3px; }")
         self.setMinimumWidth(85)
 
         self._last_text = None
@@ -148,11 +148,13 @@ class _Readout(QWidget):
         col = color or theme.TEXT_BRIGHT
         # setStyleSheet reparses CSS — only touch it when the colour changes.
         if col != self._last_col:
-            self._val.setStyleSheet(
-                f"color:{col};font-family:'Cascadia Code',monospace;"
-                "font-size:14px;font-weight:700;"
-            )
+            self._val.setStyleSheet(self._value_qss(col))
             self._last_col = col
+
+    @staticmethod
+    def _value_qss(color):
+        return (f"color:{color};font-family:{theme.MONO};font-size:14px;"
+                "font-weight:600;background:transparent;border:none;")
 
 
 class MissionVisualizerWorkspace(QWidget):
@@ -217,18 +219,24 @@ class MissionVisualizerWorkspace(QWidget):
         self._trail_color_mode = "Mach"
 
         # Replay state
+        # The flight being replayed and the instant shown are the shared
+        # clock's (ui.replay_clock), so the Results tab follows the same one.
+        self._clock = clock_for(sim_engine)
+        self._replay = None             # core.flight_replay.FlightReplay
         self._replay_mode       = False
         self._replay_index      = 0
-        self._replay_is_playing = False
+        self._replay_shown_t    = None  # instant the panel last drew
+        # Loads overlay (core.load_overlay): off unless the user picks one.
+        self._loads_profile = None      # LoadProfile being painted
+        self._loads_mesh    = None      # the rocket mesh carrying the "load" scalars
+        self._actor_loads   = None
+        self._loads_stations = None     # each mesh point's distance from the nose
+        self._rocket_mesh   = None      # mesh the rocket actor was built from
         self._replay_pts    = []
         self._replay_mach   = []
         self._replay_alt    = []
         self._replay_vel    = []
         self._replay_times  = []
-        self._replay_pitch  = []
-        self._replay_yaw    = []
-        self._replay_thrust = []
-        self._replay_drag   = []
         self._replay_phase  = []
 
         # Scene overlays (recovery / altitude reference / flight envelope)
@@ -300,10 +308,10 @@ class MissionVisualizerWorkspace(QWidget):
         self._graph_timer.timeout.connect(self._update_graphs)
         self._graph_timer.start()
 
-        # Replay playback timer
-        self._replay_timer = QTimer(self)
-        self._replay_timer.setInterval(50)
-        self._replay_timer.timeout.connect(self._on_replay_tick)
+        # Replay: the shared clock drives the instant shown
+        self._clock.time_changed.connect(self._on_clock_time)
+        self._clock.playing_changed.connect(self._on_clock_playing)
+        self._clock.flight_changed.connect(self._on_clock_flight)
 
         self._apply_quality("Balanced")
 
@@ -328,6 +336,7 @@ class MissionVisualizerWorkspace(QWidget):
         splitter.setStretchFactor(1, 1)
         root.addWidget(splitter, stretch=1)
 
+        root.addWidget(self._build_replay_row())
         root.addWidget(self._build_controls_bar())
 
     def _build_title_bar(self):
@@ -337,10 +346,8 @@ class MissionVisualizerWorkspace(QWidget):
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(16, 0, 16, 0)
 
-        title = QLabel("MISSION VISUALIZER")
-        title.setStyleSheet(
-            f"color:{theme.ACCENT};font-size:13px;font-weight:700;letter-spacing:3px;"
-        )
+        title = QLabel("Mission Visualizer")
+        title.setStyleSheet(theme.panel_title_qss())
         lay.addWidget(title)
         lay.addStretch()
 
@@ -426,6 +433,7 @@ class MissionVisualizerWorkspace(QWidget):
         self._graph_axes     = []
         self._graph_lines    = []
         self._graph_canvases = []
+        self._graph_cursors  = []   # the replay instant, drawn on each graph
 
         specs = [
             ("Altitude", "m"),
@@ -448,6 +456,9 @@ class MissionVisualizerWorkspace(QWidget):
                 ax.set_title(title_str, color=theme.TEXT_DIM, fontsize=7, pad=2)
                 fig.subplots_adjust(left=0.18, right=0.97, top=0.78, bottom=0.22)
                 line, = ax.plot([], [], color=theme.ACCENT, linewidth=1.0)
+                cursor = ax.axvline(0.0, color=theme.TEXT_BRIGHT, linewidth=0.8,
+                                    visible=False)
+                self._graph_cursors.append(cursor)
                 canvas = FigureCanvas(fig)
                 canvas.setMinimumWidth(110)
                 canvas.setSizePolicy(
@@ -464,24 +475,6 @@ class MissionVisualizerWorkspace(QWidget):
     def _build_right_panel(self):
         tabs = QTabWidget()
         tabs.setMinimumWidth(250)
-        tabs.setStyleSheet(f"""
-            QTabWidget::pane {{ border:none; background:{theme.BG}; }}
-            QTabBar::tab {{
-                color:{theme.TEXT_DIM}; background:{theme.PANEL}; padding:6px 10px;
-                border:1px solid {theme.RAISED}; border-bottom:none; font-size:10px;
-            }}
-            QTabBar::tab:selected {{
-                color:{theme.TEXT_BRIGHT}; background:{theme.BG};
-                border-top:2px solid {theme.ACCENT};
-            }}
-            QTabBar::scroller {{ width:30px; }}
-            QTabBar QToolButton {{
-                background:{theme.RAISED}; border:1px solid {theme.LINE}; border-radius:4px;
-                margin:2px 1px; width:22px; color:{theme.TEXT};
-            }}
-            QTabBar QToolButton:hover {{ background:{theme.ACCENT_DEEP}; border-color:{theme.ACCENT_DEEP}; }}
-            QTabBar QToolButton:disabled {{ background:{theme.PANEL}; border-color:{theme.RAISED}; }}
-        """)
         tabs.addTab(self._build_telemetry_tab(), "Telemetry")
         tabs.addTab(self._build_events_tab(),    "Flight Events")
         tabs.addTab(self._build_timeline_tab(),  "Timeline")
@@ -528,10 +521,10 @@ class MissionVisualizerWorkspace(QWidget):
         lay.addWidget(row(self._rd_phase, self._rd_recovery))
 
         # ── Recovery section ──
-        hdr = QLabel("RECOVERY")
+        hdr = QLabel("Recovery")
         hdr.setStyleSheet(
-            f"color:{theme.OK};font-size:9px;font-weight:700;letter-spacing:2px;"
-            "padding:6px 2px 2px 2px;"
+            f"color:{theme.TEXT_DIM};font-size:11px;font-weight:600;"
+            "padding:8px 2px 2px 2px;"
         )
         lay.addWidget(hdr)
 
@@ -656,56 +649,6 @@ class MissionVisualizerWorkspace(QWidget):
         self._chk_stats.toggled.connect(self._on_toggle_stats)
         lay.addWidget(self._chk_stats)
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setStyleSheet(f"color:{theme.LINE};")
-        lay.addWidget(sep)
-
-        # Replay controls (shown only in replay mode)
-        self._pb_group = QWidget()
-        pb_lay = QHBoxLayout(self._pb_group)
-        pb_lay.setContentsMargins(0, 0, 0, 0)
-        pb_lay.setSpacing(5)
-        pb_lay.addWidget(self._styled_label("Replay:"))
-
-        btn_style = (
-            f"QPushButton {{ background:{theme.RAISED}; color:{theme.TEXT_BRIGHT}; border:1px solid {theme.LINE};"
-            "border-radius:4px; padding:2px 10px; font-size:12px; font-weight:600; }"
-            f"QPushButton:hover {{ background:{theme.LINE}; }}"
-        )
-        self._btn_restart = QPushButton("Restart")
-        self._btn_play    = QPushButton("Play")
-        self._btn_pause   = QPushButton("Pause")
-        for btn in (self._btn_restart, self._btn_play, self._btn_pause):
-            btn.setFixedHeight(30)
-            btn.setStyleSheet(btn_style)
-
-        self._replay_slider = QSlider(Qt.Orientation.Horizontal)
-        self._replay_slider.setRange(0, 1000)
-        self._replay_slider.setFixedWidth(180)
-        self._replay_slider.setStyleSheet(
-            f"QSlider::groove:horizontal{{background:{theme.RAISED};height:4px;border-radius:2px;}}"
-            f"QSlider::handle:horizontal{{background:{theme.ACCENT};width:12px;height:12px;"
-            "border-radius:6px;margin:-4px 0;}"
-        )
-        self._replay_time_lbl = QLabel("T+0.00s")
-        self._replay_time_lbl.setStyleSheet(
-            f"color:{theme.TEXT_DIM};font-family:'Cascadia Code',monospace;font-size:10px;"
-        )
-
-        self._btn_restart.clicked.connect(self._on_replay_restart)
-        self._btn_play.clicked.connect(self._on_replay_play)
-        self._btn_pause.clicked.connect(self._on_replay_pause)
-        self._replay_slider.sliderMoved.connect(self._on_replay_seek)
-
-        pb_lay.addWidget(self._btn_restart)
-        pb_lay.addWidget(self._btn_play)
-        pb_lay.addWidget(self._btn_pause)
-        pb_lay.addWidget(self._replay_slider)
-        pb_lay.addWidget(self._replay_time_lbl)
-        self._pb_group.setVisible(False)
-        lay.addWidget(self._pb_group)
-
         lay.addStretch()
 
         reset_btn = QPushButton("Reset Camera")
@@ -717,6 +660,160 @@ class MissionVisualizerWorkspace(QWidget):
         reset_btn.clicked.connect(self._reset_camera)
         lay.addWidget(reset_btn)
         return bar
+
+    def _build_replay_row(self):
+        """Transport bar for the finished flight (hidden until there is one):
+        restart / play / speed, the flight timeline with its events, and the
+        key to the force arrows when those are shown."""
+        self._pb_group = QWidget()
+        self._pb_group.setObjectName("mvReplayRow")
+        self._pb_group.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._pb_group.setStyleSheet(
+            f"QWidget#mvReplayRow {{ background:{theme.PANEL}; "
+            f"border-top:1px solid {theme.RAISED}; }}")
+        lay = QHBoxLayout(self._pb_group)
+        lay.setContentsMargins(12, 6, 12, 4)
+        lay.setSpacing(12)
+        self._replay_bar = ReplayBar(self._clock)
+        lay.addWidget(self._replay_bar, 1)
+        self._vector_key = QLabel()
+        self._vector_key.setTextFormat(Qt.TextFormat.RichText)
+        self._vector_key.setStyleSheet("font-size:11px; background:transparent;")
+        self._vector_key.setVisible(False)
+        lay.addWidget(self._vector_key)
+
+        lay.addWidget(self._styled_label("Loads:"))
+        self._loads_combo = self._styled_combo(list(self._LOADS_CHOICES))
+        self._loads_combo.setToolTip(
+            "Paint a solved result on the rocket: CFD surface pressure scaled "
+            "to the dynamic pressure of the instant shown, or the FE static "
+            "stress. Off by default; needs that analysis to have been run.")
+        self._loads_combo.currentTextChanged.connect(self._on_loads_changed)
+        lay.addWidget(self._loads_combo)
+        self._loads_note = QLabel()
+        self._loads_note.setStyleSheet(
+            f"color:{theme.TEXT_DIM}; font-size:11px; background:transparent;")
+        lay.addWidget(self._loads_note)
+        self._pb_group.setVisible(False)
+        return self._pb_group
+
+    # ── Loads overlay ──
+    _LOADS_CHOICES = {"Off": None, "CFD Pressure": "cfd_pressure", "FE Stress": "fe_stress"}
+
+    def _load_profile_for(self, kind):
+        """(LoadProfile or None, note) for the chosen overlay. The note says
+        why there is nothing to draw, or that the result is out of date."""
+        from core import load_overlay as LO
+        from core import readiness as R
+        results = getattr(self.engine, "results", {})
+        if kind == LO.CFD_PRESSURE:
+            res = results.get("cfd")
+            stage = "cfd"
+            profile = (LO.cfd_pressure_profile(getattr(res, "surface_vtk", None),
+                                               getattr(res, "mach", 0.0))
+                       if res is not None else None)
+            missing = "Run CFD first"
+        else:
+            res = results.get("structures")
+            stage = "structures"
+            profile = (LO.fe_stress_profile(res["fem"], res.get("condition", ""))
+                       if res else None)
+            missing = "Run a static FE analysis first"
+        if profile is None:
+            return None, missing
+        note = profile.source
+        try:
+            st = self.engine.readiness.status(stage, self.engine.state)
+            if st.status == R.STALE:
+                note += f" — out of date ({st.reason})"
+        except Exception:
+            pass
+        return profile, note
+
+    def _on_loads_changed(self, text):
+        self._remove_loads_actor()
+        kind = self._LOADS_CHOICES.get(text)
+        if kind is None:
+            self._loads_note.setText("")
+        else:
+            profile, note = self._load_profile_for(kind)
+            self._loads_note.setText(note)
+            if profile is not None:
+                self._build_loads_actor(profile)
+        self._needs_3d_update = True
+        self._safe_render()
+
+    def _remove_loads_actor(self):
+        if self._actor_loads is not None and self._plotter:
+            try:
+                self._plotter.remove_actor(self._actor_loads)
+                self._plotter.remove_scalar_bar("Loads")
+            except Exception:
+                pass
+        self._actor_loads = self._loads_mesh = self._loads_profile = None
+        if self._actor_rocket is not None:
+            self._actor_rocket.SetVisibility(True)
+
+    def _build_loads_actor(self, profile):
+        """A copy of the rocket, coloured by *profile*, drawn in place of the
+        plain one while the overlay is on."""
+        self._ensure_rocket_actor()
+        if not self._plotter or self._rocket_mesh is None:
+            return
+        mesh = self._rocket_mesh.copy(deep=True)
+        # The rocket is modelled tail at z = 0, nose at z = length.
+        length = float(mesh.points[:, 2].max())
+        self._loads_stations = length - mesh.points[:, 2]
+        q_max = 1.0
+        if self._replay is not None:
+            q_max = float(np.nanmax(self._replay.series("dynamic_pressure")))
+        lo, hi = profile.limits(q_max)
+        pressure = profile.scales_with_q
+        scale, unit = (1e-3, "kPa") if pressure else (1e-6, "MPa")
+        self._loads_scale = scale
+        mesh["load"] = profile.at(self._loads_stations, q_max if pressure else 1.0) * scale
+        try:
+            self._actor_loads = self._plotter.add_mesh(
+                mesh, scalars="load", name="rocket_loads",
+                cmap="coolwarm" if pressure else "inferno",
+                clim=(lo * scale, hi * scale), smooth_shading=True,
+                ambient=0.5, diffuse=0.6, show_scalar_bar=True,
+                scalar_bar_args=dict(
+                    title="Loads", n_labels=5, fmt="%.3g", color=theme.TEXT,
+                    vertical=True, position_x=0.02, position_y=0.25,
+                    width=0.05, height=0.5, title_font_size=12,
+                    label_font_size=10))
+        except Exception as exc:
+            logger.warning(f"Loads overlay failed: {exc}")
+            self._actor_loads = None
+            return
+        self._loads_mesh, self._loads_profile = mesh, profile
+        self._loads_note.setText(
+            self._loads_note.text() + "  |  "
+            + ("gauge pressure" if pressure else "von Mises") + f", {unit}")
+        if self._actor_rocket is not None:
+            self._actor_rocket.SetVisibility(False)
+        if getattr(self, "_last_pose", None):
+            self._update_rocket_transform(*self._last_pose)
+
+    def _update_loads(self, q):
+        """Re-colour the overlay for the dynamic pressure *q* (Pa) of the
+        instant shown. FE stress is one load case and does not change."""
+        if self._loads_mesh is None or not self._loads_profile.scales_with_q:
+            return
+        self._loads_mesh["load"] = (self._loads_profile.at(self._loads_stations, q)
+                                    * self._loads_scale)
+
+    def _vector_key_html(self):
+        """Name of each arrow and marker, in its own colour."""
+        if not _OVERLAYS_OK:
+            return ""
+        names = (("thrust", "Thrust"), ("drag", "Drag"), ("lift", "Lift"),
+                 ("weight", "Weight"), ("velocity", "Velocity"), ("wind", "Wind"),
+                 ("cg", "CG"), ("cp", "CP"))
+        return "&nbsp;&nbsp;".join(
+            f'<span style="color:{ForceVectors.COLORS[k]}; font-weight:600;">{label}</span>'
+            for k, label in names)
 
     def _styled_label(self, text):
         lbl = QLabel(text)
@@ -860,6 +957,7 @@ class MissionVisualizerWorkspace(QWidget):
                 built = None
             if built is not None:
                 mesh, total_len, _ = built
+                self._rocket_mesh = mesh
                 try:
                     self._actor_rocket = self._plotter.add_mesh(
                         mesh, scalars="rgb", rgb=True, name="rocket",
@@ -885,6 +983,7 @@ class MissionVisualizerWorkspace(QWidget):
             height=L * 0.2, radius=D / 2, resolution=12
         )
         rocket = body.merge(nose)
+        self._rocket_mesh = rocket
         try:
             self._actor_rocket = self._plotter.add_mesh(
                 rocket, color=theme.ACCENT, name="rocket",
@@ -907,6 +1006,10 @@ class MissionVisualizerWorkspace(QWidget):
         # engine's thrust direction (cosθcosψ, cosθsinψ, sinθ).
         yaw_deg = math.degrees(yaw)
         try:
+            if self._actor_loads is not None:
+                self._actor_loads.SetScale(self._VIS_SCALE)
+                self._actor_loads.SetOrientation(0.0, tilt_deg, yaw_deg)
+                self._actor_loads.SetPosition(x, y, z)
             a.SetScale(self._VIS_SCALE)
             a.SetOrientation(0.0, tilt_deg, yaw_deg)
             a.SetPosition(x, y, z)
@@ -1114,11 +1217,6 @@ class MissionVisualizerWorkspace(QWidget):
         ease the camera, render only when something changed. Skipped if hidden
         so a backgrounded tab costs nothing."""
         if self._closing or not self._plotter or not self.isVisible():
-            if self._replay_is_playing and getattr(self, "_replay_diag", 3) < 3:
-                self._replay_diag = getattr(self, "_replay_diag", 0) + 1
-                logger.warning(
-                    "Replay frame dropped - closing=%s plotter=%s visible=%s",
-                    self._closing, self._plotter is not None, self.isVisible())
             return
 
         t0 = perf_counter()
@@ -1238,8 +1336,8 @@ class MissionVisualizerWorkspace(QWidget):
     def _update_graphs(self):
         if not _MPL_OK or not self._graph_lines or not self._g_time:
             return
-        if not self.isVisible():
-            return
+        if not self.isVisible() or self._replay_mode:
+            return      # in replay the graphs hold the whole flight already
         t0 = perf_counter()
         times = list(self._g_time)
         series = [
@@ -1312,6 +1410,9 @@ class MissionVisualizerWorkspace(QWidget):
         if self._closing or not self.isVisible():
             return
         t0 = perf_counter()
+        if self._replay_mode and self._replay is not None:
+            self._show_replay_instant()
+            return
         s = self._latest_state
         if s is None:
             return
@@ -1320,13 +1421,17 @@ class MissionVisualizerWorkspace(QWidget):
         self._rd_vel.set_value(abs(s.velocity),      "{:.1f}")
         self._rd_accel.set_value(abs(s.acceleration),"{:.2f}")
         self._rd_mach.set_value(s.mach_number,       "{:.3f}")
-        self._rd_mass.set_value(s.dry_mass + s.propellant_mass, "{:.2f}")
+        # flight_mass(): airframe, motor case and what is left of the
+        # propellant. This was dry + propellant, the rocket without its motor
+        # case (1.03 kg short for an L1090W), while the Simulation tab and
+        # the replay of the same flight showed all of it.
+        self._rd_mass.set_value(s.flight_mass(), "{:.2f}")
         self._rd_thrust.set_value(s.thrust,          "{:.1f}")
         self._rd_drag.set_value(s.drag,              "{:.1f}")
         self._rd_dynq.set_value(s.dynamic_pressure,  "{:.0f}")
 
         stab = s.stability_margin
-        sc = theme.OK if stab >= 1.5 else ("#ffa657" if stab >= 0.5 else theme.ERR)
+        sc = theme.OK if stab >= 1.5 else (theme.ACCENT_HOVER if stab >= 0.5 else theme.ERR)
         self._rd_stab.set_value(stab, "{:.2f}", sc)
 
         pc = _PHASE_COLORS.get(s.sim_phase, theme.TEXT_DIM)
@@ -1372,7 +1477,10 @@ class MissionVisualizerWorkspace(QWidget):
     def _check_failures(self, s):
         fail, reason = False, ""
         if s.sim_time > 0.5 and s.sim_phase not in ("Landed", "Terminated"):
-            if s.stability_margin < 0.5:
+            # Unstable is a margin below zero, as the flight's own warning
+            # has it (flight_warnings). This flagged FAILURE below 0.5 cal,
+            # on rockets that flew straight and carried no warning.
+            if s.stability_margin < 0.0:
                 fail, reason = True, "Instability"
             elif 0 < s.safety_factor < 0.8:
                 fail, reason = True, "Structural Failure"
@@ -1398,8 +1506,13 @@ class MissionVisualizerWorkspace(QWidget):
     @pyqtSlot()
     def _on_sim_started(self):
         self._replay_mode = False
-        self._replay_timer.stop()
+        self._replay = None
+        self._replay_shown_t = None
+        if self._loads_combo.currentText() != "Off":
+            self._loads_combo.setCurrentText("Off")
         self._pb_group.setVisible(False)
+        for cursor in getattr(self, "_graph_cursors", []):
+            cursor.set_visible(False)
         self._failure_active = False
         self._tick_counter   = 0
         self._trail_rebuild_counter = 0
@@ -1571,16 +1684,10 @@ class MissionVisualizerWorkspace(QWidget):
     def _on_event_clicked(self, item):
         """Jump the replay to the clicked event's time."""
         t = item.data(Qt.ItemDataRole.UserRole)
-        if t is None or not self._replay_mode or not self._replay_times:
+        if t is None or not self._replay_mode or self._replay is None:
             return
-        # Nearest recorded frame to the event time
-        idx = min(
-            range(len(self._replay_times)),
-            key=lambda i: abs(self._replay_times[i] - t),
-        )
-        self._on_replay_pause()
-        self._replay_index    = idx
-        self._needs_3d_update = True
+        self._clock.pause()
+        self._clock.seek(float(t))
 
     def _update_status(self, text, color):
         self._status_lbl.setText(text)
@@ -1646,6 +1753,8 @@ class MissionVisualizerWorkspace(QWidget):
         self._show_vectors = on
         if self._vectors:
             self._vectors.set_visible(on)
+        self._vector_key.setText(self._vector_key_html())
+        self._vector_key.setVisible(bool(on))
         self._needs_3d_update = True
         self._safe_render()
 
@@ -1747,16 +1856,18 @@ class MissionVisualizerWorkspace(QWidget):
         return ws, wd
 
     def _terminal_descent(self):
-        """Estimate main-chute terminal descent rate (m/s) for landing prediction."""
+        """Descent rate (m/s) for the landing envelope: the burnt-out rocket
+        under the canopies it carries (recovery.final_descent_rate, which
+        says what this used to work out instead). 60 m/s, the envelope's
+        ceiling, for a rocket with no parachute."""
         s = self._latest_state
         if s is None and hasattr(self.engine, "state"):
             s = self.engine.state
         if s is None:
             return 5.0
-        m = max(0.1, s.dry_mass + getattr(s, "propellant_mass", 0.0))
-        cd_area = max(0.1, getattr(s, "main_cd_area", 1.5))
-        v = math.sqrt(2.0 * m * 9.81 / (1.225 * cd_area))
-        return max(1.0, min(v, 60.0))
+        from recovery.parachute_dynamics import final_descent_rate
+        v = final_descent_rate(s)
+        return 60.0 if v is None else max(1.0, min(v, 60.0))
 
     def _ensure_alt_reference(self, apogee, x_landing=0.0, force=False):
         """(Re)build altitude reference, growing it as the rocket climbs."""
@@ -1904,44 +2015,39 @@ class MissionVisualizerWorkspace(QWidget):
     # REPLAY MODE
     # ===============================================================
 
+    @property
+    def _replay_is_playing(self):
+        return self._clock.playing
+
     def _enter_replay_mode(self):
-        if not self._trail_pts:
+        """Switch from the live view to replaying the flight just recorded.
+        The flight and the instant shown are the shared clock's."""
+        self._clock.ensure_loaded()
+        self._replay = self._clock.replay
+        if self._replay is None:
             return
+        # The trail drawn during the flight stays as the path; it is static
+        # for the whole replay.
         self._replay_pts    = list(self._trail_pts)
         self._replay_mach   = list(self._trail_mach)
         self._replay_alt    = list(self._trail_alt)
         self._replay_vel    = list(self._trail_vel)
-        self._replay_pitch  = list(self._trail_pitch)
-        self._replay_yaw    = list(self._trail_yaw)
-        self._replay_thrust = list(self._trail_thrust)
-        self._replay_drag   = list(self._trail_drag)
         self._replay_phase  = list(self._trail_phase)
-
-        try:
-            self._replay_times = self.sim_engine.history.get_values("time") or []
-        except Exception:
-            self._replay_times = []
-
-        if not self._replay_pts:
-            return
-
-        n = len(self._replay_pts)
-        self._replay_index = n - 1
-
-        # Build the full trajectory trail ONCE — static for the whole replay.
-        if n >= 2:
+        self._replay_times  = [float(t) for t in self._replay.times]
+        if len(self._replay_pts) >= 2:
             self._rebuild_trail_actor(
                 self._replay_pts, self._replay_mach,
                 self._replay_alt, self._replay_vel,
                 self._replay_phase,
             )
 
-        self._replay_slider.setRange(0, n - 1)
-        self._replay_slider.setValue(n - 1)
         self._replay_mode = True
+        self._replay_shown_t = None
+        self._replay_index = self._replay.index_at(self._clock.time)
+        self._plot_whole_flight()
         self._pb_group.setVisible(True)
-        logger.info("Replay ready: %d frames, %.1f s of flight",
-                    n, (self._replay_times[-1] if self._replay_times else 0.0))
+        logger.info("Replay ready: %d recorded points, %.1f s of flight",
+                    self._replay.count, self._replay.duration)
         self._update_status("REPLAY", theme.WARN)
         # Place the rocket at touchdown, then frame the whole scene so the user
         # can immediately see the full trajectory + envelope + altitude scale.
@@ -1953,13 +2059,14 @@ class MissionVisualizerWorkspace(QWidget):
         """Per-frame replay update. The full trajectory trail is a STATIC actor
         built once on replay entry — here we only move the rocket + camera, so
         scrubbing is instant regardless of flight length."""
-        if not self._replay_pts or not self._plotter:
+        if self._replay is None or not self._plotter:
             return
 
-        idx = max(0, min(self._replay_index, len(self._replay_pts) - 1))
-        x, y, z = self._replay_pts[idx]
-        pitch = self._replay_pitch[idx] if idx < len(self._replay_pitch) else math.pi / 2
-        yaw   = self._replay_yaw[idx]   if idx < len(self._replay_yaw)   else 0.0
+        frame_t = self._clock.time
+        f = self._replay.frame(frame_t)
+        self._replay_index = self._replay.index_at(frame_t)
+        x, y, z = f["x"], f["y"], f["altitude"]
+        pitch, yaw = f["pitch"], f["yaw"]
         self._last_pose = (x, y, z, pitch, yaw)
 
         self._update_rocket_transform(x, y, z, pitch, yaw)
@@ -1967,100 +2074,144 @@ class MissionVisualizerWorkspace(QWidget):
         # Follow the rocket only while actively playing. When paused/seeking the
         # camera is released so the user can freely orbit + zoom out to inspect
         # the full envelope and altitude scale.
-        if self._camera_mode != "Free" and self._replay_is_playing:
+        if self._camera_mode != "Free" and self._clock.playing:
             self._apply_camera(x, y, z, pitch, yaw)
 
-        # Time label + recovery animation synced to the replay frame
-        frame_t = 0.0
-        if self._replay_times and idx < len(self._replay_times):
-            frame_t = self._replay_times[idx]
-        self._replay_time_lbl.setText(f"T+{frame_t:.2f}s")
-        descent = self._replay_vel[idx] if idx < len(self._replay_vel) else 0.0
-        self._update_recovery(x, y, z, frame_t, descent)
+        self._update_recovery(x, y, z, frame_t, abs(f["velocity"]))
 
         # Flame + Mach cone track the replay frame (smoke/dust live-only)
         if self._effects and self._show_effects:
-            thr = self._replay_thrust[idx] if idx < len(self._replay_thrust) else 0.0
-            mach = self._replay_mach[idx] if idx < len(self._replay_mach) else 0.0
-            thrust_frac = thr / self._max_thrust_seen if self._max_thrust_seen > 0 else 0.0
-            self._effects.update(x, y, z, pitch, yaw, thrust_frac, mach,
+            thrust_frac = (f["thrust"] / self._max_thrust_seen
+                           if self._max_thrust_seen > 0 else 0.0)
+            self._effects.update(x, y, z, pitch, yaw, thrust_frac, f["mach"],
                                  frame_t, self._rocket_length,
                                  self._rocket_diameter, landed=False)
 
-        # Force vectors from the replay frame (velocity by finite difference)
+        self._update_loads(f["dynamic_pressure"])
+
+        # The free-body picture at this instant, as recorded by the engine.
         if self._vectors and self._show_vectors:
-            j = min(idx + 1, len(self._replay_pts) - 1)
-            i0 = max(0, idx - 1) if j == idx else idx
-            dt = ((self._replay_times[j] - self._replay_times[i0])
-                  if (self._replay_times and j < len(self._replay_times)
-                      and j > i0) else 0.0)
-            if dt > 1e-6:
-                p1, p0 = self._replay_pts[j], self._replay_pts[i0]
-                vel_vec = tuple((p1[k] - p0[k]) / dt for k in range(3))
-            else:
-                vel_vec = (0.0, 0.0, 0.0)
-            thr = self._replay_thrust[idx] if idx < len(self._replay_thrust) else 0.0
-            drg = self._replay_drag[idx] if idx < len(self._replay_drag) else 0.0
-            self._vectors.update(x, y, z, pitch, yaw, vel_vec, thr, drg,
-                                 self._rocket_length)
+            self._vectors.update_forces((x, y, z), self._replay.forces(frame_t),
+                                        self._rocket_length)
 
-        self._replay_slider.blockSignals(True)
-        self._replay_slider.setValue(idx)
-        self._replay_slider.blockSignals(False)
+    def _plot_whole_flight(self):
+        """Draw the graph strip from the full record. The live buffers keep
+        only the most recent 5,000 samples, so after a long descent the
+        strip showed the end of the flight and none of the boost."""
+        if not _MPL_OK or not self._graph_lines:
+            return
+        r = self._replay
+        step = max(1, r.count // 2000)
+        t = r.times[::step]
+        series = (r.series("altitude"), abs(r.series("velocity")), r.series("mach"),
+                  abs(r.series("acceleration")), r.series("dynamic_pressure"))
+        for ax, line, canvas, data in zip(self._graph_axes, self._graph_lines,
+                                          self._graph_canvases, series):
+            line.set_xdata(t)
+            line.set_ydata(data[::step])
+            ax.relim()
+            ax.autoscale_view()
+            try:
+                canvas.draw_idle()
+            except Exception:
+                pass
 
-    def _on_replay_tick(self):
-        if not self._replay_is_playing:
+    def _show_replay_instant(self):
+        """Telemetry panel, HUD and graph cursors for the replayed instant.
+        Runs on the 10 Hz panel timer; does nothing while the instant has
+        not moved."""
+        t = self._clock.time
+        if t == self._replay_shown_t:
             return
-        n = len(self._replay_pts)
-        if self._replay_index >= n - 1:
-            self._replay_is_playing = False
-            self._replay_timer.stop()
-            logger.info("Replay reached the end of the flight (%d frames)", n)
-            return
-        self._replay_index = min(self._replay_index + 5, n - 1)
-        self._needs_3d_update = True
-        diag = getattr(self, "_replay_diag", None)
-        if diag is not None and diag < 3:
-            self._replay_diag = diag + 1
-            logger.info("Replay tick %d: frame %d/%d, visible=%s",
-                        diag + 1, self._replay_index, n - 1, self.isVisible())
+        self._replay_shown_t = t
+        f = self._replay.frame(t)
+
+        def show(readout, value, fmt):
+            readout.set_value("--" if value != value else fmt.format(value))
+
+        show(self._rd_time, t, "{:.2f}")
+        show(self._rd_alt, f["altitude"], "{:.1f}")
+        show(self._rd_vel, abs(f["velocity"]), "{:.1f}")
+        show(self._rd_accel, abs(f["acceleration"]), "{:.2f}")
+        show(self._rd_mach, f["mach"], "{:.3f}")
+        show(self._rd_mass, f["mass"], "{:.2f}")
+        show(self._rd_thrust, f["thrust"], "{:.1f}")
+        show(self._rd_drag, f["drag"], "{:.1f}")
+        show(self._rd_dynq, f["dynamic_pressure"], "{:.0f}")
+        stab = f["stability_margin"]
+        if stab != stab:            # NaN: no static margin under a canopy
+            self._rd_stab.set_value("--")
+        else:
+            self._rd_stab.set_value(
+                stab, "{:.2f}",
+                theme.OK if stab >= 1.5 else (theme.ACCENT_HOVER if stab >= 0.5 else theme.ERR))
+        phase = f["phase"]
+        pc = _PHASE_COLORS.get(phase, theme.TEXT_DIM)
+        self._rd_phase.set_value(phase, color=pc)
+        if phase != getattr(self, "_phase_lbl_text", None):
+            self._phase_lbl.setText(phase)
+            self._phase_lbl.setStyleSheet(
+                f"color:{pc};font-size:11px;font-weight:600;"
+                f"padding:2px 10px;border:1px solid {theme.RAISED};border-radius:4px;margin-left:8px;"
+            )
+            self._phase_lbl_text = phase
+        # A canopy is out from its recorded deployment onward.
+        out = [e for e in self._replay.events if e.key == "deploy" and e.time <= t]
+        if out:
+            self._rd_recovery.set_value("DEPLOYED", color=theme.OK)
+        else:
+            self._rd_recovery.set_value("STOWED")
+
+        if self._hud_actor is not None and self._show_hud:
+            hud = (f"T+{t:7.2f} s   {phase}   REPLAY\n"
+                   f"ALT {f['altitude']:8.1f} m    VEL {abs(f['velocity']):7.1f} m/s\n"
+                   f"MACH {f['mach']:5.2f}      AoA {math.degrees(f['aoa']):+6.2f} deg\n"
+                   f"Q   {f['dynamic_pressure']:8.0f} Pa   THR {f['thrust']:7.0f} N")
+            try:
+                self._hud_actor.SetInput(hud)
+            except Exception:
+                pass
+
+        for cursor, canvas in zip(self._graph_cursors, self._graph_canvases):
+            cursor.set_xdata([t, t])
+            cursor.set_visible(True)
+            try:
+                canvas.draw_idle()
+            except Exception:
+                pass
+
+    def _on_clock_time(self, _t):
+        if self._replay_mode:
+            self._needs_3d_update = True
+
+    def _on_clock_playing(self, playing):
+        if playing:
+            self._cam_snap = True          # re-grab the rocket when playback resumes
+        else:
+            self._cam_target_pos = None    # release the camera for free inspection
+
+    def _on_clock_flight(self):
+        """The clock dropped its flight (a new one is starting) or was given
+        one by another view."""
+        if self._clock.replay is None:
+            self._replay = None
+            self._replay_mode = False
 
     def _on_replay_play(self):
         if not self._replay_mode:
             logger.warning("Play ignored - not in replay mode (no flight loaded yet)")
             return
-        if not self._replay_pts:
-            logger.warning("Play ignored - no replay frames captured")
-            return
-        if self._replay_index >= len(self._replay_pts) - 1:
-            self._replay_index = 0
-        self._replay_is_playing = True
-        self._cam_snap = True   # re-grab the rocket when playback resumes
-        self._replay_timer.start()
-        self._replay_diag = 0          # arms the first few playback log lines
-        logger.info(
-            "Replay play: frame %d/%d, tick=%dms, visible=%s, plotter=%s, "
-            "render_timer=%s (%dms)",
-            self._replay_index, len(self._replay_pts) - 1,
-            self._replay_timer.interval(), self.isVisible(),
-            self._plotter is not None, self._render_timer.isActive(),
-            self._render_timer.interval(),
-        )
+        self._clock.play()
 
     def _on_replay_pause(self):
-        self._replay_is_playing = False
-        self._replay_timer.stop()
-        self._cam_target_pos = None   # release camera for free inspection
+        self._clock.pause()
 
     def _on_replay_restart(self):
-        self._replay_is_playing = False
-        self._replay_timer.stop()
-        self._replay_index = 0
-        self._needs_3d_update = True
+        self._clock.restart()
 
-    def _on_replay_seek(self, value):
-        self._replay_index    = value
-        self._needs_3d_update = True
+    def _on_replay_seek(self, index):
+        """Move to recorded point *index*."""
+        self._clock.seek_index(index)
 
     # ===============================================================
     # SHUTDOWN
@@ -2075,7 +2226,7 @@ class MissionVisualizerWorkspace(QWidget):
         if self._closing:
             return
         self._closing = True
-        for tmr in ('_render_timer', '_graph_timer', '_replay_timer', '_panel_timer'):
+        for tmr in ('_render_timer', '_graph_timer', '_panel_timer'):
             t = getattr(self, tmr, None)
             if t is not None:
                 try:

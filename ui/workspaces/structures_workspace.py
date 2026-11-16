@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from physics.structures import MATERIALS, compute_all, compute_for_condition
+from physics.structures import compute_all, compute_for_condition, get_material
 from structures.solvers.base import STRUCTURAL_MATERIALS, LoadCase
 from structures import workstation as wks
 from ui.icons import icon
@@ -91,7 +91,7 @@ class StructuresWorkspace(QWidget):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(12,14,12,14); lay.setSpacing(12)
 
         t = QLabel("Structural Analysis")
-        t.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
+        t.setStyleSheet(theme.panel_title_qss())
         lay.addWidget(t)
 
         # Material
@@ -247,7 +247,7 @@ class StructuresWorkspace(QWidget):
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
         bar = QWidget(); bar.setStyleSheet(f"background:{theme.PANEL}; border-bottom:1px solid {theme.RAISED};")
         bar.setFixedHeight(44); bl = QHBoxLayout(bar); bl.setContentsMargins(12,0,8,0)
-        lbl = QLabel("Structural Visualization"); lbl.setStyleSheet(f"color:{theme.ACCENT};font-weight:700;font-size:13px;")
+        lbl = QLabel("Structural Visualization"); lbl.setStyleSheet(theme.panel_title_qss())
         bl.addWidget(lbl); bl.addStretch()
         lay.addWidget(bar)
 
@@ -444,6 +444,19 @@ class StructuresWorkspace(QWidget):
         self.lbl_rec_bulk = self._metric(f, "Bulkhead Load:")
         self.lbl_rec_eye = self._metric(f, "Eye Bolt Load:")
         self.lbl_rec_peak = self._metric(f, "Peak Deployment Force:")
+        # The one number K2 cannot know: how strong the user's hardware is.
+        self.sp_rec_rating = QDoubleSpinBox()
+        self.sp_rec_rating.setRange(0, 1_000_000); self.sp_rec_rating.setDecimals(0)
+        self.sp_rec_rating.setSingleStep(100); self.sp_rec_rating.setSuffix(" N")
+        self.sp_rec_rating.setSpecialValueText("Not entered")
+        self.sp_rec_rating.setToolTip(
+            "Rated strength of the weakest part of the recovery load path: shock "
+            "cord / harness, quick links, eyebolt or U-bolt, bulkhead. Use the "
+            "maker's rated (working) load. The safety factor is this rating over "
+            "the harness tension.")
+        self.sp_rec_rating.valueChanged.connect(
+            lambda v: self.engine.update(recovery_hardware_rating=float(v)))
+        f.addRow("Hardware Rated Strength:", self.sp_rec_rating)
         self.lbl_rec_sf = self._metric(f, "Recovery Safety Factor:", big=True)
         self.lbl_rec_status = QLabel("—")
         self.lbl_rec_status.setStyleSheet("font-weight:700;font-size:15px;padding:6px;")
@@ -534,25 +547,23 @@ class StructuresWorkspace(QWidget):
         sc = QScrollArea(); sc.setWidgetResizable(True); sc.setMaximumWidth(360)
         sc.setFrameShape(QFrame.Shape.NoFrame)
         w = QWidget(); lay = QVBoxLayout(w); lay.setContentsMargins(12,14,12,14); lay.setSpacing(12)
-        t = QLabel("Results"); t.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
+        t = QLabel("Results"); t.setStyleSheet(theme.panel_title_qss())
         lay.addWidget(t)
 
         # ── Structural Safety Assessment ──
         gsc = QGroupBox("Structural Safety Assessment");        vsc = QVBoxLayout(); vsc.setSpacing(4)
-        self.lbl_score = QLabel("RUN ANALYSIS")
-        self.lbl_score.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_score.setStyleSheet("font-weight:800;font-size:16px;padding:10px;"
-                                     f"border-radius:6px;background:{theme.PANEL};color:{theme.LINE_STRONG};")
-        vsc.addWidget(self.lbl_score)
-        _struct_note = QLabel(
-            "Note: This assessment is an estimated qualitative evaluation based on "
-            "simulation outputs and predefined heuristics. It is intended for "
-            "informational and comparative purposes only and should not be used for "
-            "engineering certification, safety-critical decisions, or as a substitute "
-            "for professional structural analysis and validation.")
-        _struct_note.setWordWrap(True)
-        _struct_note.setStyleSheet(f"color:{theme.TEXT_FAINT};font-size:9px;padding:4px 2px 2px 2px;")
-        vsc.addWidget(_struct_note)
+        # A one-word verdict in the row style of the rest of the panel. This was
+        # an 800-weight centred badge with an emoji tick, over a five-line
+        # disclaimer in 9 px type; the disclaimer is now the tooltip.
+        self.lbl_score = QLabel("Not run")
+        self.lbl_score.setStyleSheet(theme.status_qss())
+        self.lbl_score.setToolTip(
+            "A qualitative estimate from simulation outputs and fixed "
+            "heuristics, for comparing designs. It is not a certification and "
+            "does not replace a structural analysis and its validation.")
+        fsc = QFormLayout(); fsc.setSpacing(6)
+        fsc.addRow("Assessment:", self.lbl_score)
+        vsc.addLayout(fsc)
         gsc.setLayout(vsc); lay.addWidget(gsc)
 
         # ── Physics Consistency Checks ──
@@ -597,7 +608,7 @@ class StructuresWorkspace(QWidget):
         self.lbl_mos = _vl(); ff.addRow("Margin of Safety:", self.lbl_mos)
         self.lbl_util = _vl(); ff.addRow("Yield Utilization:", self.lbl_util)
         self.lbl_verdict = QLabel("—")
-        self.lbl_verdict.setStyleSheet("font-weight:700;font-size:16px;padding:8px;")
+        self.lbl_verdict.setStyleSheet(theme.status_qss())
         ff.addRow("Verdict:", self.lbl_verdict)
         gf.setLayout(ff); lay.addWidget(gf)
 
@@ -653,7 +664,10 @@ class StructuresWorkspace(QWidget):
 
     # ── Material/Geometry callbacks ───────────────────────────────────────────
     def _on_mat(self, name):
-        mat = MATERIALS.get(name, MATERIALS["Aluminum 6061-T6"])
+        # get_material knows every name in the combo. A plain dict lookup
+        # with an aluminium default put aluminium's yield, modulus and density
+        # on the state for Kraft Phenolic, Plywood and ABS.
+        mat = get_material(name)
         self.engine.update(material_name=name, yield_strength=mat["yield"],
             elastic_modulus=mat["E"], material_density=mat["density"])
         self._update_mat_display(name)
@@ -675,7 +689,7 @@ class StructuresWorkspace(QWidget):
             self.lbl_q.setText(f"{q/1000:.1f} kPa  (CFD)")
 
             # Load factor: n = F_axial / (m * g)
-            mass = s.total_mass() if callable(getattr(s, 'total_mass', None)) else 5.0
+            mass = wks.vehicle_mass(s)
             if not isinstance(mass, (int, float)) or mass <= 0:
                 mass = 5.0
             f_axial = s.cfd_force_axial
@@ -703,12 +717,19 @@ class StructuresWorkspace(QWidget):
             self.lbl_q.setText(f"{q/1000:.1f} kPa")
 
             # Load factor estimate from aero force / weight
-            mass = s.total_mass() if callable(getattr(s, 'total_mass', None)) else 5.0
+            mass = wks.vehicle_mass(s)
             if not isinstance(mass, (int, float)) or mass <= 0:
                 mass = 5.0
-            cd = s.cfd_cd if getattr(s, 'cfd_converged', False) else s.cd
-            ref_area = math.pi * (s.diameter / 2)**2 if s.diameter > 0 else 0.01
-            drag_force = q * cd * ref_area
+            # Drag of this rocket at this Mach and altitude: the CFD
+            # coefficient when a run has converged, else the aero model the
+            # flight uses. It was q x state.cd x frontal area, and state.cd is
+            # 0.45 for every rocket (and was the last instant's drag
+            # coefficient once the rocket had flown).
+            if getattr(s, 'cfd_converged', False):
+                ref_area = math.pi * (s.diameter / 2)**2 if s.diameter > 0 else 0.0
+                drag_force = q * s.cfd_cd * ref_area
+            else:
+                drag_force = wks.aero_drag(s, mach, alt)
             load_g = drag_force / (mass * 9.81) if mass > 0 else 0.0
             self.lbl_lf.setText(f"{load_g:.1f} G")
         except Exception as e:
@@ -820,15 +841,61 @@ class StructuresWorkspace(QWidget):
         # Use the real peak thrust for the thrust-driven case when available.
         if condition == "Max Thrust" and use_sim and fl.max_thrust > 0:
             self.sp_force.setValue(fl.max_thrust)
+        elif condition == "Max-Q" and use_sim and fl.source == "simulation":
+            self.sp_force.setValue(fl.maxq_thrust)   # thrust at max-Q, not the peak
 
         self._update_q()
         self._refresh()
+
+    _FLIGHT_CONDITIONS = ("Max Thrust", "Max-Q", "Recovery Shock", "Thermal")
+
+    def _show_no_flight(self):
+        """Blank the stress panel: no flight, so no loads and no verdict."""
+        for lbl in (self.lbl_axial, self.lbl_hoop, self.lbl_bend, self.lbl_shear,
+                    self.lbl_therm, self.lbl_vm, self.lbl_buck, self.lbl_shell,
+                    self.lbl_sf, self.lbl_mos, self.lbl_util):
+            lbl.setText("—")
+        self.lbl_verdict.setText("No Flight")
+        self.lbl_verdict.setStyleSheet(theme.status_qss())
+        self._status.setText(
+            "Fly the rocket in the Simulation tab first: this load case takes its "
+            "loads from that flight. (Custom uses only the values typed here.)")
+        self._last_bc = None
+        self._fe_field = None
+        self._drop_flight_results()
+
+    def _drop_flight_results(self):
+        """Forget what was worked from a flight that is no longer there.
+
+        The workstation's margins come from the flight's loads. Left in
+        place after Reset, the technical report went on printing the
+        structural safety factor of a flight that no longer existed, and the
+        fin, recovery, buckling, failure-map, load-path and deflection tabs
+        kept that flight's numbers on screen until the next one landed.
+        """
+        self._wks_report = None
+        for name in ("_tab_fin", "_tab_recovery", "_tab_buckling", "_tab_failure",
+                     "_tab_loadpath", "_tab_deform"):
+            stack = getattr(self, name, None)
+            if stack is not None:
+                stack.setCurrentIndex(0)
+        score = getattr(self, "lbl_score", None)
+        if score is not None:
+            score.setText("Not run")
+            score.setStyleSheet(theme.status_qss())
 
     # ── Quick analytical refresh ─────────────────────────────────────────────
     def _refresh(self, state=None):
         s = state if state and not isinstance(state, str) else self.engine.state
         self._update_mat_display()
         condition = self.lc_combo.currentText()
+        if condition in self._FLIGHT_CONDITIONS and not wks.flight_known(s, self._get_history()):
+            # The four flight conditions take their loads from a flight. With
+            # none, this panel used to judge the 500 N default in the force
+            # box at the preset Mach and altitude and show "Safe", SF 207.92,
+            # for a rocket that had never flown.
+            self._show_no_flight()
+            return
         force = max(abs(s.net_force), abs(s.thrust), s.weight, self.sp_force.value())
         if condition == "Recovery Shock":
             # Recovery is a TENSILE harness load from the parachute opening
@@ -849,14 +916,37 @@ class StructuresWorkspace(QWidget):
 
         # Use condition-specific physics
         if condition in ("Max Thrust", "Max-Q", "Recovery Shock", "Thermal"):
-            mass = s.total_mass() if callable(getattr(s, 'total_mass', None)) else getattr(s, 'total_mass', 5.0)
+            mass = wks.vehicle_mass(s)
             arm = abs(getattr(s, "cp", 0.0) - getattr(s, "cg", 0.0))
+            extra = {}
+            fl = getattr(self, "_flight_loads", None)
+            flown = fl is not None and fl.available and fl.source == "simulation"
+            if condition == "Max-Q":
+                # Drag: the flight's own at max-Q while the boxes still hold
+                # that instant, else this rocket's aero model at the Mach and
+                # altitude typed in. It was 0.5 x q x frontal area.
+                if flown and abs(mach - fl.maxq_mach) < 5e-3 and abs(alt - fl.maxq_altitude) < 1.0:
+                    force = max(fl.maxq_thrust, self.sp_force.value())
+                    extra = dict(drag_force_N=fl.maxq_drag, q_dyn=fl.max_dynamic_pressure)
+                else:
+                    try:
+                        extra = dict(drag_force_N=wks.aero_drag(s, mach, alt))
+                    except Exception as e:
+                        logger.warning(f"Max-Q drag from the aero model failed: {e}")
+            elif condition == "Thermal":
+                # The wall's through-thickness temperature difference over
+                # the flown ascent. No flight: none known, no stress.
+                try:
+                    extra = dict(wall_delta_T=wks.thermal_profile(
+                        s, fl, self._get_history(), s.material_name).surface_minus_mean_K)
+                except Exception as e:
+                    logger.warning(f"Wall heating solve failed: {e}")
             r = compute_for_condition(
                 condition, s.diameter, s.wall_thickness, s.length, s.material_name,
                 force=force, internal_pressure=self.sp_press.value(),
                 delta_T=self.sp_dT.value(), mach=mach, altitude_m=alt,
                 vehicle_mass_kg=mass,
-                angle_of_attack_deg=aoa, moment_arm_m=arm,
+                angle_of_attack_deg=aoa, moment_arm_m=arm, **extra,
             )
         else:
             r = compute_all(force, s.diameter, s.wall_thickness, s.length, s.material_name,
@@ -876,13 +966,13 @@ class StructuresWorkspace(QWidget):
         self.lbl_mos.setText("∞" if mos > 1e6 else f"{mos:+.2f}")
         self.lbl_util.setText(f"{r['yield_utilization']*100:.1f}%")
         if sf >= 3.0:
-            self.lbl_verdict.setText("✓ SAFE"); self.lbl_verdict.setStyleSheet(f"color:{theme.OK};font-weight:700;font-size:16px;padding:8px;")
+            self.lbl_verdict.setText("Safe"); self.lbl_verdict.setStyleSheet(theme.status_qss(theme.OK))
         elif sf >= 1.5:
-            self.lbl_verdict.setText("ADEQUATE"); self.lbl_verdict.setStyleSheet(f"color:{theme.WARN};font-weight:700;font-size:16px;padding:8px;")
+            self.lbl_verdict.setText("Adequate"); self.lbl_verdict.setStyleSheet(theme.status_qss(theme.WARN))
         elif sf >= 1.0:
-            self.lbl_verdict.setText("MARGINAL"); self.lbl_verdict.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
+            self.lbl_verdict.setText("Marginal"); self.lbl_verdict.setStyleSheet(theme.status_qss(theme.WARN))
         else:
-            self.lbl_verdict.setText("✕ FAILURE"); self.lbl_verdict.setStyleSheet(f"color:{theme.ERR};font-weight:700;font-size:16px;padding:8px;")
+            self.lbl_verdict.setText("Failure"); self.lbl_verdict.setStyleSheet(theme.status_qss(theme.ERR))
 
         # Update status bar with condition name
         self._status.setText(f"Condition: {condition} — σ_vm={r['von_mises']/1e6:.1f} MPa, SF={sf:.2f}")
@@ -911,6 +1001,12 @@ class StructuresWorkspace(QWidget):
 
         # Build condition-specific LoadCase
         condition = self.lc_combo.currentText()
+        if condition in self._FLIGHT_CONDITIONS and not wks.flight_known(
+                self.engine.state, self._get_history()):
+            # Same rule as the panel: no flight, no flight-condition FE run
+            # (it would mark Structures current on the 500 N default).
+            self._show_no_flight()
+            return
         force = self.sp_force.value()
         mach = self.sp_mach.value()
         alt = self.sp_alt.value()
@@ -935,7 +1031,7 @@ class StructuresWorkspace(QWidget):
         elif condition == "Recovery Shock":
             # Estimate vehicle mass from engine state
             s = self.engine.state
-            mass = s.total_mass() if callable(getattr(s, 'total_mass', None)) else getattr(s, 'total_mass', 5.0)
+            mass = wks.vehicle_mass(s)
             if not isinstance(mass, (int, float)) or mass <= 0:
                 mass = 5.0
             lc = LoadCase.recovery(vehicle_mass_kg=mass, shock_g=15.0, daf=1.8, kt=2.5)
@@ -1001,6 +1097,7 @@ class StructuresWorkspace(QWidget):
         )
         self._thread.finished.connect(self._on_result)
         self._thread.errored.connect(self._on_error)
+        self.engine.analysis_started("structures")
         self._thread.start()
 
     def _vehicle_model(self, lc, condition):
@@ -1010,7 +1107,11 @@ class StructuresWorkspace(QWidget):
         the same harness tension the analytical panel uses."""
         s = self.engine.state
         try:
-            total = float(s.total_mass())
+            # Liftoff mass for the thrust case. total_mass() is the live mass:
+            # once the rocket had flown it was the burnt-out mass, and the
+            # peak-thrust load set balanced against a rocket 1.4 kg lighter
+            # than the one that lifts off (canonical rocket).
+            total = float(wks.vehicle_mass(s))
             burnout = float(getattr(s, "dry_mass", 0.0) + getattr(s, "motor_dry_mass", 0.0))
             # Max-Q and recovery come at / after burnout; thrust peaks near liftoff.
             lc.vehicle_mass_kg = burnout if (condition in ("Max-Q", "Recovery Shock")
@@ -1088,18 +1189,23 @@ class StructuresWorkspace(QWidget):
             self.lbl_therm.setText(f"{result.max_thermal_stress/1e6:.2f} MPa")
             sf = result.safety_factor
             self.lbl_sf.setText("∞" if sf > 1e6 else f"{sf:.2f}")
+            self.engine.analysis_done(
+                "structures",
+                "Safety factor " + ("∞" if sf > 1e6 else f"{sf:.2f}"),
+                verdict=sf >= 1.0,
+                result={"fem": result, "condition": self.lc_combo.currentText()})
             self.lbl_mos.setText(f"{result.margin_of_safety:+.2f}" if result.margin_of_safety < 1e6 else "∞")
             self.lbl_util.setText(f"{result.yield_utilization*100:.1f}%")
 
             # Update verdict
             if sf >= 3.0:
-                self.lbl_verdict.setText("✓ SAFE"); self.lbl_verdict.setStyleSheet(f"color:{theme.OK};font-weight:700;font-size:16px;padding:8px;")
+                self.lbl_verdict.setText("Safe"); self.lbl_verdict.setStyleSheet(theme.status_qss(theme.OK))
             elif sf >= 1.5:
-                self.lbl_verdict.setText("ADEQUATE"); self.lbl_verdict.setStyleSheet(f"color:{theme.WARN};font-weight:700;font-size:16px;padding:8px;")
+                self.lbl_verdict.setText("Adequate"); self.lbl_verdict.setStyleSheet(theme.status_qss(theme.WARN))
             elif sf >= 1.0:
-                self.lbl_verdict.setText("MARGINAL"); self.lbl_verdict.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 11px; font-weight: 600; letter-spacing: 1px; padding: 2px 0 8px 0;")
+                self.lbl_verdict.setText("Marginal"); self.lbl_verdict.setStyleSheet(theme.status_qss(theme.WARN))
             else:
-                self.lbl_verdict.setText("✕ FAILURE"); self.lbl_verdict.setStyleSheet(f"color:{theme.ERR};font-weight:700;font-size:16px;padding:8px;")
+                self.lbl_verdict.setText("Failure"); self.lbl_verdict.setStyleSheet(theme.status_qss(theme.ERR))
 
             # Choose plot color and label based on condition
             lc_name = getattr(result, 'load_case_name', '') or self.lc_combo.currentText()
@@ -1165,7 +1271,7 @@ class StructuresWorkspace(QWidget):
                     f"color:{theme.WARN};font-size:11px;padding:4px;font-weight:600;"
                 )
             else:
-                self.lbl_resonance_status.setText("✓ No resonance concerns")
+                self.lbl_resonance_status.setText("No resonance concerns")
                 self.lbl_resonance_status.setStyleSheet(
                     f"color:{theme.OK};font-size:11px;padding:4px;font-weight:600;"
                 )
@@ -1253,7 +1359,7 @@ class StructuresWorkspace(QWidget):
                 limit_txt += " EXCEEDED"
                 self.lbl_tlimit.setStyleSheet(theme.value_qss(theme.ERR))
             else:
-                limit_txt += " ✓ OK"
+                limit_txt += " (OK)"
                 self.lbl_tlimit.setStyleSheet(theme.value_qss(theme.OK))
             self.lbl_tlimit.setText(limit_txt)
             if result.station_temps and hasattr(self._temp_plot, 'update_plot'):
@@ -1331,6 +1437,7 @@ class StructuresWorkspace(QWidget):
             self._mode_info_bar.setText(" │ ".join(parts))
 
     def _on_error(self, msg):
+        self.engine.analysis_abandoned("structures")
         self._progress.setVisible(False)
         self.btn_static.setEnabled(True); self.btn_modal.setEnabled(True); self.btn_thermal.setEnabled(True)
         self._status.setText(f"Error: {msg}")
@@ -1357,9 +1464,8 @@ class StructuresWorkspace(QWidget):
         from ui.workspace_reset import clear_visuals
         clear_visuals(self)        # clears stress/temp/fin plots + 3D viewers
         try:
-            self.lbl_score.setText("RUN ANALYSIS")
-            self.lbl_score.setStyleSheet("font-weight:800;font-size:16px;padding:10px;"
-                                         f"border-radius:6px;background:{theme.PANEL};color:{theme.LINE_STRONG};")
+            self.lbl_score.setText("Not run")
+            self.lbl_score.setStyleSheet(theme.status_qss())
         except Exception:
             pass
         for lbl in ("_defl_summary",):
@@ -1377,10 +1483,13 @@ class StructuresWorkspace(QWidget):
     def _refresh_flight_indicator(self):
         """Update the flight-load import indicator from sim history/state."""
         hist = self._get_history()
-        fl = wks.FlightLoads.from_history(hist, self.engine.state)
+        # With the flight's summary, so the load factor shown is the sensed
+        # peak the Results tab gives (see FlightLoads.from_history).
+        summary = getattr(getattr(self.window(), "sim_engine", None), "summary", None)
+        fl = wks.FlightLoads.from_history(hist, self.engine.state, summary=summary)
         self._flight_loads = fl
         if fl.available and fl.source == "simulation":
-            self.lbl_flight_src.setText("✓ Using Last Simulation")
+            self.lbl_flight_src.setText("Using last simulation")
             self.lbl_flight_src.setStyleSheet(f"color:{theme.OK};font-size:11px;font-weight:700;")
         elif fl.available:
             self.lbl_flight_src.setText("◐ Using State Maxima (no sim)")
@@ -1405,7 +1514,10 @@ class StructuresWorkspace(QWidget):
         if fl.maxq_altitude > 0:
             self.sp_alt.blockSignals(True); self.sp_alt.setValue(fl.maxq_altitude)
             self.sp_alt.blockSignals(False)
-        if fl.max_thrust > 0:
+        # The import selects Max-Q, so the force is the thrust at max-Q.
+        if fl.source == "simulation":
+            self.sp_force.setValue(fl.maxq_thrust)
+        elif fl.max_thrust > 0:
             self.sp_force.setValue(fl.max_thrust)
         self.lc_combo.setCurrentText("Max-Q")
         self._update_q()
@@ -1454,6 +1566,15 @@ class StructuresWorkspace(QWidget):
                 return
             assembly = self._get_assembly()
             hist = self._get_history()
+            if not wks.flight_known(s, hist):
+                # Fin loads, deflection, heating and opening shocks all come
+                # from the flight. With none, these tabs were filled in for a
+                # stand-in flight (Mach 0.6 at 3000 m, canopies at 30 m/s).
+                self._status.setText(
+                    "Fly the rocket in the Simulation tab first: the fin, buckling, "
+                    "thermal and recovery results use that flight's loads.")
+                self._drop_flight_results()
+                return
             mat = self.mat_combo.currentText()
             cond = self.lc_combo.currentText()
             cond = cond if cond in ("Max Thrust", "Max-Q", "Recovery Shock", "Thermal") else "Max-Q"
@@ -1469,15 +1590,13 @@ class StructuresWorkspace(QWidget):
         # ── Safety assessment (qualitative — no numeric score shown) ──
         sc = rep.score
         if sc.score >= 75:
-            verdict = "✅ Good"
+            verdict = "Good"
         elif sc.score >= 50:
-            verdict = "⚠️ Marginal"
+            verdict = "Marginal"
         else:
-            verdict = "❌ Poor"
+            verdict = "Poor"
         self.lbl_score.setText(verdict)
-        self.lbl_score.setStyleSheet(
-            f"font-weight:800;font-size:16px;padding:10px;border-radius:6px;"
-            f"background:#16161a;color:{sc.color};border:1px solid {sc.color}66;")
+        self.lbl_score.setStyleSheet(theme.status_qss(sc.color))
 
         self._populate_fin(rep.fin)
         self._populate_recovery(rep.recovery)
@@ -1496,7 +1615,7 @@ class StructuresWorkspace(QWidget):
         if not warnings:
             self.lbl_warnings.setText("—")
             return
-        icon = {"error": "✕", "warn": "!", "info": "✓"}
+        icon = {"error": "Error:", "warn": "Warning:", "info": "OK:"}
         lines = []
         for w in warnings:
             c = severity_color(w.severity)
@@ -1515,7 +1634,7 @@ class StructuresWorkspace(QWidget):
             self.lbl_modal_f1.setProperty("value", True)
             # modal_estimate is a FREE-FREE beam (flight); the CalculiX modal
             # run is clamped at the aft end, so the two f1 differ by design.
-            self.lbl_modal_warn.setText(f"✓ {me.total_mass_kg:.2f} kg, free-free beam estimate")
+            self.lbl_modal_warn.setText(f"{me.total_mass_kg:.2f} kg, free-free beam estimate")
             self.lbl_modal_warn.setStyleSheet(f"color:{theme.TEXT_FAINT};font-size:10px;padding:2px;")
 
     def _populate_thermal_tab(self, tp):
@@ -1563,8 +1682,16 @@ class StructuresWorkspace(QWidget):
         self.lbl_rec_bulk.setText(f"{rl.bulkhead_load_N:.0f} N")
         self.lbl_rec_eye.setText(f"{rl.eyebolt_load_N:.0f} N")
         self.lbl_rec_peak.setText(f"{rl.peak_force_N:.0f} N")
+        # No rating for the harness, eyebolt or bulkhead is held anywhere, so
+        # there is no safety factor to show (None). A number here used to be
+        # the load against an assumed 5300 N eyebolt.
         sf = rl.safety_factor
-        self.lbl_rec_sf.setText("∞" if sf > 1e6 else f"{sf:.2f}")
+        self.lbl_rec_sf.setText("Enter rating" if sf is None else
+                                "∞" if sf > 1e6 else f"{sf:.2f}")
+        # Shown from the state, so an opened project displays its rating.
+        self.sp_rec_rating.blockSignals(True)
+        self.sp_rec_rating.setValue(getattr(rl, "rating_N", 0.0) or 0.0)
+        self.sp_rec_rating.blockSignals(False)
         self.lbl_rec_sf.setStyleSheet(theme.value_qss(rl.status_color, 18))
         self.lbl_rec_status.setText(rl.status)
         self.lbl_rec_status.setStyleSheet(f"font-weight:700;font-size:15px;padding:6px;color:{rl.status_color};")
@@ -1629,9 +1756,12 @@ class StructuresWorkspace(QWidget):
             self._fail_grid.addWidget(b, i // 2, i % 2)
             self._fail_buttons[comp.name] = b
         if fm.weakest:
+            gaps = ", ".join(getattr(fm, "not_modelled", []))
             self._fail_detail.setText(
-                f"<b>Weakest component:</b> {fm.weakest.name} (SF {fm.weakest.margin:.2f}, {fm.weakest.status})"
-                f"<br><span style='color:#8a8a92'>Click any component for detail.</span>")
+                f"<b>Weakest analysed component:</b> {fm.weakest.name} (SF {fm.weakest.margin:.2f}, {fm.weakest.status})"
+                f"<br><span style='color:#8a8a92'>Click a component for detail."
+                + (f"<br>Not modelled, no safety factor: {gaps}." if gaps else "")
+                + "</span>")
         self._tab_failure.setCurrentIndex(1)
 
     def _on_fail_click(self, comp):
@@ -1641,11 +1771,20 @@ class StructuresWorkspace(QWidget):
             f"Governing check: {comp.detail}")
 
     def _populate_loadpath(self, lp):
-        if not hasattr(self._loadpath_plot, "ax") or not lp.stations:
+        if not hasattr(self._loadpath_plot, "ax"):
             return
         p = self._loadpath_plot
-        p.ax.clear(); p._style_axis("Load Path — Force Flow", "", "")
+        p.ax.clear(); p._style_axis("Load Path: Axial Force at Each Joint, Peak Thrust", "", "")
         ax = p.ax
+        if not lp.stations:
+            # Nothing to draw without the design's joints and masses. The old
+            # chart stayed on screen with fixed fractions of the thrust.
+            ax.text(0.5, 0.5, "Needs a rocket in the Design tab and a motor",
+                    ha="center", va="center", color=theme.TEXT_DIM,
+                    fontsize=10, transform=ax.transAxes)
+            ax.set_yticks([]); ax.set_xticks([])
+            p.canvas.draw()
+            return
         n = len(lp.stations)
         peak = lp.peak_force_N or 1.0
         for i, st in enumerate(lp.stations):

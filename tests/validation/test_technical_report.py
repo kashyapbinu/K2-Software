@@ -56,6 +56,50 @@ def test_what_was_not_run_says_so():
     assert rep.section("Assumptions and model limits").notes
 
 
+@pytest.mark.sim
+def test_a_result_that_is_out_of_date_is_marked_in_its_section(flight):
+    """The Readiness board knew a result belonged to an earlier rocket; the
+    PDF printed it with nothing to say so."""
+    state, s, _ = flight
+    rep = build_content(state, s, rule_results=[], margins={
+        "flutter_speed": 400.0, "structural_sf": 3.1},
+        out_of_date={"flight": "geometry changed", "flutter": "material changed"})
+    for title in ("Flight", "Recovery"):
+        w = rep.section(title).warnings
+        assert w and "OUT OF DATE" in w[0] and "geometry changed" in w[0], title
+    marg = rep.section("Structural and flutter margins").warnings
+    assert any("flutter" in w.lower() and "material changed" in w for w in marg), marg
+    # The structural margin is worked from the flight's loads.
+    assert any("structur" in w.lower() and "flight" in w.lower() for w in marg), marg
+    assert not rep.section("Landing dispersion (Monte Carlo)").warnings
+    assert not rep.section("Vehicle").warnings
+    assert len(rep.warnings) == 4
+
+    current = build_content(state, s, margins={"flutter_speed": 400.0})
+    assert current.warnings == []
+
+
+def test_a_marked_report_still_renders(tmp_path):
+    rep = build_content(canonical_state(), None,
+                        margins={"flutter_speed": 400.0},
+                        out_of_date={"flutter": "geometry changed"})
+    out = tmp_path / "r.pdf"
+    render_pdf(rep, str(out))
+    assert out.read_bytes()[:4] == b"%PDF"
+
+
+def test_a_motor_with_no_rated_peak_says_the_peak_is_assumed():
+    """The thrust curve of a motor known only by its catalogue numbers takes
+    1.4 x the average as its peak when none is given
+    (staging.trapezoid_thrust_curve). The report printed "0 N"."""
+    s = canonical_state()
+    s.custom_thrust_curve = []
+    s.motor_max_thrust = 0.0
+    rep = build_content(s, None)
+    peak = rep.value("Motor", "Peak thrust")
+    assert "not given" in peak and "1.4" in peak, peak
+
+
 def test_vehicle_and_launch_sections_read_the_state():
     s = canonical_state()
     s.launch_site_name, s.launch_altitude, s.launch_azimuth = "Pad 2", 1401.0, 45.0
@@ -93,9 +137,16 @@ _UI = textwrap.dedent("""
     res.refresh_plots()
     inp = res.report_inputs()
     assert inp["summary"] is sim.summary and "dispersion" not in inp
+    assert inp["out_of_date"] == {{}}, inp["out_of_date"]
     path = os.path.join(tempfile.mkdtemp(), "r.pdf")
     res._on_report(path)
     assert open(path, "rb").read(4) == b"%PDF"
+
+    # A fin change after the flight: the report is told the flight is stale.
+    eng.update(fin_height=eng.state.fin_height + 0.01)
+    stale = res.report_inputs()["out_of_date"]
+    assert "geometry" in stale.get("flight", ""), stale
+    eng.update(fin_height=eng.state.fin_height - 0.01)
 
     st.set("display/units", "imperial")
     res.refresh_plots()

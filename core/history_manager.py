@@ -29,6 +29,11 @@ HISTORY_FIELDS = [
     "axial_stress", "hoop_stress", "von_mises_stress", "shear_stress", "thermal_stress",
     "safety_factor", "margin_of_safety", "wall_temperature",
     "flutter_margin", "propellant_mass",
+    # What the replay draws on the rocket (core.flight_replay). World axes,
+    # x/y horizontal and z up. aoa: total angle between the body axis and the
+    # relative wind (rad). lift_*: aerodynamic normal force (N). wind_*: the
+    # air's own velocity at the rocket's height (m/s).
+    "aoa", "lift_x", "lift_y", "lift_z", "wind_x", "wind_y",
 ]
 
 
