@@ -10,7 +10,8 @@ A Windows desktop app (PyQt6) for designing and analysing high-power and
 experimental rockets: design tree, motors, 6DOF flight, Monte Carlo,
 optimisation, CFD (SU2), FEM (CalculiX), flutter, a 3D mission view and an AI
 assistant. Shipped version: **v0.2.0** (2026-10-04), installer built by GitHub
-Actions and delivered through the in-app updater.
+Actions and delivered through the in-app updater. **v1.0.0** is bumped and on
+`main`, not yet tagged (see section 5).
 
 **Who it is for:** university competition teams (Spaceport America Cup / IREC,
 EuRoC, Launch Canada and similar) first, small launch startups second. Hobby
@@ -54,9 +55,12 @@ Optimization tab: "DOE && Surfaces", "Sensitivity", "Trade Study".) Dead: `ui/wo
 
 ```
 python main.py                                  # the app
-python -m pytest -m "not slow" -q               # fast suite, ~2.5 min, 435 tests
-python -m pytest -m slow                        # SU2 / CalculiX / OpenRocket, tens of minutes
+python -m pytest -m "not slow" -q               # fast suite, ~8 min, 881 tests
+python -m pytest -m slow -rA                    # SU2 / CalculiX / OpenRocket, 16 tests, ~2 h
 ```
+
+Do not pipe the slow suite through `tail`: the exit code is lost and a
+failure shows only as `AssertionE...`. Write it to a file instead.
 
 - Widget tests need a GUI `QApplication`, and the headless sim tests leave a
   bare `QCoreApplication` in the pytest process. So widget tests run their body
@@ -67,9 +71,8 @@ python -m pytest -m slow                        # SU2 / CalculiX / OpenRocket, t
 - To probe the flight sim with odd inputs, run each case in its own subprocess
   with a timeout. A hang otherwise stalls the whole run with nothing printed.
 - CI: `.github/workflows/build-windows.yml` builds and publishes on a `v*` tag.
-  `.github/workflows/tests.yml` runs the fast suite on push and PR; it was added
-  2026-11-12 and **has not yet run on a real runner**. It may need an OpenGL
-  fix there. It does not gate the release.
+  `.github/workflows/tests.yml` runs the fast suite on push and PR (green on
+  GitHub since 2026-11-13, about 8 min). It does not gate the release.
 
 ## 4. Rules that past bugs taught
 
@@ -170,8 +173,26 @@ Working habits for this repo:
 
 ## 5. Current position
 
-Branch `fix/post-0.1.10-audit`, local only (nothing pushed since `v0.2.0` at
-`150cf24`). Version not bumped.
+**v1.0.0 release in progress (2026-11-16).** Everything below is committed
+and pushed: `main` and `fix/post-0.1.10-audit` both at `48430f5`
+(`chore(release): bump version to 1.0.0`; `core/version.py` and
+`installer.iss` say 1.0.0). The user chose 1.0.0 over the planned 0.3.0.
+
+- Fast suite: 881 passed locally; `tests.yml` green on GitHub for both
+  branches.
+- Slow suite (1 h 57 min): 14 passed, 1 skipped, 1 failed —
+  `test_onera_m6_vs_experiment`. Believed pre-existing: the 2026-09-01
+  report (`validation/report/benchmarks.json`, unchanged since v0.2.0)
+  already fails it on the y/b = 0.99 sectional c_n (+22 % against a 15 %
+  tolerance; open sectional-load deficit, not diagnosed), and nothing in
+  this release touches sectional Cp. NOT confirmed which assertion failed
+  this time — rerun it alone with `-rA` to check.
+- Next, with the user (planned 2026-11-17): decide on the M6 failure (rerun
+  to confirm, or ship it as a known issue in the release notes), make sure
+  the `solver-binaries` release still holds SU2_CFD.exe / ccx.exe /
+  glut64.dll, then `git tag v1.0.0 && git push origin v1.0.0` from `main`
+  (CI builds the installer and publishes the Release). Website and README
+  still say 0.2.0.
 
 **Done** (each with tests; see `git log`):
 
@@ -206,8 +227,8 @@ Branch `fix/post-0.1.10-audit`, local only (nothing pushed since `v0.2.0` at
 - **A8** `ui/units.py` + Settings "Display units"; applied to Results tiles,
   Simulation live readouts. Input spin boxes are still SI.
 
-**2.0 work, built 2026-11-14, uncommitted** (tests: `test_readiness.py`,
-`test_flight_replay.py`, `test_load_overlay.py`; fast suite 806 passed):
+**2.0 work, built 2026-11-14, committed in `2bb5bd0`** (tests:
+`test_readiness.py`, `test_flight_replay.py`, `test_load_overlay.py`):
 
 - **Readiness tab** (first tab; the app still opens on Design): Flight, Monte
   Carlo, CFD, Structures, Flutter, Rules, Report as Not Run / Running /
@@ -223,7 +244,7 @@ Branch `fix/post-0.1.10-audit`, local only (nothing pushed since `v0.2.0` at
   Mach it was solved at.
 - Not done: headlines on the board are SI only; the board does not cover the
   optimiser.
-- Audit 2026-11-15/16 (uncommitted; `test_flight_lifecycle.py`,
+- Audit 2026-11-15/16 (in `2bb5bd0`; `test_flight_lifecycle.py`,
   `test_pad_values.py`, additions to `test_readiness.py`,
   `test_technical_report.py`, `test_structures_audit_2026_11.py`,
   `test_ai_assistant.py`): the flight is dropped with its rocket
@@ -240,15 +261,13 @@ Branch `fix/post-0.1.10-audit`, local only (nothing pushed since `v0.2.0` at
   on the altimeter.
 
 **Release A leftovers:**
-- `tests.yml` has never run on GitHub (needs a push, which the user has to
-  approve).
 - Rule presets for real competitions need the organisers' current rulebooks
   from the user; until then only the template ships.
 - Display units do not yet reach input spin boxes, Monte Carlo statistics,
   the rules table or the PDF (all SI).
 - Exit check in place: `test_release_a_compat.py` (a v0.2.0-style project
-  flies within 0.5 % of 2610.4 m). Slow suite, version bump, website/README
-  and the tag are still to do — with the user.
+  flies within 0.5 % of 2610.4 m). Version bumped, slow suite run (see the
+  M6 note above); website/README and the tag are still to do — with the user.
 
 **Known open, not started:**
 
